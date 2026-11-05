@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Flux Backup's root helper. The desktop app starts it with
+  `pkexec /usr/libexec/flux-backup/flux-helper` to manage system backups
+  (profiles in /etc/flux-backup). The helper only answers the calls of its own
+  typed protocol; it never runs commands it is sent.
+
+  Install to /usr/share/polkit-1/actions/. Administrators can change who may
+  use it with a rules file in /etc/polkit-1/rules.d/.
+-->
+<policyconfig>
+  <vendor>Flux Backup</vendor>
+  <vendor_url>https://github.com/neuralpunk/flux-backup</vendor_url>
+  <icon_name>flux-backup</icon_name>
+
+  <action id="io.github.neuralpunk.FluxBackup.helper">
+    <description>Manage system backups</description>
+    <message>Authentication is required to manage backups of the whole computer</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <!-- Asked once; the helper itself locks again after 15 idle minutes. -->
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/flux-backup/flux-helper</annotate>
+  </action>
+</policyconfig>

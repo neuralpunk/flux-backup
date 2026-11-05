@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>User guide · Flux Backup</title>
+  <meta name="description" content="How to use Flux Backup: your first backup, Mirror and Vault, drives and SSH servers, schedules, restoring, retention, Vault passwords, system backups and troubleshooting.">
+  <meta name="theme-color" content="#0e0f11" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eef0f3" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>
+    try { var t = localStorage.getItem("flux-site-theme"); if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t); } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap" style="max-width: 1240px">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Flux Backup</span></a>
+      <nav class="nav" aria-label="Main">
+        <a class="nav-optional" href="index.html#features">Features</a>
+        <a class="nav-optional" href="index.html#install">Install</a>
+        <a href="guide.html" aria-current="page">User guide</a>
+        <a href="https://github.com/neuralpunk/flux-backup">GitHub</a>
+      </nav>
+      <div class="theme-switch" role="group" aria-label="Colour theme">
+        <button type="button" data-theme="dark" aria-pressed="false">Dark</button>
+        <button type="button" data-theme="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme="auto" aria-pressed="true">Auto</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="guide-layout">
+    <aside class="toc" aria-label="Contents">
+      <p class="toc-title">Contents</p>
+      <ol>
+        <li><a href="#installing">Installing</a></li>
+        <li><a href="#ideas-in-two-minutes">Ideas in two minutes</a></li>
+        <li><a href="#your-first-backup">Your first backup</a></li>
+        <li><a href="#mirror-or-vault">Mirror or Vault?</a></li>
+        <li><a href="#where-backups-go">Where backups go</a></li>
+        <li><a href="#choosing-what-to-back-up">Choosing what to back up</a></li>
+        <li><a href="#automatic-backups">Automatic backups</a></li>
+        <li><a href="#getting-files-back">Getting files back</a></li>
+        <li><a href="#what-to-keep">What to keep</a></li>
+        <li><a href="#vault-passwords">Vault passwords</a></li>
+        <li><a href="#checking-your-backups">Checking your backups</a></li>
+        <li><a href="#system-backups">System backups</a></li>
+        <li><a href="#hooks">Hooks</a></li>
+        <li><a href="#keeping-an-eye-on-things">Keeping an eye on things</a></li>
+        <li><a href="#profile-reference">Profile reference</a></li>
+        <li><a href="#environment-variables">Environment variables</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+      </ol>
+    </aside>
+
+    <main id="main" class="guide">
+      <div class="guide-inner">
+
+        <details class="toc-mobile">
+          <summary>Contents</summary>
+          <ol>
+            <li><a href="#installing">Installing</a></li>
+            <li><a href="#ideas-in-two-minutes">Ideas in two minutes</a></li>
+            <li><a href="#your-first-backup">Your first backup</a></li>
+            <li><a href="#mirror-or-vault">Mirror or Vault?</a></li>
+            <li><a href="#where-backups-go">Where backups go</a></li>
+            <li><a href="#choosing-what-to-back-up">Choosing what to back up</a></li>
+            <li><a href="#automatic-backups">Automatic backups</a></li>
+            <li><a href="#getting-files-back">Getting files back</a></li>
+            <li><a href="#what-to-keep">What to keep</a></li>
+            <li><a href="#vault-passwords">Vault passwords</a></li>
+            <li><a href="#checking-your-backups">Checking your backups</a></li>
+            <li><a href="#system-backups">System backups</a></li>
+            <li><a href="#hooks">Hooks</a></li>
+            <li><a href="#keeping-an-eye-on-things">Keeping an eye on things</a></li>
+            <li><a href="#profile-reference">Profile reference</a></li>
+            <li><a href="#environment-variables">Environment variables</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+          </ol>
+        </details>
+
+        <header class="guide-intro">
+          <h1>User guide</h1>
+          <p class="lede">
+            Flux Backup keeps <strong>snapshots</strong> of your folders: complete pictures of how
+            they were at a moment, on an external drive or an SSH server. It runs on a schedule,
+            when a drive is plugged in, or when you ask. You can use the desktop app, the
+            <code>flux</code> command, or both; they share the same profiles and see each other's
+            backups.
+          </p>
+          <div class="tags">
+            <span class="tag">Flux Backup 0.1</span>
+            <span class="tag">Desktop app and CLI</span>
+          </div>
+        </header>
+
+        <!-- ================================================================ -->
+        <section id="installing">
+          <h2>Installing <a class="anchor" href="#installing" aria-label="Link to this section">#</a></h2>
+          <p>
+            <strong>Packages.</strong> Releases provide <code>.deb</code> (Debian, Ubuntu),
+            <code>.rpm</code> (Fedora, openSUSE) and an AppImage. The deb and rpm packages install
+            everything: the app (<code>flux-backup</code>), the command-line tool (<code>flux</code>),
+            the system-backup helper and its polkit policy, man pages and shell completions.
+          </p>
+          <div class="callout">
+            <p>
+              The AppImage contains the app and <code>flux</code>, but not the system-backup helper:
+              root can't run programs from inside an AppImage. Install a package if you need
+              <a href="#system-backups">system backups</a>.
+            </p>
+          </div>
+          <p>
+            <strong>From source.</strong> You need Rust 1.91 or newer. The app also needs Node.js 20+
+            and WebKitGTK 4.1 (Fedora: <code>webkit2gtk4.1-devel libsoup3-devel</code>;
+            Debian/Ubuntu: <code>libwebkit2gtk-4.1-dev libsoup-3.0-dev</code>).
+          </p>
+          <div class="code">
+<pre><code data-lang="sh">packaging/prepare-dist.sh                  # flux, flux-helper, man pages, completions
+(cd app &amp;&amp; npm install &amp;&amp; npm run tauri build -- --no-bundle)   # the desktop app (optional)
+sudo PREFIX=/usr packaging/install.sh
+</code></pre>
+          </div>
+          <p>
+            At run time Flux uses <code>ssh</code> for SSH targets, <code>rsync</code> on the
+            <em>server</em> for Mirror over SSH, <code>fusermount3</code> for <code>flux mount</code>,
+            <code>secret-tool</code> for the desktop keyring, and <code>pkexec</code> for system
+            backups. Each is only needed for the feature that uses it.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="ideas-in-two-minutes">
+          <h2>Ideas in two minutes <a class="anchor" href="#ideas-in-two-minutes" aria-label="Link to this section">#</a></h2>
+          <dl class="ideas">
+            <div class="card">
+              <dt>Profile</dt>
+              <dd>Says what to back up, where to, how, and when. You can have as many as you like (say, “Home folder” daily to a USB drive, and “Documents” hourly to a NAS).</dd>
+            </div>
+            <div class="card">
+              <dt>Snapshot</dt>
+              <dd>One backup run. Every snapshot is complete: you never need an older one to restore from a newer one. Unchanged files cost almost nothing.</dd>
+            </div>
+            <div class="card">
+              <dt>Engine</dt>
+              <dd>Decides how snapshots are stored: <strong>Mirror</strong> (plain folders) or <strong>Vault</strong> (deduplicated, compressed, encrypted).</dd>
+            </div>
+            <div class="card">
+              <dt>Retention</dt>
+              <dd>Rules that decide which old snapshots are removed, like “keep 7 daily, 4 weekly, 12 monthly”. Named and pinned snapshots are kept.</dd>
+            </div>
+          </dl>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="your-first-backup">
+          <h2>Your first backup <a class="anchor" href="#your-first-backup" aria-label="Link to this section">#</a></h2>
+          <div class="ways">
+            <div class="card">
+              <span class="label">In the app</span>
+              <p>
+                Click <strong>New profile</strong> in the sidebar. Answer three questions: what to
+                back up (your home folder by default), where to keep it (a connected drive, a folder
+                or an SSH server), and when. Decide whether to encrypt, then click
+                <strong>Create backup</strong> and <strong>Back up now</strong>.
+              </p>
+            </div>
+            <div class="card">
+              <span class="label">In a terminal</span>
+              <div class="code">
+<pre><code data-lang="sh">flux profile create home --target /run/media/me/Backup --source ~
+flux backup home
+flux snapshots home
+</code></pre>
+              </div>
+            </div>
+          </div>
+          <p>
+            Everything else (exclusions, retention, hooks…) is under <strong>Advanced options</strong>,
+            and the defaults are sensible. The first backup copies everything. Later ones only copy
+            what changed, and take seconds.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="mirror-or-vault">
+          <h2>Mirror or Vault? <a class="anchor" href="#mirror-or-vault" aria-label="Link to this section">#</a></h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col"></th><th scope="col">Mirror</th><th scope="col">Vault</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Stored as</th><td>plain folders, one per snapshot</td><td>packs of chunks</td></tr>
+                <tr><th scope="row">Open without Flux</th><td>yes, with any file manager</td><td>no (use Flux, or <code>flux mount</code>)</td></tr>
+                <tr><th scope="row">Unchanged files</th><td>hard links (no extra space)</td><td>stored once across <em>all</em> snapshots, files and computers</td></tr>
+                <tr><th scope="row">Renamed or moved files</th><td>copied again</td><td>not stored again</td></tr>
+                <tr><th scope="row">Compression</th><td>no</td><td>zstd</td></tr>
+                <tr><th scope="row">Encryption</th><td>use an encrypted drive (LUKS)</td><td>built in (XChaCha20-Poly1305, Argon2id)</td></tr>
+                <tr><th scope="row">SSH servers need</th><td><code>rsync</code></td><td>only SFTP</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Pick <strong>Mirror</strong> when you want to reach your files in an emergency with
+            nothing but a file manager. Pick <strong>Vault</strong> for untrusted places (a friend's
+            server, a drive that might be lost), for many similar machines sharing one target, or to
+            save space.
+          </p>
+          <div class="callout warn">
+            <p>The choice is per profile and can't be changed later; make a new profile instead.</p>
+          </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="where-backups-go">
+          <h2>Where backups go <a class="anchor" href="#where-backups-go" aria-label="Link to this section">#</a></h2>
+
+          <h3 id="an-external-drive">An external drive</h3>
+          <p>
+            When you pick a drive in the app (or create a profile pointing at a mounted drive), Flux
+            remembers the drive's <strong>filesystem UUID</strong>. If that drive isn't connected,
+            Flux refuses to write into the empty mount point, so it never fills your system disk by
+            mistake.
+          </p>
+          <p>Backups go into a <code>flux-backup/</code> folder on the drive (Mirror) or <code>flux-vault/</code> (Vault).</p>
+
+          <h3 id="an-ssh-server">An SSH server</h3>
+          <div class="code">
+<pre><code data-lang="sh">flux profile create docs --target me@nas:/srv/backup --source ~/Documents --engine vault
+flux ssh test docs          # can we log in, write, and (for Mirror) run rsync?
+</code></pre>
+          </div>
+          <p>
+            Flux uses your system's <code>ssh</code>, so <code>~/.ssh/config</code>, agents and
+            hardware keys all work. Scheduled backups can't type passwords or accept new host keys.
+            Set up a key once, and point the profile at it with
+            <code>target.identity_file = "~/.ssh/flux_backup_ed25519"</code> (or in the app's
+            <em>Where to keep it</em> section, under <strong>Advanced options</strong>):
+          </p>
+          <div class="code">
+<pre><code data-lang="sh">flux ssh keygen             # creates ~/.ssh/flux_backup_ed25519 (no passphrase, for timers)
+flux ssh copy-id docs       # installs it on the profile's server (asks for your password once)
+</code></pre>
+          </div>
+          <p>
+            Mirror over SSH needs <code>rsync</code> on the server and keeps hard-linked snapshots
+            there. Vault over SSH only needs SFTP; the server never sees your data unencrypted.
+            <code>target.bandwidth_limit</code> (e.g. <code>"5MB"</code>) caps the upload rate.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="choosing-what-to-back-up">
+          <h2>Choosing what to back up <a class="anchor" href="#choosing-what-to-back-up" aria-label="Link to this section">#</a></h2>
+          <p>
+            <code>sources.paths</code> lists files and folders. Exclusions use gitignore syntax,
+            matched against absolute paths:
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Pattern</th><th scope="col">Matches</th></tr></thead>
+              <tbody>
+                <tr><td><code>*.tmp</code></td><td>any file ending in <code>.tmp</code>, anywhere</td></tr>
+                <tr><td><code>node_modules/</code></td><td>every folder named <code>node_modules</code></td></tr>
+                <tr><td><code>~/Videos</code></td><td>that folder only</td></tr>
+                <tr><td><code>**/target/debug/</code></td><td><code>target/debug</code> at any depth</td></tr>
+                <tr><td><code>!keep.tmp</code></td><td>re-includes something an earlier pattern excluded</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Also available:</p>
+          <ul>
+            <li>skip folders with a <code>CACHEDIR.TAG</code> (on by default);</li>
+            <li>skip folders that contain a marker file (<code>exclude_if_present = [".nobackup"]</code>);</li>
+            <li>skip big files (<code>exclude_larger_than = "4GB"</code>);</li>
+            <li>stay on one filesystem (<code>one_file_system</code>).</li>
+          </ul>
+          <p>
+            In the app, <strong>Advanced options</strong> under <em>What to back up</em> suggests
+            common exclusions (caches, trash, build output) with how much space each takes in your
+            sources.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="automatic-backups">
+          <h2>Automatic backups <a class="anchor" href="#automatic-backups" aria-label="Link to this section">#</a></h2>
+          <p>
+            Schedules are systemd timers, so backups run even when the app is closed. The timer is
+            created when you save a profile with a schedule (or with
+            <code>flux schedule install &lt;id&gt;</code>).
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Setting</th><th scope="col">Example</th><th scope="col">Meaning</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><code>trigger = "calendar"</code></td>
+                  <td><code>on_calendar = "daily"</code>, <code>"Mon..Fri 18:00"</code>, <code>"*-*-* 03:30"</code></td>
+                  <td>at those times; with <code>catch_up</code>, a time missed while the computer was off runs at the next start</td>
+                </tr>
+                <tr>
+                  <td><code>trigger = "interval"</code></td>
+                  <td><code>every = "4h"</code></td>
+                  <td>when the last successful backup is older than that</td>
+                </tr>
+                <tr>
+                  <td><code>on_connect = true</code></td>
+                  <td></td>
+                  <td>also when the profile's drive is plugged in</td>
+                </tr>
+                <tr>
+                  <td><code>skip_on_battery = true</code></td>
+                  <td></td>
+                  <td>scheduled runs wait for mains power</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code">
+<pre><code data-lang="sh">flux schedule status        # every profile's timer and next run
+flux schedule sync          # make timers match all profiles
+flux schedule remove home
+</code></pre>
+          </div>
+          <p>
+            Scheduled backups run at low CPU and I/O priority (<code>options.nice</code>,
+            <code>options.io_priority</code>), keep the computer from suspending while they run, and
+            notify you if something went wrong.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="getting-files-back">
+          <h2>Getting files back <a class="anchor" href="#getting-files-back" aria-label="Link to this section">#</a></h2>
+
+          <h3 id="in-the-app">In the app</h3>
+          <p>
+            Open <strong>Snapshots</strong>, pick a snapshot from the list, browse to what you need,
+            select it, and <strong>Restore</strong>. You can restore:
+          </p>
+          <ul>
+            <li><strong>into another folder</strong>: the safest choice; nothing on your computer changes;</li>
+            <li><strong>back to where it was</strong>: identical files are skipped. Different files are kept as <code>name.flux-&lt;snapshot&gt;</code> unless you choose to replace them.</li>
+          </ul>
+          <p>
+            <strong>What changed</strong> shows the differences from the previous snapshot; the ⋯ menu
+            also compares with the files on disk now.
+          </p>
+
+          <h3 id="in-a-terminal">In a terminal</h3>
+          <div class="code">
+<pre><code data-lang="sh">flux ls home                                   # the newest snapshot's top level
+flux ls home ~/Documents --snapshot 2026-11-01  # a folder in the snapshot of that day
+flux find home '*.odt'                         # search all snapshots
+flux history home ~/notes.md                   # every version of one file
+flux diff home --live                          # what changed since the newest snapshot
+flux restore home ~/Documents/report.odt --to ~/Restored
+flux restore home ~/Documents                   # back in place (asks first)
+</code></pre>
+          </div>
+          <p>
+            Snapshots are chosen by id, by a unique start of an id, by name, or as
+            <code>latest</code>. Mirror ids are start times (<code>2026-11-01_03-00-00</code>), so
+            <code>2026-11-01</code> picks that day's snapshot when there is one.
+          </p>
+
+          <h3 id="as-folders-flux-mount">As folders: <code>flux mount</code></h3>
+          <div class="code">
+<pre><code data-lang="sh">mkdir ~/snapshots
+flux mount home ~/snapshots
+ls ~/snapshots/latest/home/me/
+</code></pre>
+          </div>
+          <p>
+            Every snapshot appears as a read-only folder named after its start time, plus a
+            <code>latest</code> link. This works for every engine, including Vaults and backups on SSH
+            servers, so you can open old files with any program or compare folders with your usual
+            tools. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> (or run <code>fusermount3 -u ~/snapshots</code>)
+            to unmount. <code>--snapshot &lt;spec&gt;</code> shows just one snapshot at the mount point.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="what-to-keep">
+          <h2>What to keep <a class="anchor" href="#what-to-keep" aria-label="Link to this section">#</a></h2>
+          <div class="code">
+<pre><code data-lang="toml">[retention]
+keep_last = 1          # always keep the newest N
+keep_within = "1day"   # keep everything from the last day
+keep_hourly = 24
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 12
+keep_yearly = 5
+max_age = "10y"        # remove anything older, whatever the buckets say
+keep_named = true      # named and pinned snapshots are never removed
+min_free_space = "50GB"          # remove oldest snapshots until this much is free
+min_free_inodes_percent = 5
+</code></pre>
+          </div>
+          <p>
+            Each bucket keeps the newest snapshot of each of its last N hours, days, weeks, months or
+            years. Pruning runs after every backup. Run it yourself with a preview:
+          </p>
+          <div class="code">
+<pre><code data-lang="sh">flux prune home --dry-run
+</code></pre>
+          </div>
+          <p>
+            In the app (<em>What to keep</em>, under <strong>Advanced options</strong>), the retention
+            editor shows which of your current snapshots each rule would keep or remove, and why.
+          </p>
+          <p>
+            To keep a snapshot forever, <strong>pin</strong> it (<code>flux pin home &lt;snapshot&gt;</code>).
+            To mark one, <strong>name</strong> it (<code>flux name home &lt;snapshot&gt; before-upgrade</code>).
+            By default, named snapshots are kept too.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="vault-passwords">
+          <h2>Vault passwords <a class="anchor" href="#vault-passwords" aria-label="Link to this section">#</a></h2>
+          <p>
+            An encrypted Vault needs its password to back up, browse or restore. Where it comes from
+            is set per profile:
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col"><code>vault.password_source</code></th><th scope="col">Use</th></tr></thead>
+              <tbody>
+                <tr><td><code>{ from = "keyring" }</code></td><td>the desktop keyring (default): asked once, then remembered</td></tr>
+                <tr><td><code>{ from = "prompt" }</code></td><td>asked every time; scheduled backups can't run</td></tr>
+                <tr><td><code>{ from = "file", path = "…" }</code></td><td>first line of a file (make it mode 0600)</td></tr>
+                <tr><td><code>{ from = "command", command = "pass show backup" }</code></td><td>first line printed by a command</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p><code>FLUX_PASSWORD</code> overrides all of them, for scripts.</p>
+          <p>A Vault can have several passwords. Each one opens it, and changing them never re-encrypts data:</p>
+          <div class="code">
+<pre><code data-lang="sh">flux key list docs
+flux key add docs --label "spare, in the safe"
+flux key passwd docs
+flux key remove docs &lt;key-id&gt;
+</code></pre>
+          </div>
+          <div class="callout danger">
+            <p><strong>There is no way to recover a Vault whose passwords are all lost.</strong> Keep a second password somewhere safe.</p>
+          </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="checking-your-backups">
+          <h2>Checking your backups <a class="anchor" href="#checking-your-backups" aria-label="Link to this section">#</a></h2>
+          <div class="code">
+<pre><code data-lang="sh">flux check home              # structure: every snapshot complete, every file accounted for
+flux check home --read-data  # also read and verify every byte (slow)
+</code></pre>
+          </div>
+          <p>
+            The app has the same under <em>Maintenance</em> on a profile's overview. Vault data is
+            authenticated, so any corruption or tampering is detected.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="system-backups">
+          <h2>System backups <a class="anchor" href="#system-backups" aria-label="Link to this section">#</a></h2>
+          <p>
+            To back up things only root can read (<code>/etc</code>, <code>/root</code>, other users'
+            files), use <strong>system profiles</strong>. They live in <code>/etc/flux-backup/</code>
+            and run from system timers, even when nobody is logged in.
+          </p>
+          <div class="ways">
+            <div class="card">
+              <span class="label">In the app</span>
+              <p>
+                Under <em>System</em>, click <strong>Authenticate</strong> and enter an administrator
+                password. System profiles then appear and work like your own. The app locks them again
+                after 15 minutes without use, or when you click the lock.
+              </p>
+            </div>
+            <div class="card">
+              <span class="label">In a terminal: add <code>--system</code> and run as root</span>
+              <div class="code">
+<pre><code data-lang="sh">sudo flux --system profile create etc --target /run/media/me/Backup -s /etc -s /root
+sudo flux --system backup etc
+</code></pre>
+              </div>
+            </div>
+          </div>
+          <p>Some differences from your own profiles:</p>
+          <ul>
+            <li>
+              An encrypted system Vault can't use the desktop keyring. The first time you unlock it in
+              the app, tick <strong>Keep it for scheduled backups</strong>: the password is saved in
+              <code>/etc/flux-backup/keys/&lt;id&gt;</code>, which only root can read.
+            </li>
+            <li>Hooks of system profiles run as root.</li>
+            <li>
+              Restoring as root never follows a symbolic link someone else planted on the way to the
+              destination. If a folder on the path is a link owned by another user, the restore stops
+              and says so; restore into another folder instead. When root restores into a folder that
+              belongs to someone else, setuid bits are dropped and device files are skipped.
+            </li>
+          </ul>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="hooks">
+          <h2>Hooks <a class="anchor" href="#hooks" aria-label="Link to this section">#</a></h2>
+          <p>Commands to run around a backup:</p>
+          <div class="code">
+<pre><code data-lang="toml">[hooks]
+pre_backup  = ["mount /mnt/nas"]          # a failure cancels the backup
+post_backup = ["notify-send 'Backup done' \"$FLUX_SNAPSHOT_ID\""]
+on_error    = ["logger -t flux \"$FLUX_ERROR\""]
+timeout = "10m"
+</code></pre>
+          </div>
+          <p>
+            They run with <code>sh -c</code> and get <code>FLUX_EVENT</code>, <code>FLUX_PROFILE</code>,
+            <code>FLUX_PROFILE_NAME</code>, <code>FLUX_ENGINE</code>, <code>FLUX_SOURCES</code>,
+            <code>FLUX_TARGET</code>, <code>FLUX_TRIGGER</code>, <code>FLUX_STATUS</code>,
+            <code>FLUX_SNAPSHOT_ID</code>, <code>FLUX_SNAPSHOT_PATH</code> and <code>FLUX_ERROR</code>.
+            Their output goes into the run's log.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="keeping-an-eye-on-things">
+          <h2>Keeping an eye on things <a class="anchor" href="#keeping-an-eye-on-things" aria-label="Link to this section">#</a></h2>
+          <div class="code">
+<pre><code data-lang="sh">flux status            # what's running, last result and next run of every profile
+flux watch home        # live progress of a running backup
+flux cancel home       # stop it; the next run continues where it stopped
+flux log home          # recent runs
+flux log home --run last   # everything that happened in one run, including warnings
+</code></pre>
+          </div>
+          <p>
+            The app shows the same: a coloured dot per profile, live progress for every backup however
+            it was started, and an <em>Activity</em> tab with the full log of each run.
+          </p>
+          <div class="legend" aria-label="Status dots">
+            <span class="tag"><span class="dot ok"></span>Fine</span>
+            <span class="tag"><span class="dot warn"></span>Some files couldn't be read</span>
+            <span class="tag"><span class="dot err"></span>Failed</span>
+            <span class="tag"><span class="dot run"></span>Running</span>
+          </div>
+          <p>
+            An interrupted backup (power cut, <kbd>Ctrl</kbd>+<kbd>C</kbd>, unplugged drive) doesn't
+            damage anything. The unfinished snapshot is never shown, and the next run continues it.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="profile-reference">
+          <h2>Profile reference <a class="anchor" href="#profile-reference" aria-label="Link to this section">#</a></h2>
+          <p>
+            Profiles are TOML files in <code>~/.config/flux-backup/profiles/&lt;id&gt;.toml</code>
+            (system profiles: <code>/etc/flux-backup/profiles/</code>). Edit them in the app, with
+            <code>flux profile edit &lt;id&gt;</code> (opens <code>$EDITOR</code> and validates the
+            result), or by hand. Unknown keys are errors, so typos don't go unnoticed.
+          </p>
+          <div class="code">
+            <span class="code-label">home.toml</span>
+<pre><code data-lang="toml">version = 1
+name = "Home folder"
+engine = "mirror"                 # or "vault"
+
+[target]                          # a local folder or drive…
+kind = "local"
+path = "/run/media/me/Backup"
+fs_uuid = "3f1c…"                 # refuse to write unless this filesystem is mounted there
+
+# [target]                        # …or an SSH server
+# kind = "ssh"
+# host = "nas.local"
+# user = "me"
+# port = 22
+# path = "/srv/backup"
+# identity_file = "~/.ssh/flux_backup_ed25519"
+# ssh_options = ["Compression=no"]
+# bandwidth_limit = "5MB"
+
+[sources]
+paths = ["/home/me"]
+exclude = ["~/.cache/", "node_modules/", "*.tmp"]
+exclude_larger_than = "8GB"
+exclude_caches = true
+exclude_if_present = [".nobackup"]
+one_file_system = false
+
+[retention]                       # see "What to keep"
+enabled = true
+keep_last = 1
+keep_within = "1day"
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 12
+keep_yearly = 5
+keep_named = true
+
+[schedule]                        # see "Automatic backups"
+trigger = "calendar"              # "manual", "calendar" or "interval"
+on_calendar = "daily"
+catch_up = true
+skip_on_battery = false
+on_connect = false
+
+[options]
+preserve_acl = true
+preserve_xattr = true
+symlinks = "preserve"             # "preserve", "follow_unsafe" (copy targets outside the sources), "follow"
+change_detection = "metadata"     # or "checksum": also compare contents (slow)
+continue_on_errors = true         # finish even if some files can't be read
+snapshot_if_unchanged = false
+nice = 10
+io_priority = "best_effort_low"   # "normal", "best_effort_low", "idle"
+notify = true
+backup_before_restore = true      # keep files that a restore would replace
+threads = 0                       # 0 = automatic
+
+[vault]                           # Vault profiles only
+compression_level = 3             # 0 (off) to 22
+encryption = true                 # fixed when the Vault is created
+password_source = { from = "keyring" }
+
+[hooks]                           # see "Hooks"
+</code></pre>
+          </div>
+          <p>
+            Durations are written like <code>90s</code>, <code>15min</code>, <code>4h</code>,
+            <code>1day</code>, <code>2weeks</code>; sizes like <code>500MB</code> or <code>4GiB</code>.
+          </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="environment-variables">
+          <h2>Environment variables <a class="anchor" href="#environment-variables" aria-label="Link to this section">#</a></h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Variable</th><th scope="col">Effect</th></tr></thead>
+              <tbody>
+                <tr><td><code>FLUX_PASSWORD</code></td><td>Vault password (overrides the profile's source)</td></tr>
+                <tr><td><code>FLUX_HOME</code></td><td>keep all configuration and state under one folder (portable setups, tests)</td></tr>
+                <tr><td><code>FLUX_LOG</code></td><td>log filter, e.g. <code>debug</code> or <code>flux_vault=trace</code></td></tr>
+                <tr><td><code>FLUX_BIN</code></td><td>the <code>flux</code> binary the app starts backups with</td></tr>
+                <tr><td><code>FLUX_HELPER</code></td><td>the system-backup helper the app starts</td></tr>
+                <tr><td><code>FLUX_PKEXEC</code></td><td>program used instead of <code>pkexec</code> (empty: run the helper directly)</td></tr>
+                <tr><td><code>FLUX_SSH</code></td><td><code>ssh</code> program to use</td></tr>
+                <tr><td><code>FLUX_RSYNC</code></td><td><code>rsync</code> program to use</td></tr>
+                <tr><td><code>FLUX_SECRET_TOOL</code></td><td><code>secret-tool</code> program to use</td></tr>
+                <tr><td><code>FLUX_SYSTEMCTL</code>, <code>FLUX_SYSTEMD_UNIT_DIR</code></td><td>where timers are written and how systemd is called</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="troubleshooting">
+          <h2>Troubleshooting <a class="anchor" href="#troubleshooting" aria-label="Link to this section">#</a></h2>
+          <div class="faq">
+            <details>
+              <summary>“the drive with filesystem UUID … is not mounted at …” / “backup target … does not exist”</summary>
+              <div>
+                <p>
+                  The profile's drive isn't connected or mounted. Connect it; with
+                  <code>on_connect</code>, the backup then starts by itself.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>A scheduled backup didn't run</summary>
+              <div>
+                <p>
+                  Check <code>flux schedule status</code> and <code>flux log &lt;id&gt;</code>.
+                  Scheduled runs skip on battery when <code>skip_on_battery</code> is set, and can't ask
+                  for a Vault password or accept a new SSH host key. Run <code>flux backup &lt;id&gt;</code>
+                  once in a terminal to see the problem.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>“Permission denied” for some files</summary>
+              <div>
+                <p>
+                  They're listed in the run's log, and the snapshot is marked <em>completed with
+                  problems</em>. Exclude them, or back them up with a
+                  <a href="#system-backups">system profile</a>.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>SSH: “Host key verification failed” or a password prompt</summary>
+              <div>
+                <p>
+                  Run <code>flux ssh test &lt;id&gt;</code> in a terminal once to accept the host key,
+                  and <code>flux ssh copy-id &lt;id&gt;</code> to install a key.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary><code>flux mount</code>: “cannot mount”</summary>
+              <div>
+                <p>
+                  Install <code>fuse3</code> (it provides <code>fusermount3</code>), and mount on an
+                  empty folder you own.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>Where is everything?</summary>
+              <div>
+                <p><code>flux config path</code> prints the folders Flux uses.</p>
+              </div>
+            </details>
+          </div>
+
+          <div class="guide-end">
+            <p>Something missing or unclear? Every command also has a man page, like <code>man flux-restore</code>.</p>
+            <a class="btn btn-tonal" href="https://github.com/neuralpunk/flux-backup/issues">Report a problem</a>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <footer class="site-footer">
+    <div class="wrap" style="max-width: 1240px">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Flux Backup</span></a>
+      <nav aria-label="Footer">
+        <a href="index.html">Home</a>
+        <a href="https://github.com/neuralpunk/flux-backup/releases">Releases</a>
+        <a href="https://github.com/neuralpunk/flux-backup">Source code</a>
+        <a href="https://github.com/neuralpunk/flux-backup/issues">Report a problem</a>
+      </nav>
+      <p class="fine">
+        Licensed under either the Apache License 2.0 or the MIT license, at your option.
+        Flux Backup is an independent project. Its design is inspired by Back in Time (GPL-2.0+),
+        but Flux contains none of Back in Time's code.
+      </p>
+    </div>
+  </footer>
+
+  <script src="assets/site.js"></script>
+</body>
+</html>

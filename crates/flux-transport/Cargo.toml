@@ -1,0 +1,24 @@
+[package]
+name = "flux-transport"
+description = "Flux Backup transport: system ssh with connection sharing, SFTP client, remote locks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+flux-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+getrandom = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

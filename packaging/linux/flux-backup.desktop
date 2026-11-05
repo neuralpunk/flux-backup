@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Flux Backup
+GenericName=Backup
+Comment=Fast snapshot backups of your files and your whole system
+Exec={{exec}}
+Icon={{icon}}
+StartupWMClass={{exec}}
+StartupNotify=true
+Terminal=false
+Categories=Utility;Archiving;
+Keywords=backup;restore;snapshot;vault;rsync;time machine;

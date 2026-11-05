@@ -1,0 +1,117 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "flux-backup",
+  "version": "0.1.0",
+  "identifier": "io.github.neuralpunk.FluxBackup",
+  "build": {
+    "frontendDist": "../build",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": {
+      "script": "sh packaging/prepare-dist.sh",
+      "cwd": "../.."
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Flux Backup",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
+        "backgroundColor": "#0e0f11",
+        "decorations": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/icon.png"
+    ],
+    "category": "Utility",
+    "shortDescription": "Fast, snapshot-based backups for Linux",
+    "longDescription": "Flux Backup keeps snapshots of your folders on external drives and SSH servers, as plain hard-linked folders (Mirror) or deduplicated, encrypted Vaults; on a schedule, when a drive is connected, or on demand. Includes the flux command-line tool and a polkit helper for system backups.",
+    "copyright": "The Flux Backup contributors",
+    "license": "MIT OR Apache-2.0",
+    "homepage": "https://github.com/neuralpunk/flux-backup",
+    "linux": {
+      "deb": {
+        "depends": [
+          "fuse3",
+          "polkitd | policykit-1",
+          "openssh-client"
+        ],
+        "recommends": [
+          "libsecret-tools",
+          "rsync"
+        ],
+        "section": "admin",
+        "files": {
+          "/usr/bin/flux": "../../target/dist/flux",
+          "/usr/libexec/flux-backup/flux-helper": "../../target/dist/flux-helper",
+          "/usr/share/polkit-1/actions/io.github.neuralpunk.FluxBackup.helper.policy": "../../packaging/polkit/io.github.neuralpunk.FluxBackup.helper.policy",
+          "/usr/share/metainfo/io.github.neuralpunk.FluxBackup.metainfo.xml": "../../packaging/linux/io.github.neuralpunk.FluxBackup.metainfo.xml",
+          "/usr/share/man/man1": "../../target/dist/man",
+          "/usr/share/bash-completion/completions/flux": "../../target/dist/completions/flux.bash",
+          "/usr/share/zsh/site-functions/_flux": "../../target/dist/completions/_flux",
+          "/usr/share/fish/vendor_completions.d/flux.fish": "../../target/dist/completions/flux.fish",
+          "/usr/share/icons/hicolor/scalable/apps/flux-backup.svg": "../../packaging/linux/icons/flux-backup.svg",
+          "/usr/share/icons/hicolor/symbolic/apps/flux-backup-symbolic.svg": "../../packaging/linux/icons/flux-backup-symbolic.svg",
+          "/usr/share/icons/hicolor/16x16/apps/flux-backup.png": "../../packaging/linux/icons/16x16/flux-backup.png",
+          "/usr/share/icons/hicolor/24x24/apps/flux-backup.png": "../../packaging/linux/icons/24x24/flux-backup.png",
+          "/usr/share/icons/hicolor/48x48/apps/flux-backup.png": "../../packaging/linux/icons/48x48/flux-backup.png"
+        },
+        "desktopTemplate": "../../packaging/linux/flux-backup.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "fuse3",
+          "polkit",
+          "openssh-clients"
+        ],
+        "recommends": [
+          "libsecret",
+          "rsync"
+        ],
+        "files": {
+          "/usr/bin/flux": "../../target/dist/flux",
+          "/usr/libexec/flux-backup/flux-helper": "../../target/dist/flux-helper",
+          "/usr/share/polkit-1/actions/io.github.neuralpunk.FluxBackup.helper.policy": "../../packaging/polkit/io.github.neuralpunk.FluxBackup.helper.policy",
+          "/usr/share/metainfo/io.github.neuralpunk.FluxBackup.metainfo.xml": "../../packaging/linux/io.github.neuralpunk.FluxBackup.metainfo.xml",
+          "/usr/share/man/man1": "../../target/dist/man",
+          "/usr/share/bash-completion/completions/flux": "../../target/dist/completions/flux.bash",
+          "/usr/share/zsh/site-functions/_flux": "../../target/dist/completions/_flux",
+          "/usr/share/fish/vendor_completions.d/flux.fish": "../../target/dist/completions/flux.fish",
+          "/usr/share/icons/hicolor/scalable/apps/flux-backup.svg": "../../packaging/linux/icons/flux-backup.svg",
+          "/usr/share/icons/hicolor/symbolic/apps/flux-backup-symbolic.svg": "../../packaging/linux/icons/flux-backup-symbolic.svg",
+          "/usr/share/icons/hicolor/16x16/apps/flux-backup.png": "../../packaging/linux/icons/16x16/flux-backup.png",
+          "/usr/share/icons/hicolor/24x24/apps/flux-backup.png": "../../packaging/linux/icons/24x24/flux-backup.png",
+          "/usr/share/icons/hicolor/48x48/apps/flux-backup.png": "../../packaging/linux/icons/48x48/flux-backup.png"
+        },
+        "desktopTemplate": "../../packaging/linux/flux-backup.desktop"
+      },
+      "appimage": {
+        "bundleMediaFramework": false,
+        "files": {
+          "/usr/bin/flux": "../../target/dist/flux"
+        }
+      }
+    }
+  }
+}

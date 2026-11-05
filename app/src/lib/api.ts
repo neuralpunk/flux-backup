@@ -1,0 +1,128 @@
+// The only module that talks to the backend. In the Tauri app it uses IPC; opened in a
+// plain browser (`npm run dev`) it falls back to demo data, so the UI can be developed and
+// reviewed without the Rust side.
+
+import {
+  ApiError,
+  type ApiErrorCode,
+  type CheckSummary,
+  type Comparison,
+  type Drive,
+  type Editable,
+  type Issue,
+  type JobMessage,
+  type Listing,
+  type LoggedEvent,
+  type Overview,
+  type PreviewRow,
+  type Profile,
+  type ProfileSummary,
+  type PruneSummary,
+  type RestoreOutcome,
+  type RunRecord,
+  type SaveResult,
+  type SnapshotMeta,
+  type Suggestion,
+  type SystemStatus,
+  type TargetTest,
+} from "./types";
+
+export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+type Mock = typeof import("./mock");
+let mockModule: Promise<Mock> | null = null;
+const mock = () => (mockModule ??= import("./mock"));
+
+async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (!inTauri) {
+    const m = await mock();
+    return m.handle(cmd, args) as Promise<T>;
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    const err = e as { code?: ApiErrorCode; message?: string };
+    throw new ApiError(err.code ?? "error", err.message ?? String(e));
+  }
+}
+
+export const api = {
+  profiles: () => call<ProfileSummary[]>("profiles"),
+  overview: (id: string) => call<Overview>("overview", { id }),
+  snapshots: (id: string) => call<SnapshotMeta[]>("snapshots", { id }),
+  listDir: (id: string, snapshot: string, path: string) => call<Listing>("list_dir", { id, snapshot, path }),
+  unlock: (id: string, password: string, create = false) => call<void>("unlock", { id, password, create }),
+  /** Keep the unlocked Vault password in a root-only key file, for scheduled backups. */
+  saveKeyFile: (id: string) => call<string>("save_key_file", { id }),
+  backupNow: (id: string) => call<void>("backup_now", { id }),
+  cancel: (id: string) => call<void>("cancel", { id }),
+  restore: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean) =>
+    call<RestoreOutcome>("restore", { id, snapshot, paths, to, overwrite }),
+
+  getProfile: (id: string) => call<Editable>("get_profile", { id }),
+  newProfile: (system = false) => call<Editable>("new_profile", { system }),
+  validateProfile: (profile: Profile, system = false) => call<Issue[]>("validate_profile", { profile, system }),
+  saveProfile: (id: string, profile: Profile, create: boolean) => call<SaveResult>("save_profile", { id, profile, create }),
+  deleteProfile: (id: string) => call<void>("delete_profile", { id }),
+  suggestId: (name: string, system = false) => call<string>("suggest_id", { name, system }),
+  retentionPreview: (id: string, retention: Profile["retention"]) => call<PreviewRow[]>("retention_preview", { id, retention }),
+  excludeSuggestions: (sources: string[]) => call<Suggestion[]>("exclude_suggestions", { sources }),
+  drives: () => call<Drive[]>("drives"),
+  testTarget: (profile: Profile, system = false) => call<TargetTest>("test_target", { profile, system }),
+
+  /** System (root) profiles: is the helper there, and has an administrator unlocked it? */
+  systemStatus: () => call<SystemStatus>("system_status"),
+  /** Start the helper; the desktop's polkit dialog asks for an administrator password. */
+  systemUnlock: () => call<void>("system_unlock"),
+  systemLock: () => call<void>("system_lock"),
+
+  updateSnapshot: (id: string, snapshot: string, change: { name?: string | null; pinned?: boolean }) =>
+    call<SnapshotMeta>("update_snapshot", {
+      id,
+      snapshot,
+      name: change.name ?? null,
+      setName: "name" in change,
+      pinned: change.pinned ?? null,
+    }),
+  /** Bytes freed (Vaults), or `null` (Mirrors, whose folders simply go). */
+  deleteSnapshot: (id: string, snapshot: string) => call<number | null>("delete_snapshot", { id, snapshot }),
+  compare: (id: string, old: string, newer: string | null) => call<Comparison>("compare", { id, old, new: newer }),
+  runs: (id: string, limit = 100) => call<RunRecord[]>("runs", { id, limit }),
+  runEvents: (id: string, runId: string) => call<LoggedEvent[]>("run_events", { id, runId }),
+  prune: (id: string, dryRun: boolean) => call<PruneSummary>("prune", { id, dryRun }),
+  check: (id: string, readData: boolean) => call<CheckSummary>("check", { id, readData }),
+};
+
+/** Subscribe to backend events. Returns an unsubscribe function. */
+export async function listen<T>(event: string, handler: (payload: T) => void): Promise<() => void> {
+  if (!inTauri) {
+    const m = await mock();
+    return m.listen(event, handler as (p: unknown) => void);
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<T>(event, (e) => handler(e.payload));
+}
+
+export interface JobEventPayload {
+  profile: string;
+  message: JobMessage;
+}
+
+/** Pick a file. `null` if cancelled. */
+export async function pickFile(title: string): Promise<string | null> {
+  if (!inTauri) return window.prompt(title, "/home/me/.ssh/flux_backup_ed25519");
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ directory: false, multiple: false, title });
+  return typeof r === "string" ? r : null;
+}
+
+/** Pick a folder (restore destination). `null` if cancelled. */
+export async function pickFolder(title: string): Promise<string | null> {
+  if (!inTauri) {
+    return window.prompt(title, "/tmp/flux-restore");
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ directory: true, multiple: false, title });
+  return typeof r === "string" ? r : null;
+}

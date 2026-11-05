@@ -1,0 +1,28 @@
+[package]
+name = "flux-service"
+description = "Flux Backup: what the desktop app shows and does, shared with the root helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+flux-core.workspace = true
+flux-fs.workspace = true
+flux-vault.workspace = true
+flux-runner.workspace = true
+flux-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+rustix.workspace = true
+zeroize = "1.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+//! Flux Backup core: the profile model, configuration storage and shared services used by
+//! the CLI, the GUI, the engines and the privileged helper.
+
+pub mod filter;
+pub mod hooks;
+pub mod paths;
+pub mod power;
+pub mod profile;
+pub mod progress;
+pub mod retention;
+pub mod store;
+pub mod sys;
+pub mod target_check;
+pub mod units;
+
+pub use paths::{Paths, Scope};
+pub use profile::{Engine, Issue, Profile, ProfileId, Severity, Target};
+pub use store::{ProfileStore, StoreError};
+pub use units::{ByteSize, HumanDuration};
+
+/// Flux version string, shared by every binary.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

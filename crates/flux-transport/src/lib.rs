@@ -1,0 +1,10 @@
+//! Flux Backup transport: the system `ssh` client with connection sharing, a pipelined
+//! SFTP client, and lock files for remote repositories.
+
+pub mod lock;
+pub mod sftp;
+pub mod ssh;
+#[doc(hidden)]
+pub mod testing;
+
+pub use ssh::{SftpPool, SshError, SshTarget, shell_quote};

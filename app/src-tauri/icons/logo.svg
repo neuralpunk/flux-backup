@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Flux Backup "Stack": three snapshots, the newest lit. -->
+  <rect width="256" height="256" rx="58" fill="#1b1d21"/>
+  <rect x="56" y="68" width="144" height="32" rx="16" fill="#7abdff"/>
+  <rect x="56" y="112" width="144" height="32" rx="16" fill="#32618e"/>
+  <rect x="56" y="156" width="144" height="32" rx="16" fill="#193550"/>
+</svg>

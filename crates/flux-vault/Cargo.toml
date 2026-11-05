@@ -1,0 +1,38 @@
+[package]
+name = "flux-vault"
+description = "Flux Backup Vault engine: deduplicated, compressed, encrypted snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+flux-core.workspace = true
+flux-fs.workspace = true
+flux-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+rayon.workspace = true
+zstd.workspace = true
+postcard.workspace = true
+jiff.workspace = true
+blake3.workspace = true
+fastcdc = "5"
+chacha20poly1305 = "0.11"
+argon2 = "0.6"
+getrandom = "0.4"
+zeroize = { version = "1.9", features = ["derive"] }
+base64 = "0.23"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "flux-fs"
+description = "Flux Backup filesystem layer: scanning, metadata, diff, search and restore shared by all engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+flux-core.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+rayon.workspace = true
+jiff.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

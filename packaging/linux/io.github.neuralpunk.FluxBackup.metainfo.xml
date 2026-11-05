@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.neuralpunk.FluxBackup</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Flux Backup</name>
+  <summary>Fast snapshot backups of your files and your whole system</summary>
+  <developer id="io.github.neuralpunk">
+    <name>The Flux Backup contributors</name>
+  </developer>
+  <description>
+    <p>
+      Flux Backup keeps snapshots of your folders on an external drive or an SSH server,
+      on a schedule or when a drive is plugged in. Each snapshot shows everything as it
+      was, and browsing, comparing and restoring take moments.
+    </p>
+    <p>Choose how each profile stores its backups:</p>
+    <ul>
+      <li>Mirror: plain folders you can open with any file manager; unchanged files are hard links, so every snapshot is cheap</li>
+      <li>Vault: deduplicated across files and snapshots, compressed, and encrypted</li>
+    </ul>
+    <p>
+      Retention rules with a preview of what would be kept, restores that keep your
+      current files, a file browser for every snapshot, backups of system files through an
+      administrator password, and a full command-line tool (flux) for scripts and servers.
+    </p>
+  </description>
+  <!-- The deb, rpm and AppImage install flux-backup.desktop: Tauri names the desktop file
+       after productName, which also names the packages. A Flatpak build should rename it
+       to the app ID (manifest: rename-desktop-file, rename-icon) and keep this entry in
+       step with the new name. -->
+  <launchable type="desktop-id">flux-backup.desktop</launchable>
+  <icon type="stock">flux-backup</icon>
+  <url type="homepage">https://github.com/neuralpunk/flux-backup</url>
+  <url type="bugtracker">https://github.com/neuralpunk/flux-backup/issues</url>
+  <url type="vcs-browser">https://github.com/neuralpunk/flux-backup</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A profile's overview while a backup runs</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/overview-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Snapshots and the file browser</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/snapshots-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Editing a profile</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/settings-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Light theme</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/overview-light.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Utility</category>
+    <category>Archiving</category>
+  </categories>
+  <keywords>
+    <keyword>backup</keyword>
+    <keyword>restore</keyword>
+    <keyword>snapshot</keyword>
+  </keywords>
+  <provides>
+    <binary>flux</binary>
+    <binary>flux-backup</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">1000</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-11-05">
+      <description>
+        <p>First release: Mirror and Vault engines, local drives and SSH servers, systemd schedules, the desktop app, system backups, and read-only mounts of snapshots.</p>
+      </description>
+    </release>
+  </releases>
+</component>

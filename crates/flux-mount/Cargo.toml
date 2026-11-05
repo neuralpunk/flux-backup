@@ -1,0 +1,24 @@
+[package]
+name = "flux-mount"
+description = "Flux Backup: browse snapshots as a read-only FUSE filesystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+flux-core.workspace = true
+flux-fs.workspace = true
+flux-runner.workspace = true
+fuser = { version = "0.18", default-features = false }
+jiff.workspace = true
+rustix.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

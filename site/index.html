@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flux Backup: fast snapshot backups for Linux</title>
+  <meta name="description" content="Fast snapshot backups for Linux, with a desktop app and a command-line tool. Plain-folder or deduplicated, encrypted snapshots on a drive or an SSH server.">
+  <meta name="theme-color" content="#0e0f11" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eef0f3" media="(prefers-color-scheme: light)">
+  <meta property="og:title" content="Flux Backup">
+  <meta property="og:description" content="Fast snapshot backups for Linux, with a desktop app and a command-line tool.">
+  <meta property="og:image" content="assets/screenshots/overview-dark.png">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>
+    try { var t = localStorage.getItem("flux-site-theme"); if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t); } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Flux Backup</span></a>
+      <nav class="nav" aria-label="Main">
+        <a class="nav-optional" href="#features">Features</a>
+        <a class="nav-optional" href="#engines">Engines</a>
+        <a class="nav-optional" href="#install">Install</a>
+        <a href="guide.html">User guide</a>
+        <a href="https://github.com/neuralpunk/flux-backup">GitHub</a>
+      </nav>
+      <div class="theme-switch" role="group" aria-label="Colour theme">
+        <button type="button" data-theme="dark" aria-pressed="false">Dark</button>
+        <button type="button" data-theme="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme="auto" aria-pressed="true">Auto</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <section class="hero">
+      <div class="wrap">
+        <span class="tag"><span class="dot"></span>Version 0.1 · the first release</span>
+        <h1>Snapshot backups for Linux, made <em>fast</em>.</h1>
+        <p class="lede">
+          Flux keeps complete snapshots of your folders on an external drive or an SSH server.
+          Unchanged files cost almost nothing, later backups take seconds, and getting a file
+          back is a few clicks. Use the desktop app, the <code>flux</code>
+          command, or both.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/neuralpunk/flux-backup/releases">Download</a>
+          <a class="btn btn-tonal" href="guide.html">Read the user guide</a>
+        </div>
+        <p class="hero-meta">For Linux · .deb, .rpm and AppImage · Free software, MIT or Apache-2.0</p>
+
+        <div class="showcase">
+          <img class="shot-dark has-light" src="assets/screenshots/overview-dark.png" width="1200" height="780"
+               alt="The Flux Backup app: the Home folder profile is 36% through a backup, with last and next backup times, 34 snapshots, 691 GiB free and a list of recent backups.">
+          <img class="shot-light" src="assets/screenshots/overview-light.png" width="1200" height="780" loading="lazy"
+               alt="The Flux Backup app in the light theme, showing a backup in progress.">
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">What it does</p>
+          <h2>The proven way to back up a desktop, rebuilt in Rust.</h2>
+          <p>
+            Flux takes the model of Back in Time (profiles, scheduled snapshots,
+            include and exclude lists, smart retention, easy restore) and rebuilds it for more
+            speed, more capability and a modern interface.
+          </p>
+        </div>
+
+        <div class="grid grid-3">
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2 4 11h5l-1 7 7-9h-5l1-7Z"/></svg>
+            </div>
+            <h3>Fast, on every core</h3>
+            <p>Flux scans and copies in parallel, hard-links or deduplicates what didn't change, and uses reflinks on Btrfs and XFS. In benchmarks, a snapshot with few changes took well under a second.</p>
+          </article>
+
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10a6.5 6.5 0 1 0 2-4.7"/><path d="M3 3v3.5h3.5"/><path d="M10 6.5V10l2.5 1.5"/></svg>
+            </div>
+            <h3>Restore without fear</h3>
+            <p>Browse any snapshot instantly, see what changed, and restore to another folder or back in place. Files that differ are kept beside the restored ones unless you say otherwise.</p>
+          </article>
+
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>
+            </div>
+            <h3>Runs by itself</h3>
+            <p>Schedules are systemd timers: at set times, every few hours, or when you plug in the drive. Missed backups catch up after boot, and scheduled runs can wait for mains power.</p>
+          </article>
+
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="3.5" rx="1.75"/><rect x="3" y="8.25" width="14" height="3.5" rx="1.75"/><rect x="3" y="13.5" width="14" height="3.5" rx="1.75"/></svg>
+            </div>
+            <h3>Keeps the right snapshots</h3>
+            <p>Keep 7 daily, 4 weekly, 12 monthly and 5 yearly, or set your own rules and see exactly which snapshots each one keeps. Named and pinned snapshots are never removed automatically.</p>
+          </article>
+
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5 3.5 5v4.5c0 4 2.8 6.9 6.5 8 3.7-1.1 6.5-4 6.5-8V5L10 2.5Z"/><path d="m7.2 10 2 2 3.6-3.8"/></svg>
+            </div>
+            <h3>Hard to get wrong</h3>
+            <p>Flux won't fill your system disk when the backup drive is unplugged. An interrupted backup damages nothing and continues next time, and <code>flux check --read-data</code> verifies every byte.</p>
+          </article>
+
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="5" rx="1.5"/><rect x="2.5" y="11.5" width="15" height="5" rx="1.5"/><path d="M6 6h.01M6 14h.01"/></svg>
+            </div>
+            <h3>Drives, servers, the whole system</h3>
+            <p>Back up to a USB drive, a folder or an SSH server through your own <code>ssh</code> setup. System profiles cover <code>/etc</code>, <code>/root</code> and other users' files, unlocked with an administrator password.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Engines -->
+    <section class="section" id="engines">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Two engines, one tool</p>
+          <h2>Plain folders, or a deduplicated, encrypted Vault.</h2>
+          <p>Each profile picks how its snapshots are stored. Both are browsed, restored, scheduled and pruned the same way.</p>
+        </div>
+
+        <div class="grid grid-2">
+          <article class="card engine">
+            <div class="engine-title">
+              <h3>Mirror</h3>
+              <span class="tag">Plain folders</span>
+            </div>
+            <ul>
+              <li>One ordinary folder per snapshot. Open your files with any file manager, even without Flux.</li>
+              <li>Unchanged files are hard links, so they take no extra space.</li>
+              <li>To local drives, or to SSH servers that have <code>rsync</code>.</li>
+              <li>For encryption, use an encrypted drive (LUKS).</li>
+            </ul>
+            <p class="pick">Pick Mirror when you want to reach your files in an emergency with nothing but a file manager.</p>
+          </article>
+
+          <article class="card engine">
+            <div class="engine-title">
+              <h3>Vault</h3>
+              <span class="tag">Deduplicated · encrypted</span>
+            </div>
+            <ul>
+              <li>Data is split into chunks and stored once across all files, snapshots, profiles and computers.</li>
+              <li>Compressed with zstd. Contents, file names and metadata are encrypted with XChaCha20-Poly1305, under a key protected by Argon2id.</li>
+              <li>To local drives, or to SSH servers that offer only SFTP.</li>
+              <li>Browse it in the app or as folders with <code>flux mount</code>.</li>
+            </ul>
+            <p class="pick">Pick Vault for places you don't fully trust, for many similar machines sharing one target, or to save space.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- App -->
+    <section class="section" id="app">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">The desktop app</p>
+          <h2>Everything the command line does, with less to think about.</h2>
+          <p>
+            Setting up a backup is three questions (what, where and when) and an encryption switch.
+            The rest waits under <strong>Advanced options</strong>. Backups run as separate processes,
+            so they keep going when you close the window, and the app follows every backup live,
+            however it was started.
+          </p>
+        </div>
+
+        <div class="gallery">
+          <figure>
+            <img src="assets/screenshots/snapshots-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The Snapshots tab: a list of snapshot times next to a file browser for the selected snapshot.">
+            <figcaption><strong>Snapshots</strong>Every snapshot with an instant file browser. “What changed” compares with the one before.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/settings-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The profile editor, asking what to back up, where to keep it, when, and whether to encrypt.">
+            <figcaption><strong>Setting up a backup</strong>Connected USB drives are offered, and tied to their filesystem so an unplugged drive is never mistaken for its empty mount point.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/activity-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The Activity tab listing backup runs, with the log of the selected run.">
+            <figcaption><strong>Activity</strong>Every run with its log, warnings and hook output.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/system-dark.png" width="1200" height="780" loading="lazy"
+                 alt="System profiles in the sidebar, unlocked after authenticating as an administrator.">
+            <figcaption><strong>System backups</strong>Click Authenticate, enter an administrator password, and manage them like your own. They lock again after 15 idle minutes.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- CLI -->
+    <section class="section" id="cli">
+      <div class="wrap">
+        <div class="panel split">
+          <div>
+            <p class="eyebrow">The <span class="mono">flux</span> command</p>
+            <h2 style="font-size: clamp(26px, 3.2vw, 34px)">Made for terminals and scripts too.</h2>
+            <ul class="checklist">
+              <li><span>The app and <code>flux</code> share the same profiles and see each other's backups.</span></li>
+              <li><span>Search every snapshot, list every version of a file, and diff against what's on disk now.</span></li>
+              <li><span>Every command takes <code>--json</code>, and exit codes tell “finished, but some files were skipped” apart from failure.</span></li>
+              <li><span>Man pages and bash, zsh and fish completions are included.</span></li>
+            </ul>
+          </div>
+          <div class="code">
+<pre><code data-lang="sh">flux profile create home --source ~ \
+    --target /run/media/$USER/Backup
+flux backup home               # take a snapshot
+flux snapshots home             # list snapshots
+flux ls home ~/Documents -l     # browse one, instantly
+flux restore home ~/Documents/report.odt
+
+flux diff home --live           # changed since the last snapshot
+flux find home '*.odt' -i       # search every snapshot
+flux history home ~/thesis.tex  # every version of a file
+flux prune home --dry-run       # what retention would remove
+flux mount home ~/snapshots     # snapshots as read-only folders
+</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Performance -->
+    <section class="section" id="performance">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Performance</p>
+          <h2>Seconds where other tools take minutes.</h2>
+          <p>Measured on 1 GiB of test data (100,000 small files plus 20 large ones) on tmpfs, on a 16-core machine. Snapshots were checked byte for byte.</p>
+        </div>
+
+        <div class="grid grid-2">
+          <div class="card bench-card">
+            <h3>Mirror compared with rsync</h3>
+            <p class="sub"><code>rsync -aHAX --link-dest</code>, Back in Time's approach</p>
+            <div class="table-wrap" style="background: transparent">
+              <table>
+                <thead><tr><th scope="col">Scenario</th><th scope="col" class="n">Flux</th><th scope="col" class="n">rsync</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">Initial full backup</th><td class="n win">0.6 s</td><td class="n">4.1 s</td></tr>
+                  <tr><th scope="row">No changes, new snapshot</th><td class="n win">0.37 s</td><td class="n">9.1 s</td></tr>
+                  <tr><th scope="row">1% of small files and 1 large file changed</th><td class="n win">0.37 s</td><td class="n">9.2 s</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card bench-card">
+            <h3>Vault compared with Borg 1.4</h3>
+            <p class="sub"><code>repokey-blake2</code>, <code>zstd,3</code> compression</p>
+            <div class="table-wrap" style="background: transparent">
+              <table>
+                <thead><tr><th scope="col">Scenario</th><th scope="col" class="n">Flux</th><th scope="col" class="n">Borg</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">Initial backup</th><td class="n win">1.8 s</td><td class="n">15.3 s</td></tr>
+                  <tr><th scope="row">No changes</th><td class="n win">0.5 s</td><td class="n">7.7 s</td></tr>
+                  <tr><th scope="row">1% of files changed</th><td class="n win">0.6–1.0 s</td><td class="n">8.0 s</td></tr>
+                  <tr><th scope="row">Repository size</th><td class="n win">864 MiB</td><td class="n">873 MiB</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p class="bench-note">
+          Much of the gap comes from Flux using every core where rsync is single-threaded, so expect
+          a smaller difference on spinning disks, where I/O dominates. The benchmark script is
+          <code>bench/bench.sh</code> in the repository.
+        </p>
+      </div>
+    </section>
+
+    <!-- Install -->
+    <section class="section" id="install">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Install</p>
+          <h2>Get Flux Backup.</h2>
+          <p>Each release ships packages for the common distributions and an AppImage for everything else.</p>
+        </div>
+
+        <div class="grid grid-3">
+          <a class="card install-card" href="https://github.com/neuralpunk/flux-backup/releases" style="color: inherit; text-decoration: none">
+            <span class="fmt">.deb</span>
+            <span class="for">Debian, Ubuntu and derivatives</span>
+            <p>The app, the <code>flux</code> command, the system-backup helper, man pages and completions.</p>
+          </a>
+          <a class="card install-card" href="https://github.com/neuralpunk/flux-backup/releases" style="color: inherit; text-decoration: none">
+            <span class="fmt">.rpm</span>
+            <span class="for">Fedora, openSUSE</span>
+            <p>Everything in one package, including system backups through polkit.</p>
+          </a>
+          <a class="card install-card" href="https://github.com/neuralpunk/flux-backup/releases" style="color: inherit; text-decoration: none">
+            <span class="fmt">AppImage</span>
+            <span class="for">Any distribution</span>
+            <p>The app and <code>flux</code>. System backups need a package, because root can't run programs from inside an AppImage.</p>
+          </a>
+        </div>
+
+        <div class="grid grid-2" style="margin-top: var(--gutter)">
+          <div class="card">
+            <h3>Build from source</h3>
+            <p>Needs Rust 1.91 or newer. The app also needs Node.js 20+ and WebKitGTK 4.1.</p>
+            <div class="code" style="margin-top: 16px; background: var(--surface-3)">
+<pre><code data-lang="sh">packaging/prepare-dist.sh     # flux, flux-helper, man pages, completions
+sudo PREFIX=/usr packaging/install.sh
+</code></pre>
+            </div>
+          </div>
+          <div class="card">
+            <h3>A word of caution</h3>
+            <p>
+              Flux 0.1 is the first release. As with any new backup tool, keep another copy of
+              anything precious until you trust it. The
+              <a href="https://github.com/neuralpunk/flux-backup/blob/main/docs/THREAT_MODEL.md">threat model</a>
+              describes what Flux protects against, and the
+              <a href="https://github.com/neuralpunk/flux-backup/blob/main/docs/VAULT_FORMAT.md">Vault format</a>
+              is documented in full.
+            </p>
+          </div>
+        </div>
+
+        <div class="panel cta">
+          <h2>Your first backup takes a minute to set up.</h2>
+          <p>The user guide walks through it, then covers restoring, schedules, retention, Vault passwords and system backups.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="guide.html#your-first-backup">Start with the guide</a>
+            <a class="btn" href="https://github.com/neuralpunk/flux-backup">View on GitHub</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Flux Backup</span></a>
+      <nav aria-label="Footer">
+        <a href="guide.html">User guide</a>
+        <a href="https://github.com/neuralpunk/flux-backup/releases">Releases</a>
+        <a href="https://github.com/neuralpunk/flux-backup">Source code</a>
+        <a href="https://github.com/neuralpunk/flux-backup/issues">Report a problem</a>
+      </nav>
+      <p class="fine">
+        Licensed under either the Apache License 2.0 or the MIT license, at your option.
+        Flux Backup is an independent project. Its design is inspired by Back in Time (GPL-2.0+),
+        but Flux contains none of Back in Time's code.
+      </p>
+    </div>
+  </footer>
+
+  <script src="assets/site.js"></script>
+</body>
+</html>

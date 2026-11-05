@@ -1,0 +1,43 @@
+[package]
+name = "flux-cli"
+description = "Command-line interface for Flux Backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "flux"
+path = "src/main.rs"
+
+[dependencies]
+flux-core.workspace = true
+flux-mirror.workspace = true
+flux-fs.workspace = true
+flux-vault.workspace = true
+flux-transport.workspace = true
+flux-runner.workspace = true
+flux-mount.workspace = true
+globset = "0.4"
+indicatif.workspace = true
+ctrlc.workspace = true
+jiff.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete = "4.6"
+clap_mangen = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+flux-transport.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
