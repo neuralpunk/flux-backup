@@ -44,12 +44,20 @@
       <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/snapshots-dark.png</image>
     </screenshot>
     <screenshot>
-      <caption>Editing a profile</caption>
+      <caption>A backup's settings</caption>
       <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/settings-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Light theme</caption>
       <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/overview-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Find a file in every snapshot, including files deleted since</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/search-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>See when the backup drive fills up</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/space-dark.png</image>
     </screenshot>
   </screenshots>
   <categories>
@@ -74,6 +82,23 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-11-08">
+      <description>
+        <p>Backups that don't need Flux, an app that shows at a glance whether you're protected, and faster backups.</p>
+        <ul>
+          <li>A new look, and an All backups page that answers "am I protected right now?"</li>
+          <li>Setting up a backup is a step-by-step guide, and the password is chosen there, so scheduled backups never wait for one</li>
+          <li>Settings groups open in a dialog over the editor</li>
+          <li>Faster backups and browsing: Vault splits large files on every core, and spinning disks get large files two at a time</li>
+          <li>Compatibility mode: store backups with rsync or Borg in their own formats, with a recovery guide and script kept next to them</li>
+          <li>Export profiles to borgmatic, restic, rsync and Borg, and import Flux profiles</li>
+          <li>Find files across all snapshots, see every version of a file, open a copy, and preview a restore before it changes anything</li>
+          <li>A size estimate while setting up, and a forecast of when the backup drive fills up</li>
+          <li>Pause scheduled backups, skip them on metered connections, and monthly verification and weekly upkeep</li>
+          <li>Health warnings in words, a Preferences page, right-click menus, and settings without an advanced mode</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-05">
       <description>
         <p>First release: Mirror and Vault engines, local drives and SSH servers, systemd schedules, the desktop app, system backups, and read-only mounts of snapshots.</p>

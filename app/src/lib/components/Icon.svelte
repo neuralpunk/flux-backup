@@ -1,6 +1,8 @@
 <script lang="ts" module>
   // Small built-in icon set: 24×24, 1.75px strokes, currentColor.
   export const paths = {
+    lifebuoy: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5.6 5.6l3.6 3.6M14.8 14.8l3.6 3.6M18.4 5.6l-3.6 3.6M9.2 14.8l-3.6 3.6",
+    download: "M12 4v11M7 10l5 5 5-5M5 20h14",
     drive: "M3 13h18M5 13l2-7h10l2 7v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-5ZM8 16h.01M12 16h4",
     server: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
     vault: "M4 4h16v15H4zM14 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM14 9.5V8M7 9v6M7 19v2M17 19v2",
@@ -10,6 +12,11 @@
     play: "M7 4v16l13-8L7 4Z",
     x: "M6 6l12 12M18 6 6 18",
     check: "M5 12.5l4.5 4.5L19 7",
+    shieldCheck: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3ZM8.5 12l2.5 2.5 4.5-5",
+    minimize: "M6 12h12",
+    help: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM9.6 9.4a2.5 2.5 0 1 1 3.3 2.4c-.5.2-.9.7-.9 1.3v.6M12 16.8h.01",
+    maximize: "M6 6h12v12H6z",
+    pause: "M9 5v14M15 5v14",
     alert: "M12 3 2 20h20L12 3ZM12 10v4M12 17h.01",
     clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5l3 2",
     calendar: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4",

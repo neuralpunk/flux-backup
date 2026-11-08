@@ -68,7 +68,10 @@ fn qualify(method: &str, v: &mut Value) {
             }
         }
         "overview" => qualify_id(&mut v["profile"]["id"]),
-        "get_profile" | "new_profile" | "save_profile" if v.get("id").is_some() => {
+        "duplicate_profile" => qualify_id(v),
+        "get_profile" | "new_profile" | "save_profile" | "import_profile"
+            if v.get("id").is_some() =>
+        {
             qualify_id(&mut v["id"]);
         }
         _ => {}
@@ -219,11 +222,13 @@ macro_rules! commands {
 commands! {
     profiles() => Call::Profiles;
     overview(id: String) => Call::Overview { id };
+    status(id: String) => Call::Status { id };
     snapshots(id: String) => Call::Snapshots { id };
     list_dir(id: String, snapshot: String, path: String) => Call::ListDir { id, snapshot, path };
     unlock(id: String, password: String, create: Option<bool>)
         => Call::Unlock { id, password, create: create.unwrap_or(false) };
     save_key_file(id: String) => Call::SaveKeyFile { id };
+    set_password(id: String, password: String) => Call::SetPassword { id, password };
     backup_now(id: String) => Call::BackupNow { id };
     cancel(id: String) => Call::Cancel { id };
     restore(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool)
@@ -242,6 +247,134 @@ commands! {
     run_events(id: String, run_id: String) => Call::RunEvents { id, run_id };
     prune(id: String, dry_run: bool) => Call::Prune { id, dry_run };
     check(id: String, read_data: bool) => Call::Check { id, read_data };
+    recovery_kit(id: String) => Call::RecoveryKit { id };
+    export_profile(id: String, format: String) => Call::ExportProfile { id, format };
+    duplicate_profile(id: String) => Call::DuplicateProfile { id };
+    diagnostics(id: String) => Call::Diagnostics { id };
+    find(id: String, query: String) => Call::Find { id, query };
+    preferences() => Call::Preferences;
+    save_preferences(notify_success: bool, default_exclude: Option<Vec<String>>)
+        => Call::SavePreferences { notify_success, default_exclude };
+    set_pause(pause: String) => Call::SetPause { pause };
+    versions(id: String, path: String) => Call::Versions { id, path };
+    restore_preview(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool)
+        => Call::RestorePreview { id, snapshot, paths, to, overwrite };
+}
+
+/// Copy a file out of a snapshot (read-only, in a private temporary folder) and open it
+/// in its usual program. The program is started by the app, as the user.
+#[tauri::command]
+pub async fn open_snapshot_file(
+    state: St<'_>,
+    id: String,
+    snapshot: String,
+    path: String,
+) -> Result<String> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let v = b.route(Call::OpenFile { id, snapshot, path }, false)?;
+        let local = v.as_str().unwrap_or_default().to_owned();
+        std::process::Command::new("xdg-open")
+            .arg(&local)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| ApiError::new("error", format!("couldn't open {local}: {e}")))?;
+        Ok(local)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn export_formats() -> Result<Value> {
+    Ok(serde_json::to_value(
+        flux_service::edit::export_formats_impl(),
+    )?)
+}
+
+/// Save a profile's export into `dir`, a folder the user picked (written by the app, as
+/// the user, also for system profiles). Returns the file written.
+#[tauri::command]
+pub async fn save_export(state: St<'_>, id: String, format: String, dir: String) -> Result<String> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let e = b.route(Call::ExportProfile { id, format }, false)?;
+        let name = e["filename"].as_str().unwrap_or("profile-export.txt");
+        // A plain file name from the export, nothing else.
+        let name = std::path::Path::new(name)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "profile-export.txt".into());
+        let path = std::path::PathBuf::from(dir).join(name);
+        let mode = if e["executable"].as_bool().unwrap_or(false) {
+            0o755
+        } else {
+            0o644
+        };
+        flux_core::store::write_atomic(
+            &path,
+            e["contents"].as_str().unwrap_or_default().as_bytes(),
+            mode,
+        )
+        .map_err(|err| ApiError::new("error", format!("{}: {err}", path.display())))?;
+        Ok(path.display().to_string())
+    })
+    .await
+}
+
+/// Import the Flux profile in file `path` (read by the app, as the user).
+#[tauri::command]
+pub async fn import_profile(state: St<'_>, path: String, system: Option<bool>) -> Result<Value> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let meta =
+            std::fs::metadata(&path).map_err(|e| ApiError::new("error", format!("{path}: {e}")))?;
+        if meta.len() > 1 << 20 {
+            return Err(ApiError::new(
+                "error",
+                "That file is too large to be a profile.",
+            ));
+        }
+        let toml = std::fs::read_to_string(&path)
+            .map_err(|e| ApiError::new("error", format!("{path}: {e}")))?;
+        b.route(
+            Call::ImportProfile { toml, id: None },
+            system.unwrap_or(false),
+        )
+    })
+    .await
+}
+
+/// Whether rsync and borg are installed here.
+#[tauri::command]
+pub async fn tools() -> Result<Value> {
+    Ok(serde_json::to_value(flux_service::views::tools_impl())?)
+}
+
+/// Save a profile's recovery kit (guide and script) into `dir`, a folder the user picked.
+/// The files are written by the app itself, as the user, also for system profiles.
+#[tauri::command]
+pub async fn save_recovery_kit(state: St<'_>, id: String, dir: String) -> Result<Vec<String>> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let kit = b.route(Call::RecoveryKit { id: id.clone() }, false)?;
+        let short = id.strip_prefix(SYSTEM).unwrap_or(&id);
+        let dir = std::path::PathBuf::from(dir);
+        let mut written = Vec::new();
+        for (key, name, mode) in [
+            ("recovery", "FLUX-RECOVERY.txt", 0o644),
+            ("script", "flux-backup.sh", 0o755),
+        ] {
+            let text = kit[key].as_str().unwrap_or_default();
+            let path = dir.join(format!("{short}-{name}"));
+            flux_core::store::write_atomic(&path, text.as_bytes(), mode)
+                .map_err(|e| ApiError::new("error", format!("{}: {e}", path.display())))?;
+            written.push(path.display().to_string());
+        }
+        Ok(written)
+    })
+    .await
 }
 
 // Calls that aren't about an existing profile say which scope they're for.
@@ -263,6 +396,13 @@ pub async fn validate_profile(
         system.unwrap_or(false),
     )
     .await
+}
+
+/// What a profile being edited would back up. System profiles are counted by the helper,
+/// which can read everything they back up.
+#[tauri::command]
+pub async fn estimate(state: St<'_>, profile: Value, system: Option<bool>) -> Result<Value> {
+    route(state, Call::Estimate { profile }, system.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -313,8 +453,25 @@ mod tests {
         let mut s = json!({ "id": "etc", "saved": true });
         qualify("save_profile", &mut s);
         assert_eq!(s["id"], "system:etc");
+        let mut imp = json!({ "id": "etc", "issues": [] });
+        qualify("import_profile", &mut imp);
+        assert_eq!(imp["id"], "system:etc");
+        let mut dup = json!("etc-copy");
+        qualify("duplicate_profile", &mut dup);
+        assert_eq!(dup, "system:etc-copy");
         let mut other = json!("etc");
         qualify("suggest_id", &mut other);
         assert_eq!(other, "etc", "suggested ids stay plain");
     }
+}
+
+/// Whether Flux starts (in the tray) when you log in.
+#[tauri::command]
+pub fn autostart() -> bool {
+    crate::autostart::enabled()
+}
+
+#[tauri::command]
+pub fn set_autostart(on: bool) -> std::result::Result<(), String> {
+    crate::autostart::set(on).map_err(|e| e.to_string())
 }

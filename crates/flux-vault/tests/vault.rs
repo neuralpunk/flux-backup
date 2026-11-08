@@ -24,7 +24,20 @@ struct Env {
 }
 
 fn env() -> Env {
-    let tmp = tempfile::tempdir().unwrap();
+    env_in(tempfile::tempdir().unwrap())
+}
+
+/// A snapshot records the metadata of its source's parent folders too. Tests that compare
+/// two snapshots' trees use a parent no other test creates folders in (`/tmp` changes
+/// whenever a parallel test makes or removes its temporary folder).
+fn env_isolated(name: &str) -> Env {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{name}-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+    env_in(tempfile::tempdir_in(&base).unwrap())
+}
+
+fn env_in(tmp: tempfile::TempDir) -> Env {
     let src = tmp.path().join("src");
     let target = tmp.path().join("target");
     fs::create_dir_all(&src).unwrap();
@@ -74,6 +87,7 @@ impl Env {
                 name: None,
                 dry_run: false,
                 never: vec![self.root.clone()],
+                cache_dir: Some(self._tmp.path().join("cache")),
             },
             &Progress::new(),
             &silent,
@@ -442,6 +456,7 @@ fn unencrypted_vault_and_shared_dedup_between_owners() {
             name: None,
             dry_run: false,
             never: vec![],
+            cache_dir: None,
         },
         &Progress::new(),
         &silent,
@@ -463,7 +478,7 @@ fn unencrypted_vault_and_shared_dedup_between_owners() {
 /// left all its data on the drive, and `check --read-data` still read it all).
 #[test]
 fn deleting_snapshots_frees_their_data() {
-    let e = env();
+    let e = env_isolated("deleting");
     write(&e.src.join("big.bin"), &noise(3 << 20, 7));
     write(&e.src.join("small.txt"), b"hello");
     let repo = e.init(Some(PW));
@@ -493,6 +508,7 @@ fn deleting_snapshots_frees_their_data() {
             name: None,
             dry_run: false,
             never: vec![e.root.clone()],
+            cache_dir: None,
         },
         &Progress::new(),
         &silent,
@@ -543,4 +559,115 @@ fn check_reports_data_no_snapshot_uses() {
     let r = gc::prune(&repo, &e.owner, &Retention::default(), false, &silent).unwrap();
     assert!(r.gc.unwrap().bytes_freed >= 1 << 20);
     assert!(repo.backend().list("data").unwrap().is_empty());
+}
+
+/// Opening again with the same password reuses the unlocked key (no Argon2id), but never
+/// lets a wrong password in, and a removed password stops working at once.
+#[test]
+fn reopening_reuses_the_unlocked_key_safely() {
+    let e = env();
+    let repo = e.init(Some(PW));
+    let spare = repo.add_key("spare password", "spare").unwrap();
+    let backend = || Box::new(LocalBackend::new(&e.root));
+    // Unlock with each password, twice.
+    for pw in [PW, "spare password", PW, "spare password"] {
+        assert!(VaultRepo::open(backend(), Some(pw)).is_ok(), "{pw}");
+    }
+    assert!(matches!(
+        VaultRepo::open(backend(), Some("wrong")),
+        Err(VaultError::WrongPassword)
+    ));
+    // Remove the spare password: it no longer opens the Vault, cached or not.
+    VaultRepo::open(backend(), Some(PW))
+        .unwrap()
+        .remove_key(&spare)
+        .unwrap();
+    assert!(matches!(
+        VaultRepo::open(backend(), Some("spare password")),
+        Err(VaultError::WrongPassword)
+    ));
+    assert!(VaultRepo::open(backend(), Some(PW)).is_ok());
+}
+
+/// A file several read-ahead batches long is chunked in parallel and restored byte for
+/// byte, and an identical copy in the same backup is stored once.
+#[test]
+fn large_files_chunked_in_parallel_round_trip() {
+    let e = env();
+    let big = noise(70 << 20, 11);
+    write(&e.src.join("disk.img"), &big);
+    write(&e.src.join("copy/disk.img"), &big);
+    let repo = e.init(Some(PW));
+    let s = e.snap(&repo);
+    assert!(
+        s.stats.stored_bytes < (70 << 20) * 11 / 10,
+        "stored {} for two identical 70 MiB files",
+        s.stats.stored_bytes
+    );
+    let out = e._tmp.path().join("r");
+    e.restore_to(&repo, &s, &out);
+    assert!(fs::read(out.join("src/disk.img")).unwrap() == big);
+    assert!(fs::read(out.join("src/copy/disk.img")).unwrap() == big);
+    // Backing up the same content again reuses every chunk.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write(&e.src.join("again.img"), &big);
+    let s2 = e.snap(&repo);
+    assert!(
+        s2.stats.stored_bytes < 1 << 20,
+        "stored {}",
+        s2.stats.stored_bytes
+    );
+}
+
+/// The file list a backup leaves in the cache is exactly what rebuilding it from the
+/// repository gives, and the next backup only uses it for that same snapshot.
+#[test]
+fn cached_file_list_matches_the_repository() {
+    let e = env();
+    sample(&e.src);
+    let repo = e.init(Some(PW));
+    let s1 = e.snap(&repo);
+    let cache = e._tmp.path().join("cache");
+    let file = fs::read_dir(&cache)
+        .unwrap()
+        .flatten()
+        .next()
+        .expect("a cached list")
+        .path();
+    let record = |id: &str| {
+        repo.records()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.meta.id == id)
+            .unwrap()
+    };
+    // What the cache holds is what flatten gives (checked through a second, unchanged run:
+    // it must find nothing changed, so it must have read a correct list).
+    let flat = repo.flatten(&record(&s1.id)).unwrap();
+    assert!(!flat.is_empty());
+    let cached =
+        flux_vault::backup::cached_file_list(&cache, &repo, &e.owner, &record(&s1.id).tree)
+            .expect("cached for the latest snapshot");
+    assert!(
+        cached == flat,
+        "the cached list differs from the repository's"
+    );
+    match e.backup(&repo) {
+        BackupOutcome::Unchanged { previous, .. } => assert_eq!(previous, s1.id),
+        o => panic!("expected unchanged: {o:?}"),
+    }
+    // A change: the new snapshot is right whether or not the cache was used.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write(&e.src.join("docs/new.txt"), b"new");
+    let s2 = e.snap(&repo);
+    assert_eq!(s2.stats.new, 1, "{:?}", s2.stats);
+    // A cache left from another snapshot is not used: damage it and back up again.
+    fs::write(&file, b"not a cache").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write(&e.src.join("docs/newer.txt"), b"newer");
+    let s3 = e.snap(&repo);
+    assert_eq!(s3.stats.new, 1, "{:?}", s3.stats);
+    let out = e._tmp.path().join("r");
+    e.restore_to(&repo, &s3, &out);
+    assert_eq!(fs::read(out.join("src/docs/newer.txt")).unwrap(), b"newer");
 }

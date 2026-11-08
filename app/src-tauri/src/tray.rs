@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backend::Backend;
 use flux_service::views::{backup_now_impl, profiles_impl};
@@ -62,10 +62,40 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let pause_hour = MenuItem::with_id(
+        app,
+        "pause-hour",
+        "Pause scheduled backups for an hour",
+        true,
+        None::<&str>,
+    )?;
+    let pause_tomorrow = MenuItem::with_id(
+        app,
+        "pause-tomorrow",
+        "Pause scheduled backups until tomorrow",
+        true,
+        None::<&str>,
+    )?;
+    let resume = MenuItem::with_id(
+        app,
+        "pause-off",
+        "Resume scheduled backups",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&open, &all, &PredefinedMenuItem::separator(app)?, &quit],
+        &[
+            &open,
+            &all,
+            &PredefinedMenuItem::separator(app)?,
+            &pause_hour,
+            &pause_tomorrow,
+            &resume,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
     )?;
     let tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Flux Backup")
@@ -86,6 +116,17 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
             });
+        }
+        id @ ("pause-hour" | "pause-tomorrow" | "pause-off") => {
+            let state = app.state::<Arc<Backend>>().inner().user.clone();
+            let which = id.trim_start_matches("pause-").to_owned();
+            match flux_service::prefs::set_pause_impl(&state, which) {
+                // The window shows the pause; tell it.
+                Ok(_) => {
+                    let _ = app.emit("flux://pause", ());
+                }
+                Err(e) => tracing::warn!("pause: {}", e.message),
+            }
         }
         "quit" => app.exit(0),
         _ => {}

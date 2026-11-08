@@ -1,240 +1,511 @@
-# Design
+---
+name: Flux Backup
+description: Snapshot backups for the Linux desktop, at home next to GNOME's own apps.
+colors:
+  shell: "#15181d"
+  view: "#1c1e22"
+  group: "#25272c"
+  control: "#2f3238"
+  shell-hover: "#1f232a"
+  track: "#3a3d44"
+  sep: "#34373d"
+  selected: "#2b3038"
+  on-selected: "#eceef1"
+  fg: "#eceef1"
+  fg-2: "#b8bcc3"
+  fg-muted: "#949aa4"
+  primary: "#78b0f0"
+  on-primary: "#0b1626"
+  brand: "#7abdff"
+  chart: "#6aa6ea"
+  success: "#72c79a"
+  warning: "#e7b65a"
+  danger: "#ef8576"
+  group-edge: "transparent"
+  seg-on: "#4a4e56"
+  shell-light: "#e4e8ee"
+  view-light: "#f6f7f9"
+  group-light: "#ffffff"
+  control-light: "#e9ecf0"
+  shell-hover-light: "#d9dee6"
+  track-light: "#dde1e7"
+  sep-light: "#e2e5ea"
+  selected-light: "#d3dae4"
+  on-selected-light: "#17191d"
+  fg-light: "#17191d"
+  fg-2-light: "#3f444c"
+  fg-muted-light: "#555c66"
+  primary-light: "#2759a4"
+  on-primary-light: "#ffffff"
+  brand-light: "#2759a4"
+  chart-light: "#2759a4"
+  success-light: "#1b6e45"
+  warning-light: "#7d5200"
+  danger-light: "#b3321f"
+  group-edge-light: "rgb(0 0 6 / 0.09)"
+  seg-on-light: "#ffffff"
+typography:
+  display:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "30px"
+    fontWeight: 600
+    lineHeight: 1.25
+    letterSpacing: "-0.015em"
+  headline:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "22px"
+    fontWeight: 650
+    lineHeight: 1.2
+    letterSpacing: "-0.012em"
+  title:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "15px"
+    fontWeight: 650
+  dialog-title:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "17px"
+    fontWeight: 600
+  body:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "14px"
+    fontWeight: 400
+    fontFeature: "\"cv11\""
+  button:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "13.5px"
+    fontWeight: 550
+  group-title:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "13px"
+    fontWeight: 650
+  label:
+    fontFamily: "Inter Variable, Adwaita Sans, Cantarell, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "12.5px"
+    fontWeight: 400
+  mono:
+    fontFamily: "JetBrains Mono, Adwaita Mono, ui-monospace, monospace"
+    fontSize: "12px"
+    fontWeight: 400
+    fontFeature: "\"tnum\""
+rounded:
+  panel: "14px"
+  card: "12px"
+  segmented: "10px"
+  control: "8px"
+  segment: "7px"
+  tag: "6px"
+  round: "9999px"
+spacing:
+  view-x: "40px"
+  view-top: "24px"
+  section: "32px"
+  row-x: "16px"
+  row-y: "10px"
+  row-gap: "14px"
+  control-x: "14px"
+  group-title: "8px"
+components:
+  button:
+    backgroundColor: "{colors.control}"
+    textColor: "{colors.fg}"
+    typography: "{typography.button}"
+    rounded: "{rounded.control}"
+    padding: "0 14px"
+    height: "34px"
+  button-hover:
+    backgroundColor: "{colors.track}"
+  button-primary:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.on-primary}"
+    rounded: "{rounded.control}"
+    padding: "0 14px"
+    height: "34px"
+  button-ghost:
+    backgroundColor: "transparent"
+    textColor: "{colors.fg-2}"
+    rounded: "{rounded.control}"
+    height: "34px"
+  button-ghost-hover:
+    backgroundColor: "{colors.control}"
+    textColor: "{colors.fg}"
+  button-icon:
+    textColor: "{colors.fg-2}"
+    rounded: "{rounded.control}"
+    size: "34px"
+  button-danger-filled:
+    backgroundColor: "{colors.danger}"
+    textColor: "{colors.view}"
+    rounded: "{rounded.control}"
+    height: "34px"
+  input:
+    backgroundColor: "{colors.control}"
+    textColor: "{colors.fg}"
+    typography: "{typography.body}"
+    rounded: "{rounded.control}"
+    padding: "0 12px"
+    height: "36px"
+  group:
+    backgroundColor: "{colors.group}"
+    rounded: "{rounded.card}"
+  row:
+    backgroundColor: "{colors.group}"
+    textColor: "{colors.fg}"
+    padding: "10px 16px"
+    height: "52px"
+  tag:
+    textColor: "{colors.fg-2}"
+    typography: "{typography.label}"
+    rounded: "{rounded.tag}"
+    padding: "0 8px"
+    height: "24px"
+  segmented:
+    backgroundColor: "{colors.control}"
+    rounded: "{rounded.segmented}"
+    padding: "3px"
+  segmented-on:
+    backgroundColor: "{colors.seg-on}"
+    textColor: "{colors.fg}"
+    rounded: "{rounded.segment}"
+    height: "30px"
+  switch:
+    backgroundColor: "{colors.track}"
+    rounded: "{rounded.round}"
+    width: "44px"
+    height: "24px"
+  switch-on:
+    backgroundColor: "{colors.primary}"
+  sidebar-item-selected:
+    backgroundColor: "{colors.selected}"
+    textColor: "{colors.on-selected}"
+    rounded: "{rounded.control}"
+    padding: "8px 10px"
+---
 
-The app follows the **"Graphite Tonal" (2a)** design below (reference:
-[screenshots/overview-dark.png](screenshots/overview-dark.png)). Tokens live in
-`app/src/app.css`; the shell is `App.svelte`, `lib/ui/TitleBar.svelte`, `lib/ui/Logo.svelte`
-and `lib/components/Sidebar.svelte`.
+# Design System: Flux Backup
 
-## How Flux applies it
+Tokens and component classes live in `app/src/app.css`; the shell is `App.svelte`,
+`lib/ui/TitleBar.svelte`, `lib/ui/Logo.svelte` and `lib/components/Sidebar.svelte`.
 
-- **Component classes** in `app.css` carry the recipes: `.card` (surface-2, 20px), `.btn`
-  (chip), `.btn-primary` (filled pill), `.btn-tonal`, `.btn-ghost`, `.input`, `.label`,
-  `.title`, `.tag`. One filled button per view; in Settings and dialogs the page's own
-  action is the filled one.
-- **Less on screen:** details live behind a click or a tooltip. Snapshots list only times
-  (names and pins when set), with rare actions in a ⋯ menu. Overview shows one *Recent
-  backups* card. The profile editor asks three questions plus an encryption switch;
-  **Advanced options** reveals the rest in place.
-- **Light theme status colours** keep the hues but are darker than the dark theme's
-  (`--c-success/-warning/-danger` under `[data-theme="light"]`). The dark values put text
-  on white at about 1.9:1; these give at least 4.5:1 on cards, chips and tags (WCAG AA).
-- **Logo:** always on its dark tile (the tile is part of the icon), also in the light theme.
+How the interface behaves (signifiers, rows, menus, tags, confirmations) is in
+[UX_PRINCIPLES.md](UX_PRINCIPLES.md); this file is how it looks.
+
+The frontmatter is normative. Unsuffixed colour keys are the dark theme (the default,
+`:root, [data-theme="dark"]`); `-light` keys are the same token under
+`[data-theme="light"]`. In code every token is a runtime variable `--c-<name>` behind a
+Tailwind `--color-<name>`; the code names differ from the keys here for the surfaces:
+`shell` is `--c-bg`, `view` is `--c-surface-1`, `group` is `--c-surface-2`, `control` is
+`--c-surface-3` and `shell-hover` is `--c-surface-sunken`.
+
+## Overview
+
+**Creative North Star: "At home on the desktop"**
+
+Flux looks like it shipped with the user's Linux desktop. It follows the GNOME/Adwaita
+screen tradition in graphite and calm blue: a blue-graphite shell (titlebar and sidebar)
+around a flatter graphite view, and content set in grouped lists, one rounded group with
+rows split by hairlines, instead of a box per item. The app answers "am I protected?" in
+one sentence before anything else, and type carries the hierarchy; there are no stat
+boxes.
+
+Colour has one job each. Blue means act: the one primary button of a view, progress,
+focus, an on switch. Green, amber and red mean state, and always sit next to words that
+say the same thing. Where you are (the sidebar item, the chosen segment) is a neutral
+lift, never blue. Machine data (paths, sizes, counts, times, shortcuts) is JetBrains Mono
+with tabular figures; everything else is Inter, the face Adwaita Sans is built on.
+
+The signature is the protection sentence over a 30-day history strip of dots on a fixed
+magnitude ramp. The same grammar answers for all backups on the start page and for one
+backup on its own page, and the same ramp marks each snapshot.
+
+**Key Characteristics:**
+- Two-tone frame: blue-graphite shell, flatter graphite view with a 14px top-left corner.
+- Grouped lists with hairline separators; interactive rows end in a chevron or a control.
+- One blue primary button per view; state colours never stand alone without words.
+- Selection is a neutral lift, in the sidebar and in segmented controls.
+- Inter for UI, JetBrains Mono for machine data, tabular numbers on everything that changes.
+- A fixed log-scale magnitude ramp (4 to 11px dots) for history and snapshots.
+
+## Colors
+
+Graphite neutrals with a faint blue cast, one calm blue for action, and three status hues
+that are darker in the light theme so text stays AA.
+
+### Primary
+- **Calm Adwaita Blue** (`primary`): the single primary button of a view ("Back up all
+  now", "Back up now", "Stop", a dialog's confirm), progress fills, focus rings
+  (`2px solid`, offset 2px), the on switch, the caret, text selection (38% mix), the
+  running glyph, and the ring on the item whose context menu is open. Text on it is
+  `on-primary`.
+- **Brand Blue** (`brand`): the lit pill of the logo; reserved for the mark.
+- **Chart Blue** (`chart`): the one data series in the space chart (at least 3:1 on
+  groups); area fill at 10% opacity, dashed projection line.
+
+### Secondary (status)
+- **Protected Green** (`success`): protected, a day that kept a copy, the ok glyph.
+- **Attention Amber** (`warning`): needs attention, paused schedules, "Runs as root".
+- **Failure Red** (`danger`): failed, a day with only failures, the unseen-failure dot,
+  destructive menu items and the destructive dialog's confirm (`.btn-danger-filled`).
+
+### Neutral
+- **Shell Graphite** (`shell`): titlebar and sidebar, the window's own colour.
+- **View Graphite** (`view`): the content area and dialogs.
+- **Group Graphite** (`group`): grouped lists and cards, one step up from the view.
+- **Control Graphite** (`control`): buttons, inputs, the segmented track, menus, toasts.
+- **Shell Hover** (`shell-hover`): hover on sidebar items.
+- **Track** (`track`): button hover, progress and switch tracks, scrollbars.
+- **Hairline** (`sep`): the 1px line between rows of a group.
+- **Selected Lift** (`selected` / `on-selected`): the current sidebar item.
+- **Segment Lift** (`seg-on`): the chosen button of a segmented control.
+- **Group Edge** (`group-edge`): a 1px ring around groups, the view's top-left edge and
+  dialogs; transparent in dark, 9% near-black in light, where white groups on a near-white
+  view need it.
+- **Ink ramp** (`fg`, `fg-2`, `fg-muted`): text, secondary text, labels and captions.
+
+### Named Rules
+**The One Job Rule.** Blue acts, green/amber/red report state, a neutral lift says where
+you are. No colour does two of these jobs.
+
+**The One Blue Button Rule.** A view has at most one `.btn-primary`. Its siblings are
+neutral `.btn` or `.btn-ghost`.
+
+**The Words-With-Colour Rule.** A status colour always accompanies words that say the same
+("Failed 2 days ago", "1 needs attention"). A glyph repeats the state; it never replaces
+the sentence. The failed row on All backups is tinted (`danger` at 7%) and its status line
+is red text.
+
+### Contrast (WCAG AA, measured from the tokens)
+Dark: `fg-muted` is 5.3:1 on groups and 4.5:1 on controls; `primary` text 6.6:1 on groups;
+status hues 5.9 to 8.0:1 on groups; `on-primary` on `primary` 8.0:1. Light: `fg-muted`
+5.0 to 6.0:1 on shell, groups and controls; status hues 5.0 to 6.8:1 on every surface;
+`on-primary` on `primary` 6.9:1; white on `danger` 6.2:1; `primary` as text 5.6:1 on the
+shell and 4.9:1 on the selected lift; `fg-muted` 4.8:1 on the selected lift.
+
+## Typography
+
+**Display Font:** Inter Variable (with Adwaita Sans, Cantarell, system-ui)
+**Body Font:** Inter Variable, with the `cv11` alternate on
+**Label/Mono Font:** JetBrains Mono 400/500 (with Adwaita Mono, ui-monospace)
+
+**Character:** Inter reads as the desktop's own UI face; JetBrains Mono marks what a
+machine produced. Fonts are bundled locally with fontsource so they work offline.
+
+### Hierarchy
+- **Display** (600, 30px, 1.25, -0.015em, balanced): the protection sentence on All
+  backups ("4 of 5 backups are protected.").
+- **Headline** (650, 22px, 1.2, -0.012em): page titles (`.page-title`: a backup's name,
+  Settings, Preferences, New backup). A backup's own protection sentence uses 22px at 600.
+- **Dialog title** (600, 17px).
+- **Title** (650, 15px): a heading inside a group (`.title`); the small 15px/600 `fg-2`
+  view label "All backups" in the headerbar row.
+- **Body** (400, 14px): everything else; sentences under the display at 15px `fg-2`,
+  measure capped at 68ch.
+- **Button** (550, 13.5px; 650 on primary and danger-filled).
+- **Group title** (650, 13px, `fg-2`): the heading above a group (`.group-title`).
+- **Label** (400, 12.5px, `fg-muted`): captions, row subtitles, tags; 11.5px for strip
+  day labels and menu shortcuts.
+- **Mono** (400, 12px, tabular): paths, sizes, counts, shortcuts.
+
+### Named Rules
+**The Machine Data Rule.** Paths, sizes, counts and times are JetBrains Mono; every number
+that changes while you watch carries tabular figures (`.num` / `.tabular`, automatic on
+`.font-mono`) so it doesn't jitter.
+
+**The Sentence Case Rule.** Headings are sentence case and plain words; no uppercase
+labels, no letter-spaced captions.
+
+## Layout
+
+The window is a titlebar (48px) over a row of sidebar (264px) and view. The view is
+the only rounded thing in the frame: its top-left corner carries the panel radius and a
+1px `group-edge` line on its top and left. Content is centred in the view with 40px side
+gutters and 24px top padding, at a maximum width per kind of page:
+
+- **All backups:** 1080px, sections 32px apart.
+- **A backup** (Overview, Snapshots, Activity): 1180px, sections 24px apart.
+- **Preference columns** (Preferences, a backup's Settings, the New backup form): 680px;
+  the page header above the New backup and Settings forms sits in a 760px column.
+
+The All backups rows respond to their container, not the window (`@container`). Below
+760px a row is glyph, name with status and path, chevron, with the history strip on its
+own line. From 760px "Last good copy" and "Next" join as a 200px column. From 1020px the
+strip moves onto the first line and the path gets its own line, so a row stays three lines.
+
+Spacing steps are multiples of 4px (row padding 10px by 16px, gaps of 8, 14, 24, 28 and
+32px); the direction asked for a strict 8px grid, and the build settled on a 4px rhythm.
+Rows are at least 52px tall; controls are 34px, inputs 36px, the segmented control 36px
+overall. The minimum window is 900 by 600.
+
+Dialogs are native `<dialog>` elements on a 55% black backdrop, `view` coloured with the
+panel radius, 24px padding. The close button is last in the DOM (positioned top right) so
+opening a dialog focuses its first real control, not Close.
+
+## Elevation & Depth
+
+Depth is tonal. Surfaces step up from shell to view to group to control, and the light
+theme adds a hairline `group-edge` ring where white groups need an edge. Shadows appear
+only on things that float above the window or on a chosen segment.
+
+### Shadow Vocabulary
+- **Group edge** (`box-shadow: 0 0 0 1px var(--c-group-edge)`): groups, lone rows, the
+  view's top-left edge (`-1px -1px 0`), dialogs and toasts.
+- **Dialog** (`box-shadow: 0 24px 64px -16px rgb(0 0 0 / 0.55), 0 0 0 1px var(--c-group-edge)`).
+- **Menu** (`box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.6)` plus a ring of `fg` at 8%).
+- **Toast** (`box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.5), 0 0 0 1px var(--c-group-edge)`).
+- **Chosen segment** (`box-shadow: 0 1px 2px rgb(0 0 0 / 0.22), 0 0 0 1px rgb(0 0 0 / 0.04)`).
+- **Switch knob** (`box-shadow: 0 1px 2px rgb(0 0 0 / 0.3)`).
+
+### Named Rules
+**The Float-Only Shadow Rule.** Only what floats above the window (dialogs, menus, toasts)
+casts a shadow. Groups and rows sit on the view with tone and, in light, a hairline.
+
+## Shapes
+
+Corners shrink as things get smaller: the view's top-left corner and dialogs 14px, groups
+and cards and menus and toasts 12px, the segmented track 10px, controls and sidebar items
+8px, segments 7px, tags 6px. Round shapes are reserved for things that are round in
+Adwaita: window buttons, state glyphs, switches, progress bars and history dots. The
+window itself stays square. Hairline separators run between rows inside a group; a group
+has no outline in dark.
+
+## Components
+
+### Buttons
+Flat, quiet, Adwaita-proportioned.
+- **Shape:** gently rounded (8px), 34px tall, 14px side padding, icon gap 8px.
+- **Default:** `control` fill, `fg` text, 13.5px at 550. Hover moves to `track`; active
+  dims to 94% brightness; disabled at 45% opacity.
+- **Primary:** `primary` fill, `on-primary` text, 650. Hover brightens to 108%. One per view.
+- **Ghost:** transparent with `fg-2` text; hover fills with `control`. For secondary
+  actions next to a default button ("Fix its settings").
+- **Icon:** 34px square, 8px radius (28px in the sidebar and toasts), `fg-2` glyph; hover
+  fills with `control`.
+- **Danger filled:** the confirm button of a destructive dialog only; `danger` fill with
+  `view` text in dark and white in light. `.btn-danger` is red text on a default button.
+- **Window buttons:** GNOME's: 24px circles in `control` with 12 to 13px symbolic icons,
+  hover to `track`, right-aligned with an 8px gap, after a keyboard-shortcuts icon button.
+- **Transitions:** background, colour and filter over 120ms.
+
+### Tags
+- **Style:** information, never a control. Outlined, not filled, so it can't be read as a
+  button: an inset 1px ring of `fg` at 16%, `fg-2` text, 12.5px, 24px tall, 6px radius.
+- **Variants:** `.tag-accent` (green ring at 45%, green text) and `.tag-warn` (amber).
+
+### Grouped lists and cards
+- **Group** (`.rows`, `.card`): `group` fill, 12px radius, `group-edge` ring, clipped.
+- **Row** (`.row`): at least 52px, 10px by 16px padding, 14px gap. Rows after the first
+  carry an inset 1px `sep` line on top. A row outside a group is its own rounded group.
+- **Interactive row** (`.row-link`): lifts to `fg` at 5% over `group` on hover (120ms) and
+  ends in a chevron or a control; informational rows don't react.
+- **Settings row** (`form/Row.svelte`): optional 17px icon, title and subtitle on the
+  left, current value and chevron or control on the right; a disabled row says why in
+  place of its subtitle.
+- **Group title** sits above the group, 13px/650 `fg-2`, 8px below.
+
+### Inputs / Fields
+- **Style:** `control` fill, no stroke, 8px radius, 36px tall, 12px side padding, 14px
+  text, `fg-muted` placeholder, caret in `primary`.
+- **Focus:** 2px `primary` outline at -1px offset.
+- **Disabled:** 60% opacity. Field messages sit under the field in 12.5px, red for errors
+  and amber for warnings.
+
+### Segmented control
+Adwaita toggle group, for views of one thing (a backup's Overview, Snapshots, Activity) or
+one choice of a few (theme, destination type, how often).
+- **Track:** `control`, 10px radius, 3px padding, 2px gap.
+- **Segment:** 30px, 14px padding, 7px radius, 13.5px at 550, `fg-2`; hover `fg` on
+  `fg` at 6%.
+- **Chosen:** `seg-on` lift with `fg` text and the chosen-segment shadow. Never blue.
+- Uses `role="tab"` with `aria-selected`, or `role="radio"` with `aria-checked`.
+
+### Switch
+- 44 by 24px, round, `track` off and `primary` on; an 18px `#f4f5f7` knob slides 20px over
+  150ms (`cubic-bezier(0.22, 1, 0.36, 1)`). `role="switch"`, disabled at 60%.
+
+### State glyph
+- A round 24px mark beside a backup that repeats its state in colour: `.glyph-ok`
+  (green), `-warn` (amber), `-bad` (red), `-run` (blue), plain (neutral, `fg` at 7%). The
+  tint is the state colour at 16 to 17% with the colour as the icon (13px). It grows to
+  48px beside a backup's sentence and 56px beside the All backups sentence. Running
+  glyphs spin, one turn per 2.4s.
+
+### Navigation
+- **Sidebar** (264px, `shell`): "All backups" with its glyph and a one-line summary, then
+  "Your backups" (12.5px/600 `fg-muted` section head with a + icon button), one item per
+  backup (glyph, 14px/500 name, 12.5px status in the state's text colour), New backup,
+  then System backups (locked: a row with a chevron), and Preferences at the foot. Items
+  are 8px-radius, 8px by 10px padding; hover `shell-hover`; current is the `selected`
+  lift with `aria-current="page"`. A small red dot marks a failure not yet seen.
+- **Titlebar** (48px, `shell`): 24px logo and "Flux Backup" at 13.5px/600 on the left;
+  drag anywhere to move, double-click to maximise.
+
+### Menus and toasts
+- **Menu:** `control`, 12px radius, 4px padding, 13.5px items with 15px icons in
+  `fg-muted`, hover and keyboard focus on `track`, mono shortcuts on the right, danger
+  items red, separators `fg` at 10%.
+- **Toast:** bottom right, 384px wide, `control`, 12px radius, icon in the state colour,
+  dismiss icon button.
+
+### Progress
+- A 6px round `track` bar with a `primary` fill (width eases over 300ms); above it the
+  phase and a mono, tabular line of bytes, speed, counts and time left.
+
+### Protection sentence and history strip (signature)
+- **Sentence:** the state glyph, then the display sentence ("4 of 5 backups are
+  protected."), one plain-words line about the backup that needs you (its name in its
+  state colour) and a neutral button to open it. On a backup's page the same grammar runs
+  at 22px with last backup, next run and snapshot count beneath.
+- **History strip:** the last 30 days, one 13px cell per day, 16px tall. A day that kept
+  a copy is a green dot whose diameter follows a fixed log ramp: 4px for up to 1 MiB (or
+  nothing changed) to 11px for 10 GiB or more, in whole pixels, never wider than the cell
+  minus 2px. A day with only failures is an 8px red dot; a day with nothing is a 4px hollow
+  `fg-muted` ring. The ramp is fixed, so marks compare across backups. On a backup's page
+  the strip spreads across a card with the first day and "Today" named under it. The
+  strip carries a sentence summary as its accessible name and a title per day.
+- **Snapshots** use the same ramp for each snapshot's mark (stored bytes for Vault and
+  Borg, copied bytes for Mirror and rsync).
+
+### Motion
+Colour and background transitions run 120ms (150ms on switches); progress width eases
+over 300ms; running glyphs spin; skeletons pulse. Under `prefers-reduced-motion` every
+animation and transition is off.
+
+## Do's and Don'ts
+
+### Do:
+- **Do** set content as a grouped list: one 12px group, rows split by 1px `sep` hairlines.
+- **Do** give each view at most one `primary` button; everything else is neutral.
+- **Do** say the state in words next to every green, amber or red mark.
+- **Do** show where you are with the neutral `selected` or `seg-on` lift.
+- **Do** set machine data in JetBrains Mono with tabular figures.
+- **Do** mark history and snapshots on the fixed 4 to 11px log ramp in 13px cells.
+- **Do** put a dialog's close button last in the DOM.
+- **Do** keep the logo on its dark tile, in the light theme too.
+
+### Don't:
+- **Don't** use blue for selection, tabs or state; blue is for acting.
+- **Don't** wrap each item in its own box, nest groups inside groups, or build stat boxes.
+- **Don't** fill a tag; filled means button.
+- **Don't** scale the history ramp to each backup; marks must compare across backups.
+- **Don't** add shadows to groups or rows; only floating layers cast them.
+- **Don't** round the window; only the view's top-left corner carries the panel radius.
+
+## Implementation notes
+
 - **Progress** comes from each backup's status socket (`flux://job` events, ~5/s), not a
   per-command Channel: backups run as separate processes, so any window (or `flux watch`)
   can follow them.
-- **Not implemented:** *Pause* from the reference. A backup can be stopped and continues
-  from where it stopped next time.
-- **Window:** undecorated with a custom titlebar (drag to move, double-click to maximize,
-  three window buttons, plus `?` for shortcuts). The window stays square; the content panel
-  carries the 24px radius.
-- **Icons:** `app/src-tauri/icons/` (Tauri bundle, tray idle/active),
-  `packaging/linux/icons/` (extra hicolor sizes, scalable and symbolic SVGs, written
-  from the geometry below without embedded metadata).
+- **Not implemented:** pausing a running backup. A backup can be stopped and continues
+  from where it stopped next time. (Schedules can be paused; that is a different thing.)
+- **Theme:** `<html data-theme>` is always the resolved theme, dark or light; components
+  use semantic tokens only, so the light theme is another set of values.
 
----
+### Tauri window setup
 
-## Spec: Flux Backup — "Graphite Tonal" theme (2a)
-
-Implementation guide for **Rust + Tauri 2 + Svelte 5 + Tailwind CSS 4**.
-Reference: `2a-tonal.png`.
-
----
-
-### 1. Design principles
-
-- **No borders.** Hierarchy comes from tonal surface steps, not outlines.
-- **Three surface levels:** window → content panel → cards. Each step is slightly lighter.
-- **One accent hue (blue, ~250°)**, used in two strengths:
-  - *Primary* (bright): primary action, progress fill, percentages.
-  - *Primary container* (dim, tinted): selected nav item, active tab, secondary button.
-- **Pills for anything selectable** (nav items, tabs, theme switch, buttons). Rounded rectangles for content.
-- **Mono only for machine data**: paths, sizes, speeds, counts.
-- The content panel floats inside the window with a 12px gutter and 24px radius. That's the signature look.
-
----
-
-### 2. Design tokens
-
-### Colour (dark — default)
-
-| Token | Value | Use |
-|---|---|---|
-| `bg` | `#0e0f11` | Window, sidebar, titlebar |
-| `surface-1` | `#15171a` | Main content panel |
-| `surface-2` | `#1b1d21` | Cards, progress card, tab track |
-| `surface-3` | `#24272c` | Chip buttons inside cards |
-| `surface-sunken` | `#17191c` | Sidebar cards, theme switch track |
-| `tag` | `#1f2226` | Metadata chips under title |
-| `track` | `#2a2d33` | Progress track |
-| `fg` | `#e8e9eb` | Primary text |
-| `fg-2` | `#b9bcc2` | Secondary text, inactive nav |
-| `fg-muted` | `#8b9099` | Labels, captions |
-| `primary` | `oklch(0.78 0.12 250)` | Primary button, progress fill |
-| `on-primary` | `#0b1626` | Text on primary |
-| `primary-container` | `oklch(0.32 0.06 250)` | Selected pill, tonal button |
-| `on-primary-container` | `oklch(0.90 0.06 250)` | Text on container |
-| `brand` | `oklch(0.72 0.14 250)` | Logo mark, status dots |
-
-### Colour (light — derived)
-
-Same structure with lightness inverted. Hue and chroma stay the same.
-
-| Token | Value |
-|---|---|
-| `bg` | `#eef0f3` |
-| `surface-1` | `#f8f9fb` |
-| `surface-2` | `#ffffff` |
-| `surface-3` | `#eceef2` |
-| `surface-sunken` | `#e4e7ec` |
-| `tag` | `#e8ebef` |
-| `track` | `#dde1e7` |
-| `fg` | `#16181c` |
-| `fg-2` | `#3d424a` |
-| `fg-muted` | `#646a74` |
-| `primary` | `oklch(0.55 0.15 250)` |
-| `on-primary` | `#ffffff` |
-| `primary-container` | `oklch(0.90 0.05 250)` |
-| `on-primary-container` | `oklch(0.30 0.08 250)` |
-
-### Status colours (same L/C, different hue)
-
-`success oklch(0.78 0.12 155)` · `warning oklch(0.82 0.12 80)` · `danger oklch(0.72 0.14 25)`
-
-### Type
-
-- **Sans:** IBM Plex Sans (400 / 500 / 600)
-- **Mono:** IBM Plex Mono (400 / 500)
-
-| Role | Size / weight |
-|---|---|
-| Page title | 28 / 500 |
-| Card value | 22 / 500 |
-| Section title | 18 / 500 (progress), 15 / 500 (cards) |
-| Body / nav | 14 / 400–500 |
-| Label | 12.5 / 400, `fg-muted` |
-| Mono data | 12.5–13 / 400 |
-
-### Shape & spacing
-
-| Token | Value |
-|---|---|
-| `radius-panel` | 24px |
-| `radius-card` | 20px |
-| `radius-sm` | 12px (chip buttons), 8px (tags) |
-| `radius-pill` | 9999px |
-| Window gutter | 12px |
-| Panel padding | 28px 32px |
-| Card padding | 18–24px |
-| Grid gap | 12px |
-| Sidebar width | 232px |
-
----
-
-### 3. Tailwind 4 setup
-
-Tailwind 4 is CSS-first, so the tokens live in `src/app.css`. No JS config needed.
-
-```css
-/* src/app.css */
-@import "tailwindcss";
-
-/* Fonts are bundled locally, so they work offline */
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
-@import "@fontsource/ibm-plex-mono/400.css";
-@import "@fontsource/ibm-plex-mono/500.css";
-
-/* dark: variant follows [data-theme="dark"] on <html> */
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
-
-@theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
-
-  --radius-panel: 24px;
-  --radius-card: 20px;
-
-  /* Semantic colours point at runtime vars, so utilities like bg-surface-2 switch with the theme */
-  --color-bg: var(--c-bg);
-  --color-surface-1: var(--c-surface-1);
-  --color-surface-2: var(--c-surface-2);
-  --color-surface-3: var(--c-surface-3);
-  --color-surface-sunken: var(--c-surface-sunken);
-  --color-tag: var(--c-tag);
-  --color-track: var(--c-track);
-  --color-fg: var(--c-fg);
-  --color-fg-2: var(--c-fg-2);
-  --color-fg-muted: var(--c-fg-muted);
-  --color-primary: var(--c-primary);
-  --color-on-primary: var(--c-on-primary);
-  --color-primary-container: var(--c-primary-container);
-  --color-on-primary-container: var(--c-on-primary-container);
-  --color-brand: var(--c-brand);
-  --color-success: oklch(0.78 0.12 155);
-  --color-warning: oklch(0.82 0.12 80);
-  --color-danger: oklch(0.72 0.14 25);
-}
-
-:root, [data-theme="dark"] {
-  color-scheme: dark;
-  --c-bg: #0e0f11;
-  --c-surface-1: #15171a;
-  --c-surface-2: #1b1d21;
-  --c-surface-3: #24272c;
-  --c-surface-sunken: #17191c;
-  --c-tag: #1f2226;
-  --c-track: #2a2d33;
-  --c-fg: #e8e9eb;
-  --c-fg-2: #b9bcc2;
-  --c-fg-muted: #8b9099;
-  --c-primary: oklch(0.78 0.12 250);
-  --c-on-primary: #0b1626;
-  --c-primary-container: oklch(0.32 0.06 250);
-  --c-on-primary-container: oklch(0.90 0.06 250);
-  --c-brand: oklch(0.72 0.14 250);
-}
-
-[data-theme="light"] {
-  color-scheme: light;
-  --c-bg: #eef0f3;
-  --c-surface-1: #f8f9fb;
-  --c-surface-2: #ffffff;
-  --c-surface-3: #eceef2;
-  --c-surface-sunken: #e4e7ec;
-  --c-tag: #e8ebef;
-  --c-track: #dde1e7;
-  --c-fg: #16181c;
-  --c-fg-2: #3d424a;
-  --c-fg-muted: #646a74;
-  --c-primary: oklch(0.55 0.15 250);
-  --c-on-primary: #ffffff;
-  --c-primary-container: oklch(0.90 0.05 250);
-  --c-on-primary-container: oklch(0.30 0.08 250);
-  --c-brand: oklch(0.60 0.15 250);
-}
-
-@layer base {
-  html, body { @apply h-full bg-bg text-fg font-sans antialiased; }
-  body { user-select: none; } /* desktop feel; re-enable on selectable text */
-  .selectable { user-select: text; }
-}
-
-/* Utilities you'll reuse a lot */
-@utility pill { border-radius: 9999px; }
-@utility num { font-variant-numeric: tabular-nums; }
-```
-
-Use `tabular-nums` (`num`) on every changing number (%, MiB, speed) so the text doesn't jitter while it updates.
-
----
-
-### 4. Tauri 2 window setup
-
-The floating panel works best with a custom titlebar.
+The window is undecorated with a custom titlebar (drag to move, double-click to maximise,
+GNOME round window buttons, plus `?` for keyboard shortcuts).
 
 ```jsonc
-// src-tauri/tauri.conf.json  (excerpt)
+// app/src-tauri/tauri.conf.json (excerpt, as shipped)
 {
   "app": {
     "windows": [{
@@ -243,14 +514,14 @@ The floating panel works best with a custom titlebar.
       "minWidth": 900, "minHeight": 600,
       "decorations": false,
       "transparent": false,
-      "backgroundColor": "#0e0f11"   // avoids a white flash before the webview paints
+      "backgroundColor": "#15181d"   // avoids a white flash before the webview paints
     }]
   }
 }
 ```
 
 ```jsonc
-// src-tauri/capabilities/default.json  (excerpt)
+// app/src-tauri/capabilities/default.json (excerpt)
 {
   "permissions": [
     "core:default",
@@ -258,345 +529,99 @@ The floating panel works best with a custom titlebar.
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-theme"
+    "core:window:allow-set-theme",
+    "dialog:allow-open"
   ]
 }
 ```
 
-**Linux note:** client-side decorations under WebKitGTK can't draw rounded outer corners on every compositor. Keep the *window* square and let the inner panel carry the 24px radius. That's what the design does anyway.
+**Linux note:** client-side decorations under WebKitGTK can't draw rounded outer corners
+on every compositor. The *window* stays square and the view's top-left corner carries the
+14px panel radius.
 
-### Titlebar
+## App icon: "Stack"
 
-```svelte
-<!-- src/lib/ui/TitleBar.svelte -->
-<script lang="ts">
-  import { getCurrentWindow } from '@tauri-apps/api/window';
-  const win = getCurrentWindow();
-</script>
-
-<header data-tauri-drag-region
-  class="h-10 relative flex items-center justify-center text-[13px] font-medium text-fg-2">
-  Flux Backup
-  <div class="absolute right-4 flex gap-2.5">
-    <button aria-label="Minimize" class="size-3 rounded-full bg-surface-3 hover:bg-fg-muted" onclick={() => win.minimize()}></button>
-    <button aria-label="Maximize" class="size-3 rounded-full bg-surface-3 hover:bg-fg-muted" onclick={() => win.toggleMaximize()}></button>
-    <button aria-label="Close" class="size-3 rounded-full bg-surface-3 hover:bg-danger" onclick={() => win.close()}></button>
-  </div>
-</header>
-```
-
----
-
-### 5. Theme switching (Dark / Light / Auto) with Svelte 5 runes
-
-```ts
-// src/lib/theme.svelte.ts
-type Mode = 'dark' | 'light' | 'auto';
-
-const mq = window.matchMedia('(prefers-color-scheme: dark)');
-
-class Theme {
-  mode = $state<Mode>((localStorage.getItem('theme') as Mode) ?? 'auto');
-  systemDark = $state(mq.matches);
-  resolved = $derived(this.mode === 'auto' ? (this.systemDark ? 'dark' : 'light') : this.mode);
-
-  constructor() {
-    mq.addEventListener('change', (e) => (this.systemDark = e.matches));
-    $effect.root(() => {
-      $effect(() => {
-        document.documentElement.dataset.theme = this.resolved;
-        localStorage.setItem('theme', this.mode);
-      });
-    });
-  }
-}
-export const theme = new Theme();
-```
-
-`prefers-color-scheme` in WebKitGTK follows the GTK theme. If it doesn't track the GNOME/KDE setting on some desktops, read it from Rust with the `dark-light` crate and expose it as a command.
-
----
-
-### 6. Component recipes
-
-Each one is a small Svelte 5 component. These are the Tailwind classes that produce the 2a look.
-
-### App shell
-
-```svelte
-<div class="h-screen flex flex-col bg-bg">
-  <TitleBar />
-  <div class="flex-1 min-h-0 flex gap-3 px-3 pb-3">
-    <Sidebar />                       <!-- w-[232px] -->
-    <main class="flex-1 min-w-0 bg-surface-1 rounded-panel px-8 py-7 flex flex-col gap-[22px] overflow-auto">
-      {@render children()}
-    </main>
-  </div>
-</div>
-```
-
-### Nav item (sidebar profile)
-
-```svelte
-<script lang="ts">
-  let { label, active = false, status, progress }: {
-    label: string; active?: boolean; status?: 'running'|'idle'; progress?: number
-  } = $props();
-</script>
-
-<button class={[
-  'w-full flex items-center gap-3 px-4 py-3 pill text-sm transition-colors',
-  active ? 'bg-primary-container text-on-primary-container font-medium'
-         : 'text-fg-2 hover:bg-surface-sunken'
-]}>
-  <span class={['size-2 rounded-full', status === 'running' ? 'bg-brand' : 'bg-surface-3']}></span>
-  <span class="flex-1 text-left">{label}</span>
-  {#if progress != null}<span class="font-mono text-xs num">{progress}%</span>{/if}
-</button>
-```
-
-### Buttons
-
-```svelte
-<!-- variant: 'filled' | 'tonal' | 'chip' -->
-<script lang="ts">
-  let { variant = 'tonal', children, ...rest } = $props();
-  const styles = {
-    filled: 'pill px-5 py-2.5 bg-primary text-on-primary font-semibold hover:brightness-110',
-    tonal:  'pill px-5 py-2.5 bg-primary-container text-on-primary-container font-medium hover:brightness-125',
-    chip:   'rounded-xl px-4 py-2 bg-surface-3 text-fg text-[13.5px] hover:bg-track'
-  };
-</script>
-<button class={[styles[variant], 'text-sm transition active:scale-[.98] disabled:opacity-40']} {...rest}>
-  {@render children()}
-</button>
-```
-
-Rule: one **filled** button per view (Stop / Back up now). Use **tonal** for its sibling. Use **chip** for actions inside cards.
-
-### Segmented tabs
-
-```svelte
-<script lang="ts">
-  let { tabs, value = $bindable() }: { tabs: string[]; value: string } = $props();
-</script>
-<div role="tablist" class="self-start flex gap-1 bg-surface-2 pill p-1 text-[13.5px]">
-  {#each tabs as t}
-    <button role="tab" aria-selected={value === t} onclick={() => (value = t)}
-      class={['pill px-[18px] py-2 transition-colors',
-        value === t ? 'bg-primary-container text-on-primary-container font-medium' : 'text-fg-2 hover:text-fg']}>
-      {t}
-    </button>
-  {/each}
-</div>
-```
-
-### Metadata tag
-
-```svelte
-<span class="px-2.5 py-1 rounded-lg bg-tag text-fg-2 text-[12.5px]">Manual</span>
-<span class="px-2.5 py-1 rounded-lg bg-tag text-fg-2 text-[12.5px] font-mono selectable">/run/media/…/TEST</span>
-```
-
-### Stat card
-
-```svelte
-<div class="bg-surface-2 rounded-card px-5 py-[18px] flex flex-col gap-1.5">
-  <span class="text-[12.5px] text-fg-muted">{label}</span>
-  <span class="text-[22px] font-medium num">{value}</span>
-</div>
-```
-
-Lay out four of these with `grid grid-cols-4 gap-3`. Below ~1000px, switch to `grid-cols-2`.
-
-### Progress card
-
-```svelte
-<script lang="ts">
-  let { p }: { p: Progress } = $props();
-  const pct = $derived(Math.round((p.bytesDone / p.bytesTotal) * 100));
-</script>
-
-<section class="bg-surface-2 rounded-card px-6 py-[22px] flex flex-col gap-4">
-  <div class="flex justify-between items-baseline">
-    <div class="flex gap-3 items-baseline">
-      <span class="text-lg font-medium">{p.phase}</span>
-      <span class="font-mono text-lg font-medium text-primary num">{pct}%</span>
-    </div>
-    <span class="font-mono text-[13px] text-fg-muted num">
-      {fmtBytes(p.bytesDone)} / {fmtBytes(p.bytesTotal)} · {fmtBytes(p.rate)}/s · {p.itemsDone}/{p.itemsTotal} · {fmtEta(p.eta)} left
-    </span>
-  </div>
-  <div class="h-2 rounded bg-track overflow-hidden"
-       role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-    <div class="h-full rounded bg-primary transition-[width] duration-300 ease-out" style:width="{pct}%"></div>
-  </div>
-</section>
-```
-
----
-
-### 7. Streaming progress from Rust
-
-Use a Tauri 2 **Channel** for high-frequency updates. Throttle to about 10 Hz in Rust so the UI stays smooth.
-
-```rust
-// src-tauri/src/backup.rs
-use serde::Serialize;
-use tauri::ipc::Channel;
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Progress {
-    phase: &'static str,        // "Scanning" | "Copying" | "Finalizing"
-    bytes_done: u64,
-    bytes_total: u64,
-    rate: u64,                  // bytes/sec, smoothed (EMA)
-    items_done: u32,
-    items_total: u32,
-    eta: u32,                   // seconds
-}
-
-#[tauri::command]
-pub async fn run_backup(profile_id: String, on_progress: Channel<Progress>) -> Result<(), String> {
-    // ... in your copy loop, at most every 100 ms:
-    // on_progress.send(Progress { .. }).ok();
-    Ok(())
-}
-```
-
-```ts
-// src/lib/backup.svelte.ts
-import { invoke, Channel } from '@tauri-apps/api/core';
-
-export const run = $state<{ progress: Progress | null }>({ progress: null });
-
-export async function startBackup(profileId: string) {
-  const ch = new Channel<Progress>();
-  ch.onmessage = (p) => (run.progress = p);
-  await invoke('run_backup', { profileId, onProgress: ch });
-  run.progress = null;
-}
-```
-
----
-
-### 8. Motion & states
-
-- Transitions: 150ms colour/background, 300ms ease-out for the progress width. Nothing bouncy.
-- Hover on pills: background moves one surface step up. Containers get `brightness-125`.
-- Focus: `focus-visible:outline-2 outline-offset-2 outline-primary` on every interactive element.
-- Running state: the status dot in the sidebar can pulse (`animate-pulse`). Avoid spinners elsewhere.
-- Respect `prefers-reduced-motion` by wrapping the pulse and width transitions in `motion-safe:`.
-
----
-
-### 9. Do / Don't
-
-**Do**
-- Separate things by surface step and spacing.
-- Keep accent use to one filled button, the progress bar, and the selected states.
-- Use mono + tabular numbers for anything a machine produced.
-
-**Don't**
-- Add 1px borders to cards. That turns it back into 1a.
-- Use gradients on the progress bar or buttons.
-- Introduce a second accent hue for decoration. Hues are for status only (success, warning, danger).
-
----
-
-### 10. App icon: "Stack"
-
-Three stacked pills represent snapshots. The top one (the newest) is lit in `primary`, and the older ones step down through the tonal ramp. It reuses the pill shape from the UI, and it stays readable at 16px.
+Three stacked pills represent snapshots. The top one (the newest) is lit blue, and the
+older ones step down to a dim blue. It stays readable at 16px. The pills are the icon's
+own metaphor; the UI itself does not use pills.
 
 ### Geometry (256 grid)
 
 | Part | Spec |
 |---|---|
-| Tile | 256×256, `rx 58`, fill `#1b1d21` (`surface-2`) |
+| Tile | 256×256, `rx 58`, fill `#1b1d21` |
 | Pills | 144×32, `rx 16`, x = 56, y = 68 / 112 / 156 (12px gap) |
-| Pill 1 (newest) | `#7abdff` ≈ `oklch(0.78 0.12 250)` (`primary`) |
-| Pill 2 | `#32618e` ≈ `oklch(0.48 0.09 250)` |
-| Pill 3 (oldest) | `#193550` ≈ `oklch(0.32 0.06 250)` (`primary-container`) |
+| Pill 1 (newest) | `#7abdff` (the dark theme's `brand`) |
+| Pill 2 | `#32618e` |
+| Pill 3 (oldest) | `#193550` |
 
-The SVGs use hex values, not oklch, because librsvg (GNOME/KDE icon rendering) doesn't support oklch.
+These are fixed icon colours, not theme tokens: the tile is darker than today's `group`
+token. The SVGs use hex values, not oklch, because librsvg (GNOME/KDE icon rendering)
+doesn't support oklch. Masters: `app/src-tauri/icons/logo.svg` and `logo-1024.png`;
+`packaging/linux/icons/flux-backup.svg` is the same geometry without embedded metadata.
 
 ### Tauri bundle icons
 
-The best route is to let the Tauri CLI generate every platform format from the 1024px master:
-
-```bash
-npx tauri icon icons/app-icon-1024.png   # writes src-tauri/icons/*
-```
-
-If you'd rather place them by hand, copy `icons/tauri/*` into `src-tauri/icons/` and rename `128x128-2x.png` to `128x128@2x.png`. Then reference them:
+`app/src-tauri/icons/` holds the bundle set; regenerate it from the master with the Tauri
+CLI (`npx tauri icon icons/logo-1024.png` from `app/src-tauri`). `tauri.conf.json`
+references:
 
 ```jsonc
-// tauri.conf.json
 "bundle": {
-  "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
+  "icon": ["icons/32x32.png", "icons/64x64.png", "icons/128x128.png", "icons/256x256.png", "icons/icon.png"]
 }
 ```
 
 ### Linux desktop integration (.deb / .rpm / AppImage / Flatpak)
 
-Install the hicolor set and the scalable SVG under your app ID:
+`packaging/install.sh` installs the hicolor set under the app ID `flux-backup`:
 
 ```
-/usr/share/icons/hicolor/{16..512}x{16..512}/apps/flux-backup.png   ← icons/hicolor/*
-/usr/share/icons/hicolor/scalable/apps/flux-backup.svg              ← icons/flux-backup.svg
-/usr/share/icons/hicolor/symbolic/apps/flux-backup-symbolic.svg     ← icons/flux-backup-symbolic.svg
+/usr/share/icons/hicolor/{16,24,48}x…/apps/flux-backup.png          ← packaging/linux/icons/NxN/
+/usr/share/icons/hicolor/{32,64,128,256}x…/apps/flux-backup.png     ← app/src-tauri/icons/NxN.png
+/usr/share/icons/hicolor/512x512/apps/flux-backup.png               ← app/src-tauri/icons/icon.png
+/usr/share/icons/hicolor/scalable/apps/flux-backup.svg              ← packaging/linux/icons/flux-backup.svg
+/usr/share/icons/hicolor/symbolic/apps/flux-backup-symbolic.svg     ← packaging/linux/icons/flux-backup-symbolic.svg
 ```
 
-In the `.desktop` file, set `Icon=flux-backup`. For Flatpak, rename the files to your reverse-DNS ID (e.g. `io.flux.Backup.svg`).
+The `.desktop` template (`packaging/linux/flux-backup.desktop`) gets `Icon=flux-backup`.
+For Flatpak, rename the files to the reverse-DNS ID used by the metainfo
+(`io.github.neuralpunk.FluxBackup`).
 
 ### Tray icon
 
-- `flux-backup-symbolic.svg` / `tray-64.png`: idle. The grey `#bebebe` lets GNOME recolour it as a symbolic icon.
-- `flux-backup-tray-active.svg` / `tray-active-64.png`: backup running, with the top pill lit blue.
+- `app/src-tauri/icons/tray/idle.png`: idle, a grey stack (`#bebebe`, as in
+  `flux-backup-symbolic.svg`) that GNOME recolours as a symbolic icon.
+- `app/src-tauri/icons/tray/active.png`: a backup is running; the top pill lit blue.
+
+`app/src-tauri/src/tray.rs` embeds both and swaps them as backups start and end:
 
 ```rust
-// Tauri 2: swap the tray icon when a run starts/stops
-use tauri::{image::Image, tray::TrayIconBuilder};
-let idle   = Image::from_bytes(include_bytes!("../icons/tray-64.png"))?;
-let active = Image::from_bytes(include_bytes!("../icons/tray-active-64.png"))?;
-let tray = TrayIconBuilder::with_id("main").icon(idle.clone()).build(app)?;
-// later: tray.set_icon(Some(active.clone()))?;
+const IDLE: &[u8] = include_bytes!("../icons/tray/idle.png");
+const ACTIVE: &[u8] = include_bytes!("../icons/tray/active.png");
+// …
+if let Ok(icon) = Image::from_bytes(if busy { ACTIVE } else { IDLE }) {
+    let _ = tray.set_icon(Some(icon));
+}
 ```
 
-(`Image::from_bytes` needs the `image-png` feature on the `tauri` crate.)
+(`Image::from_bytes` needs the `image-png` feature on the `tauri` crate.) Desktops without
+a tray (GNOME without AppIndicator) carry on without one.
 
 ### In-app usage
 
-The sidebar logo is the same SVG at 28px. Inline it as a Svelte component so it follows the theme:
+The titlebar shows the mark at 24px. `lib/ui/Logo.svelte` inlines the same SVG with fixed
+hex fills, so it is identical in both themes:
 
 ```svelte
-<!-- src/lib/ui/Logo.svelte -->
-<svg viewBox="0 0 256 256" class="size-7" aria-hidden="true">
-  <rect width="256" height="256" rx="58" class="fill-surface-2" />
-  <rect x="56" y="68"  width="144" height="32" rx="16" class="fill-primary" />
-  <rect x="56" y="112" width="144" height="32" rx="16" fill="oklch(0.48 0.09 250)" />
-  <rect x="56" y="156" width="144" height="32" rx="16" class="fill-primary-container" />
+<svg viewBox="0 0 256 256" class={klass} aria-hidden="true">
+  <rect width="256" height="256" rx="58" fill="#1b1d21" />
+  <rect x="56" y="68" width="144" height="32" rx="16" fill="#7abdff" />
+  <rect x="56" y="112" width="144" height="32" rx="16" fill="#32618e" />
+  <rect x="56" y="156" width="144" height="32" rx="16" fill="#193550" />
 </svg>
 ```
 
-**Don'ts:** don't add gradients or shadows inside the tile, don't change the pill order (the lit pill is always on top), and don't put the mark on a light tile. The dark tile is the icon.
-
----
-
-### 11. Files in this bundle
-
-```
-THEME.md                         this guide
-app.css                          drop-in Tailwind 4 stylesheet (§3)
-2a-tonal.png                     UI reference screenshot
-icons/
-  preview.png                    icon at all sizes
-  app-icon-1024.png              master for `tauri icon`
-  flux-backup.svg                scalable app icon
-  flux-backup-symbolic.svg       monochrome symbolic/tray (idle)
-  flux-backup-tray-active.svg    tray while backing up
-  tray-64.png, tray-active-64.png
-  tauri/                         32, 128, 128@2x, icon.png (512)
-  hicolor/NxN/apps/              16–512 PNGs for /usr/share/icons
-```
+**Don'ts:** don't add gradients or shadows inside the tile, don't change the pill order
+(the lit pill is always on top), and don't put the mark on a light tile. The dark tile is
+the icon, in the light theme too.

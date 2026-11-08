@@ -231,6 +231,49 @@ pub fn run_status(ctx: &Ctx, args: StatusArgs) -> anyhow::Result<ExitCode> {
         );
     } else {
         output::table(&["PROFILE", "NOW", "LAST RUN", "NEXT RUN"], &rows);
+        if let Some(p) = flux_runner::prefs::pause(&ctx.paths, jiff::Timestamp::now()) {
+            println!("\n{} Resume with `flux resume`.", paused_text(&p));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn paused_text(p: &flux_runner::prefs::Pause) -> String {
+    match p.until {
+        Some(t) => format!(
+            "Scheduled backups are paused until {}.",
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%a %Y-%m-%d %H:%M")
+        ),
+        None => "Scheduled backups are paused.".into(),
+    }
+}
+
+pub fn run_pause(
+    ctx: &Ctx,
+    duration: Option<flux_core::HumanDuration>,
+    tomorrow: bool,
+) -> anyhow::Result<ExitCode> {
+    let now = jiff::Timestamp::now();
+    let until = if tomorrow {
+        Some(flux_runner::prefs::tomorrow_morning(now))
+    } else {
+        duration.map(|d| now + jiff::SignedDuration::try_from(d.as_duration()).unwrap_or_default())
+    };
+    flux_runner::prefs::set_pause(&ctx.paths, until)?;
+    let p = flux_runner::prefs::Pause { until };
+    if ctx.json {
+        output::print_json(&p)?;
+    } else {
+        println!("{} Backing up by hand still works.", paused_text(&p));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_resume(ctx: &Ctx) -> anyhow::Result<ExitCode> {
+    flux_runner::prefs::resume(&ctx.paths)?;
+    if !ctx.json {
+        println!("Scheduled backups will run again.");
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -1,5 +1,9 @@
 <script lang="ts">
-  import Icon from "../Icon.svelte";
+  // A list of paths or patterns as a grouped list: one row per item (remove on the right),
+  // and a last row to add one (typed, or picked with Browse…). `after`: more rows for the
+  // same group (e.g. the row that opens the exclusions).
+  import type { Snippet } from "svelte";
+  import Icon, { type IconName } from "../Icon.svelte";
 
   let {
     items = $bindable(),
@@ -7,7 +11,21 @@
     mono = true,
     pick,
     addLabel = "Add",
-  }: { items: string[]; placeholder?: string; mono?: boolean; pick?: () => Promise<string | null>; addLabel?: string } = $props();
+    icon,
+    label = "",
+    after,
+  }: {
+    items: string[];
+    placeholder?: string;
+    mono?: boolean;
+    pick?: () => Promise<string | null>;
+    addLabel?: string;
+    /** Shown before each item. */
+    icon?: IconName;
+    /** What the list is, for screen readers ("Folders to back up"). */
+    label?: string;
+    after?: Snippet;
+  } = $props();
   let draft = $state("");
 
   function add(v: string) {
@@ -21,23 +39,25 @@
   }
 </script>
 
-<div class="space-y-2">
+<div class="rows">
   {#if items.length}
-    <ul class="space-y-1">
+    <ul class="contents" aria-label={label || undefined}>
       {#each items as item, i (item)}
-        <li class="flex items-center gap-2 rounded-xl bg-surface-3 py-1.5 pr-1.5 pl-3.5">
-          <span class="min-w-0 flex-1 truncate text-sm {mono ? 'font-mono text-[13px]' : ''}">{item}</span>
-          <button type="button" class="rounded-md p-1 text-fg-muted hover:bg-track hover:text-danger" aria-label="Remove {item}" onclick={() => (items = items.filter((_, j) => j !== i))}>
-            <Icon name="x" size={14} />
+        <li class="row min-h-11 py-1.5 pr-2">
+          {#if icon}<Icon name={icon} size={17} class="shrink-0 text-fg-2" />{/if}
+          <span class="selectable min-w-0 flex-1 truncate {mono ? 'font-mono text-[13px]' : 'text-[14px]'}" title={item}>{item}</span>
+          <button type="button" class="btn-icon size-8 hover:text-danger" aria-label="Remove {item}" title="Remove" onclick={() => (items = items.filter((_, j) => j !== i))}>
+            <Icon name="x" size={15} />
           </button>
         </li>
       {/each}
     </ul>
   {/if}
-  <div class="flex gap-2">
+  <div class="row min-h-12 gap-2 py-2">
     <input
-      class="input {mono ? 'font-mono text-[13px]' : ''}"
+      class="input h-8 flex-1 {mono ? 'font-mono text-[13px]' : ''}"
       {placeholder}
+      aria-label={label ? `Add to ${label.toLowerCase()}` : "Add"}
       bind:value={draft}
       onkeydown={(e) => {
         if (e.key === "Enter") {
@@ -46,9 +66,10 @@
         }
       }}
     />
-    <button type="button" class="btn" disabled={!draft.trim()} onclick={() => add(draft)}><Icon name="plus" size={14} /> {addLabel}</button>
+    <button type="button" class="btn h-8" disabled={!draft.trim()} onclick={() => add(draft)}><Icon name="plus" size={14} /> {addLabel}</button>
     {#if pick}
-      <button type="button" class="btn" onclick={choose}><Icon name="folder" size={14} /> Browse…</button>
+      <button type="button" class="btn h-8" onclick={choose}><Icon name="folder" size={14} /> Browse…</button>
     {/if}
   </div>
+  {@render after?.()}
 </div>

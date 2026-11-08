@@ -194,7 +194,13 @@ fn interval_schedule_runs_only_when_due() {
     assert!(matches!(&r.outcome, Err(RunError::Skipped(w)) if w.starts_with("not due until")));
     assert_eq!(runlog::recent_runs(&e.paths, &e.id, 10).len(), 1);
     // Without --if-due it runs regardless.
-    assert_eq!(scheduled(&e, false).record.status, RunStatus::Unchanged);
+    let r = scheduled(&e, false);
+    assert_eq!(
+        r.record.status,
+        RunStatus::Unchanged,
+        "{:?}",
+        r.outcome.err()
+    );
 }
 
 #[test]
@@ -206,4 +212,56 @@ fn second_run_of_same_profile_is_refused() {
     let r = e.run();
     assert!(matches!(r.outcome, Err(RunError::Busy(_))));
     assert!(runlog::recent_runs(&e.paths, &e.id, 10).is_empty());
+}
+
+#[test]
+fn paused_scheduled_backups_are_skipped() {
+    let e = env();
+    flux_runner::prefs::set_pause(&e.paths, None).unwrap();
+    let r = scheduled(&e, false);
+    assert_eq!(r.record.status, RunStatus::Skipped);
+    assert!(matches!(&r.outcome, Err(RunError::Skipped(w)) if w == "scheduled backups are paused"));
+    // Backing up by hand still works.
+    assert_eq!(e.run().record.status, RunStatus::Completed);
+    flux_runner::prefs::resume(&e.paths).unwrap();
+    let r = scheduled(&e, false);
+    assert_eq!(
+        r.record.status,
+        RunStatus::Unchanged,
+        "{:?}",
+        r.outcome.err()
+    );
+}
+
+#[test]
+fn vault_space_is_reclaimed_weekly_after_scheduled_backups() {
+    let mut e = env();
+    e.profile.engine = flux_core::Engine::Vault;
+    e.profile.vault = Some(flux_core::profile::VaultOptions {
+        encryption: false,
+        ..Default::default()
+    });
+    assert_eq!(scheduled(&e, false).record.status, RunStatus::Completed);
+    // The first scheduled backup starts the clock; pretend it was a week ago.
+    let state = e.paths.state_dir.join("maintenance/t.json");
+    let week_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 8);
+    fs::write(&state, format!(r#"{{"freed":"{week_ago}"}}"#)).unwrap();
+    fs::write(e.root.join("src/f"), "changed").unwrap();
+    let r = scheduled(&e, false);
+    assert_eq!(
+        r.record.status,
+        RunStatus::Completed,
+        "{:?}",
+        r.outcome.err()
+    );
+    let events = runlog::run_events(&e.paths, &e.id, &r.record.run_id);
+    assert!(
+        events.iter().any(|ev| matches!(&ev.event, flux_core::progress::Event::Info { message } if message.starts_with("weekly upkeep: freed"))),
+        "{events:?}"
+    );
+    let saved = fs::read_to_string(&state).unwrap();
+    assert!(
+        !saved.contains(&week_ago.to_string()),
+        "the clock restarted"
+    );
 }

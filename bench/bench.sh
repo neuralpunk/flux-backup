@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Compare Flux's Mirror engine with rsync --link-dest (the approach Back in Time uses).
+# Compare Flux's Mirror engine with rsync --link-dest (the approach Back in Time uses), and
+# (when borg 1.x is installed) its Vault engine with Borg (repokey-blake2, zstd,3).
 #
 # usage: bench/bench.sh [WORKDIR]   (default: a temp dir; tmpfs keeps disk effects out)
-# Needs: a release build (cargo build --release), rsync, python3.
+# Needs: a release build (cargo build --release), rsync, python3; borg for the Vault part.
+# Touches nothing outside WORKDIR: no systemd timers, keyring entries or notifications.
 set -euo pipefail
 
 FLUX="$(cd "$(dirname "$0")/.." && pwd)/target/release/flux"
@@ -31,7 +33,9 @@ PY
 du -sh "$SRC" | cut -f1 | sed 's/^/Source size: /'
 
 export FLUX_HOME="$WORK/home"
+export FLUX_SYSTEMD_UNIT_DIR="$WORK/units" FLUX_SYSTEMCTL=true FLUX_SECRET_TOOL=false
 "$FLUX" profile create bench -t "$FT" -s "$SRC" >/dev/null
+sed -i 's/^notify = true/notify = false/' "$FLUX_HOME/config/profiles/bench.toml"
 # Force a snapshot even when nothing changed, to compare like with like.
 sed -i 's/^snapshot_if_unchanged = false/snapshot_if_unchanged = true/' "$FLUX_HOME/config/profiles/bench.toml"
 
@@ -64,4 +68,25 @@ sed -i 's/^snapshot_if_unchanged = true/snapshot_if_unchanged = false/' "$FLUX_H
 f=$(t "$FLUX" backup bench)
 printf "%-34s %10.2f %10s\n" "4. no changes (skip, Flux default)" "$f" "n/a"
 
-[ -z "${KEEP:-}" ] && { flux_ro_fix() { chmod -R u+w "$1" 2>/dev/null || true; }; flux_ro_fix "$FT"; rm -rf "$SRC" "$FT" "$RT" "$WORK/home"; }
+if command -v borg >/dev/null && borg --version | grep -q '^borg 1\.'; then
+  VT="$WORK/vault-target"; BR="$WORK/borg-repo"; rm -rf "$VT" "$BR" "$WORK/borg-base"; mkdir -p "$VT"
+  export FLUX_PASSWORD=bench BORG_PASSPHRASE=bench BORG_BASE_DIR="$WORK/borg-base"
+  "$FLUX" profile create vbench -t "$VT" -s "$SRC" --engine vault >/dev/null
+  # Like Borg (which always makes an archive): a snapshot even when nothing changed.
+  sed -i 's/^notify = true/notify = false/; s/^snapshot_if_unchanged = false/snapshot_if_unchanged = true/' \
+    "$FLUX_HOME/config/profiles/vbench.toml"
+  borg init --encryption=repokey-blake2 "$BR" >/dev/null 2>&1
+  bc_() { borg create --compression zstd,3 "$BR::$1" "$SRC" 2>/dev/null; }
+
+  printf "\n%-34s %10s %10s\n" "scenario" "vault (s)" "borg (s)"
+  drop; f=$(t "$FLUX" backup vbench); drop; b=$(t bc_ 1)
+  printf "%-34s %10.2f %10.2f\n" "1. initial backup" "$f" "$b"
+  drop; f=$(t "$FLUX" backup vbench); drop; b=$(t bc_ 2)
+  printf "%-34s %10.2f %10.2f\n" "2. no changes (new snapshot)" "$f" "$b"
+  modify
+  drop; f=$(t "$FLUX" backup vbench); drop; b=$(t bc_ 3)
+  printf "%-34s %10.2f %10.2f\n" "3. 1% small files + 1 big changed" "$f" "$b"
+  printf "%-34s %8s M %8s M\n" "repository size" "$(du -sm "$VT" | cut -f1)" "$(du -sm "$BR" | cut -f1)"
+fi
+
+[ -z "${KEEP:-}" ] && { flux_ro_fix() { chmod -R u+w "$1" 2>/dev/null || true; }; flux_ro_fix "$FT"; rm -rf "$SRC" "$FT" "$RT" "$WORK/home" "$WORK/units" "${VT:-}" "${BR:-}" "$WORK/borg-base"; }

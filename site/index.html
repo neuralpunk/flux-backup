@@ -28,6 +28,7 @@
       <nav class="nav" aria-label="Main">
         <a class="nav-optional" href="#features">Features</a>
         <a class="nav-optional" href="#engines">Engines</a>
+        <a class="nav-optional" href="#compat">Without Flux</a>
         <a class="nav-optional" href="#install">Install</a>
         <a href="guide.html">User guide</a>
         <a href="https://github.com/neuralpunk/flux-backup">GitHub</a>
@@ -44,7 +45,7 @@
     <!-- Hero -->
     <section class="hero">
       <div class="wrap">
-        <span class="tag"><span class="dot"></span>Version 0.1 · the first release</span>
+        <span class="tag"><span class="dot"></span>Version 0.2 · works without Flux too</span>
         <h1>Snapshot backups for Linux, made <em>fast</em>.</h1>
         <p class="lede">
           Flux keeps complete snapshots of your folders on an external drive or an SSH server.
@@ -60,9 +61,9 @@
 
         <div class="showcase">
           <img class="shot-dark has-light" src="assets/screenshots/overview-dark.png" width="1200" height="780"
-               alt="The Flux Backup app: the Home folder profile is 36% through a backup, with last and next backup times, 34 snapshots, 691 GiB free and a list of recent backups.">
+               alt="The Flux Backup app: the Home folder backup is 13% through, with the last backup time, 34 snapshots, a mark for each of the last 30 days and a list of recent backups.">
           <img class="shot-light" src="assets/screenshots/overview-light.png" width="1200" height="780" loading="lazy"
-               alt="The Flux Backup app in the light theme, showing a backup in progress.">
+               alt="The Flux Backup app in the light theme: Home folder is protected, with the last and next backup times and recent backups.">
         </div>
       </div>
     </section>
@@ -94,7 +95,7 @@
               <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10a6.5 6.5 0 1 0 2-4.7"/><path d="M3 3v3.5h3.5"/><path d="M10 6.5V10l2.5 1.5"/></svg>
             </div>
             <h3>Restore without fear</h3>
-            <p>Browse any snapshot instantly, see what changed, and restore to another folder or back in place. Files that differ are kept beside the restored ones unless you say otherwise.</p>
+            <p>Search every snapshot by name, see every version of a file, or open a copy without restoring anything. Before a restore, Flux shows what it would add, keep aside or replace.</p>
           </article>
 
           <article class="card">
@@ -102,7 +103,7 @@
               <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>
             </div>
             <h3>Runs by itself</h3>
-            <p>Schedules are systemd timers: at set times, every few hours, or when you plug in the drive. Missed backups catch up after boot, and scheduled runs can wait for mains power.</p>
+            <p>Schedules are systemd timers: at set times, every few hours, or when you plug in the drive. Missed backups catch up after boot; scheduled runs can wait for mains power or a non-metered connection, and you can pause them for an hour or a night.</p>
           </article>
 
           <article class="card">
@@ -118,7 +119,7 @@
               <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5 3.5 5v4.5c0 4 2.8 6.9 6.5 8 3.7-1.1 6.5-4 6.5-8V5L10 2.5Z"/><path d="m7.2 10 2 2 3.6-3.8"/></svg>
             </div>
             <h3>Hard to get wrong</h3>
-            <p>Flux won't fill your system disk when the backup drive is unplugged. An interrupted backup damages nothing and continues next time, and <code>flux check --read-data</code> verifies every byte.</p>
+            <p>Flux tells you in words when something needs you: a drive not seen for days, repeated failures, a disk filling up (with a forecast of when). An interrupted backup damages nothing, and every byte can be verified, monthly if you like.</p>
           </article>
 
           <article class="card">
@@ -173,6 +174,68 @@
       </div>
     </section>
 
+    <!-- Compatibility mode -->
+    <section class="section" id="compat">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Compatibility mode</p>
+          <h2>Backups that never depend on Flux.</h2>
+          <p>
+            Prefer industry-standard tooling? Let <code>rsync</code> or <code>Borg</code> write your
+            backups in their own native formats, and keep Flux as the app you use every day. If Flux
+            were ever gone, you could still list, restore and keep making backups with that tool alone.
+          </p>
+        </div>
+
+        <div class="grid grid-2">
+          <article class="card engine">
+            <div class="engine-title">
+              <h3>rsync</h3>
+              <span class="tag">Plain folders</span>
+            </div>
+            <ul>
+              <li>Every snapshot is an ordinary folder written by the system <code>rsync</code>, with <code>--link-dest</code>: unchanged files are hard links.</li>
+              <li>Each snapshot keeps the exact rsync command and filter rules that wrote it.</li>
+              <li>Restore with a file manager, <code>cp</code> or <code>rsync</code>. No program or password needed.</li>
+            </ul>
+            <p class="pick">Pick rsync if you want to open your backups with nothing but a file manager.</p>
+          </article>
+
+          <article class="card engine">
+            <div class="engine-title">
+              <h3>Borg</h3>
+              <span class="tag">Deduplicated · encrypted</span>
+            </div>
+            <ul>
+              <li>A standard Borg 1.x repository written by <code>borg</code> itself, with <code>repokey-blake2</code> encryption and zstd compression.</li>
+              <li>Names and pins live in the archives; archives you make with borg yourself show up in Flux.</li>
+              <li>Restore with <code>borg extract</code> or <code>borg mount</code> and your passphrase.</li>
+            </ul>
+            <p class="pick">Pick Borg for encrypted, compact backups with a tool many people already know.</p>
+          </article>
+        </div>
+
+        <div class="gallery" style="margin-top: 20px">
+          <figure>
+            <img src="assets/screenshots/recovery-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The recovery kit: a guide with sections such as In short, New to rsync and Restore one file, each with a copy button.">
+            <figcaption><strong>A recovery kit next to every backup</strong><code>FLUX-RECOVERY.txt</code> gives the exact commands for your profile, written for newcomers and experts alike, and <code>flux-backup.sh</code> keeps backing up with the tool alone.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/compat-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Setting up a backup, the protection step: Flux's encrypted Vault, or rsync or Borg writing the backups, with what each is good for and whether the tool is installed.">
+            <figcaption><strong>One choice when you set it up</strong>Flux shows what each option is good for, checks that the tool is installed, and keeps the details one click away.</figcaption>
+          </figure>
+        </div>
+        <p style="margin-top: 20px; color: var(--fg-2)">
+          Moving on, or using two tools? Any profile exports as a <strong>borgmatic</strong>
+          configuration or a <strong>restic</strong>, <strong>rsync</strong> or <strong>Borg</strong>
+          script, with a list of what doesn't carry over. Flux profiles export and import too.
+          <a href="guide.html#exporting-and-importing-profiles">How export works</a>.
+        </p>
+      </div>
+    </section>
+
     <!-- App -->
     <section class="section" id="app">
       <div class="wrap">
@@ -180,10 +243,12 @@
           <p class="eyebrow">The desktop app</p>
           <h2>Everything the command line does, with less to think about.</h2>
           <p>
-            Setting up a backup is three questions (what, where and when) and an encryption switch.
-            The rest waits under <strong>Advanced options</strong>. Backups run as separate processes,
+            Setting up a backup is a short guide, one question per step: what, where, how it's protected, and when.
+            Everything else is a clearly labelled row showing its current value, which opens just that
+            group of settings. Backups run as separate processes,
             so they keep going when you close the window, and the app follows every backup live,
-            however it was started.
+            however it was started. New in 0.2: search across snapshots, versions of a file, a
+            restore preview, a space forecast, and pausing scheduled backups.
           </p>
         </div>
 
@@ -195,8 +260,8 @@
           </figure>
           <figure>
             <img src="assets/screenshots/settings-dark.png" width="1200" height="780" loading="lazy"
-                 alt="The profile editor, asking what to back up, where to keep it, when, and whether to encrypt.">
-            <figcaption><strong>Setting up a backup</strong>Connected USB drives are offered, and tied to their filesystem so an unplugged drive is never mistaken for its empty mount point.</figcaption>
+                 alt="A backup's settings: its name, what to back up, and where to keep it, with connected drives offered.">
+            <figcaption><strong>Settings</strong>Connected USB drives are offered, and tied to their filesystem so an unplugged drive is never mistaken for its empty mount point.</figcaption>
           </figure>
           <figure>
             <img src="assets/screenshots/activity-dark.png" width="1200" height="780" loading="lazy"
@@ -206,7 +271,37 @@
           <figure>
             <img src="assets/screenshots/system-dark.png" width="1200" height="780" loading="lazy"
                  alt="System profiles in the sidebar, unlocked after authenticating as an administrator.">
-            <figcaption><strong>System backups</strong>Click Authenticate, enter an administrator password, and manage them like your own. They lock again after 15 idle minutes.</figcaption>
+            <figcaption><strong>System backups</strong>Click System backups, read what it needs, enter an administrator password, and manage them like your own. They lock again after 15 idle minutes.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/search-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Search results for “notes” across 34 snapshots: two files, one of them deleted, each with Versions and Restore buttons.">
+            <figcaption><strong>Find in all snapshots</strong>Type part of a name. Files you've since deleted are marked, with the last snapshot that had them.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/versions-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Versions of notes.md: four versions with their dates, sizes and snapshots, each with Open and Restore buttons.">
+            <figcaption><strong>Every version of a file</strong>Open any version to look at it, or restore it.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/restore-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The restore dialog showing what will happen: 3 items added, 2 files that differ kept aside, 9 already identical.">
+            <figcaption><strong>A restore preview</strong>Before anything is written: what's added, what differs and is kept aside (or replaced), and what's already identical.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/space-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The Space on BackupDisk card: a chart of used space over two months with a dashed projection reaching full around late January.">
+            <figcaption><strong>When the drive fills up</strong>Used space over the last weeks and, once there's enough history, when it's full at that rate.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/health-dark.png" width="1200" height="780" loading="lazy"
+                 alt="All backups: 4 of 5 backups are protected; Photo library needs attention because the Archive drive isn't connected and its last backup was 9 days ago.">
+            <figcaption><strong>Warnings in words</strong>What needs you and what to do about it, not just a red dot.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/screenshots/preferences-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Preferences: scheduled backups paused until 5:00 PM with Resume now, notifications, start in the tray, theme, and default exclusions.">
+            <figcaption><strong>Preferences</strong>Pause scheduled backups, get notified of successes too, start in the tray, and choose what new backups leave out.</figcaption>
           </figure>
         </div>
       </div>
@@ -222,6 +317,7 @@
             <ul class="checklist">
               <li><span>The app and <code>flux</code> share the same profiles and see each other's backups.</span></li>
               <li><span>Search every snapshot, list every version of a file, and diff against what's on disk now.</span></li>
+              <li><span>Export a profile to borgmatic, restic, rsync or Borg; pause and resume schedules; <code>flux diagnostics</code> for bug reports.</span></li>
               <li><span>Every command takes <code>--json</code>, and exit codes tell “finished, but some files were skipped” apart from failure.</span></li>
               <li><span>Man pages and bash, zsh and fish completions are included.</span></li>
             </ul>
@@ -239,6 +335,8 @@ flux find home '*.odt' -i       # search every snapshot
 flux history home ~/thesis.tex  # every version of a file
 flux prune home --dry-run       # what retention would remove
 flux mount home ~/snapshots     # snapshots as read-only folders
+flux pause --tomorrow           # skip tonight's scheduled backups
+flux profile export home -f borgmatic
 </code></pre>
           </div>
         </div>
@@ -251,7 +349,7 @@ flux mount home ~/snapshots     # snapshots as read-only folders
         <div class="section-head">
           <p class="eyebrow">Performance</p>
           <h2>Seconds where other tools take minutes.</h2>
-          <p>Measured on 1 GiB of test data (100,000 small files plus 20 large ones) on tmpfs, on a 16-core machine. Snapshots were checked byte for byte.</p>
+          <p>Measured on 1 GiB of test data (100,000 small files plus 20 large ones) on tmpfs, on a 16-core machine: the median of three runs of <code>bench/bench.sh</code>, with rsync 3.5 and Borg 1.4.5. Snapshots were checked byte for byte.</p>
         </div>
 
         <div class="grid grid-2">
@@ -262,9 +360,9 @@ flux mount home ~/snapshots     # snapshots as read-only folders
               <table>
                 <thead><tr><th scope="col">Scenario</th><th scope="col" class="n">Flux</th><th scope="col" class="n">rsync</th></tr></thead>
                 <tbody>
-                  <tr><th scope="row">Initial full backup</th><td class="n win">0.6 s</td><td class="n">4.1 s</td></tr>
-                  <tr><th scope="row">No changes, new snapshot</th><td class="n win">0.37 s</td><td class="n">9.1 s</td></tr>
-                  <tr><th scope="row">1% of small files and 1 large file changed</th><td class="n win">0.37 s</td><td class="n">9.2 s</td></tr>
+                  <tr><th scope="row">Initial full backup</th><td class="n win">0.46 s</td><td class="n">4.3 s</td></tr>
+                  <tr><th scope="row">No changes, new snapshot</th><td class="n win">0.26 s</td><td class="n">7.7 s</td></tr>
+                  <tr><th scope="row">1% of small files and 1 large file changed</th><td class="n win">0.26 s</td><td class="n">7.7 s</td></tr>
                 </tbody>
               </table>
             </div>
@@ -277,10 +375,10 @@ flux mount home ~/snapshots     # snapshots as read-only folders
               <table>
                 <thead><tr><th scope="col">Scenario</th><th scope="col" class="n">Flux</th><th scope="col" class="n">Borg</th></tr></thead>
                 <tbody>
-                  <tr><th scope="row">Initial backup</th><td class="n win">1.8 s</td><td class="n">15.3 s</td></tr>
-                  <tr><th scope="row">No changes</th><td class="n win">0.5 s</td><td class="n">7.7 s</td></tr>
-                  <tr><th scope="row">1% of files changed</th><td class="n win">0.6–1.0 s</td><td class="n">8.0 s</td></tr>
-                  <tr><th scope="row">Repository size</th><td class="n win">864 MiB</td><td class="n">873 MiB</td></tr>
+                  <tr><th scope="row">Initial backup</th><td class="n win">1.7 s</td><td class="n">15.8 s</td></tr>
+                  <tr><th scope="row">No changes, new snapshot</th><td class="n win">0.51 s</td><td class="n">8.2 s</td></tr>
+                  <tr><th scope="row">1% of small files and 1 large file changed</th><td class="n win">0.51 s</td><td class="n">8.2 s</td></tr>
+                  <tr><th scope="row">Repository size</th><td class="n win">864 MiB</td><td class="n">869 MiB</td></tr>
                 </tbody>
               </table>
             </div>
@@ -334,7 +432,7 @@ sudo PREFIX=/usr packaging/install.sh
           <div class="card">
             <h3>A word of caution</h3>
             <p>
-              Flux 0.1 is the first release. As with any new backup tool, keep another copy of
+              Flux 0.2 is a young release. As with any new backup tool, keep another copy of
               anything precious until you trust it. The
               <a href="https://github.com/neuralpunk/flux-backup/blob/main/docs/THREAT_MODEL.md">threat model</a>
               describes what Flux protects against, and the

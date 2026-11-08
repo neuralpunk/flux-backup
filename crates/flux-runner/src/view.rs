@@ -2,6 +2,8 @@
 //!
 //! * Mirror: the snapshot's plain files, read with `pread`
 //! * Mirror over SSH: ranged SFTP reads
+//! * rsync (compatibility mode): like Mirror, from the snapshot's plain folder
+//! * Borg (compatibility mode): each opened file extracted once with `borg extract --stdout`
 //! * Vault: the file's chunks, located by their plaintext lengths in the index, decrypted
 //!   one at a time (the last one is kept, so sequential reads decode each chunk once)
 
@@ -68,6 +70,15 @@ impl SnapshotView {
                 snapshot: self.meta.id.clone(),
                 entry: e.clone(),
             })),
+            AnyRepo::Borg(r) => Ok(Box::new(LocalFile(r.extract_file(&self.meta.id, e)?))),
+            AnyRepo::Rsync(r) => match r.local_data_dir(&self.meta.id) {
+                Some(base) => Ok(Box::new(LocalFile(File::open(base.join(e.rel_path()))?))),
+                None => Ok(Box::new(RemoteFile {
+                    repo: self.repo.clone(),
+                    snapshot: self.meta.id.clone(),
+                    entry: e.clone(),
+                })),
+            },
             AnyRepo::Vault { repo: v, .. } => {
                 let index = v.index().map_err(io::Error::other)?;
                 let mut chunks = Vec::with_capacity(self.blobs[i].len());
@@ -119,10 +130,13 @@ struct RemoteFile {
 
 impl FileReader for RemoteFile {
     fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let AnyRepo::MirrorRemote(r) = &*self.repo else {
-            unreachable!("remote file of a remote repository")
-        };
-        r.read_file_range(&self.snapshot, &self.entry, offset, len as u64)
+        match &*self.repo {
+            AnyRepo::MirrorRemote(r) => {
+                r.read_file_range(&self.snapshot, &self.entry, offset, len as u64)
+            }
+            AnyRepo::Rsync(r) => r.read_range(&self.snapshot, &self.entry, offset, len as u64),
+            _ => unreachable!("remote file of a remote repository"),
+        }
     }
 }
 

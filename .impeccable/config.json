@@ -1,0 +1,51 @@
+{
+  "hook": {
+    "enabled": true,
+    "limits": {
+      "maxFindings": 5,
+      "maxChars": 8000
+    }
+  },
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-11-08T12:04:53.355Z",
+        "reason": "Agent: spent decision-round sketches (gitignored runtime), not shipped UI; the build is clean (detect app/src = [])"
+      },
+      {
+        "rule": "overused-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-11-08T12:04:53.367Z",
+        "reason": "Agent: spent decision-round sketches (gitignored runtime), not shipped UI; the build is clean (detect app/src = [])"
+      },
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-11-08T12:04:53.378Z",
+        "reason": "Agent: spent decision-round sketches (gitignored runtime), not shipped UI; the build is clean (detect app/src = [])"
+      },
+      {
+        "rule": "icon-tile-stack",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-11-08T12:04:53.390Z",
+        "reason": "Agent: spent decision-round sketches (gitignored runtime), not shipped UI; the build is clean (detect app/src = [])"
+      }
+    ]
+  }
+}

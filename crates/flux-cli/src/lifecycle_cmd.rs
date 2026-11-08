@@ -79,10 +79,11 @@ pub struct DiffArgs {
 #[derive(Args)]
 pub struct FindArgs {
     pub profile: String,
-    /// Glob. Without '/', matches file names (`*.odt`); with '/', full paths
+    /// Plain text matches part of a name, in any case (`report`); `*`, `?` and `[…]` make
+    /// a glob. Without '/', names (`*.odt`); with '/', full paths
     /// (`/home/*/Documents/**/*.pdf`).
     pub pattern: String,
-    /// Case-insensitive.
+    /// Case-insensitive (always, for plain text).
     #[arg(short = 'i')]
     pub ignore_case: bool,
     /// Search only this snapshot.
@@ -265,10 +266,13 @@ pub fn run_diff(ctx: &Ctx, args: DiffArgs) -> anyhow::Result<ExitCode> {
         let new = repo.find(args.new.as_deref().unwrap_or("latest"))?;
         let old = match &args.old {
             Some(o) => repo.find(o)?,
+            // The one before in the list (oldest first). Not by comparing times: some
+            // tools record start times to the second only, so two snapshots can tie.
             None => snaps
                 .iter()
-                .rev()
-                .find(|s| s.started < new.started)
+                .position(|s| s.id == new.id)
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| snaps.get(i))
                 .cloned()
                 .context("there is no snapshot before the latest one to compare with")?,
         };
@@ -333,9 +337,16 @@ pub fn run_find(ctx: &Ctx, args: FindArgs) -> anyhow::Result<ExitCode> {
         None => repo.snapshots()?,
     };
     let full_path = args.pattern.contains('/');
-    let glob = globset::GlobBuilder::new(args.pattern.trim_start_matches('/'))
-        .literal_separator(full_path)
-        .case_insensitive(args.ignore_case)
+    // Plain text: part of a name, like the app's search box.
+    let plain = !args.pattern.contains(['*', '?', '[']);
+    let pattern = if plain {
+        format!("*{}*", args.pattern.trim_start_matches('/'))
+    } else {
+        args.pattern.trim_start_matches('/').to_owned()
+    };
+    let glob = globset::GlobBuilder::new(&pattern)
+        .literal_separator(full_path && !plain)
+        .case_insensitive(args.ignore_case || plain)
         .build()
         .with_context(|| format!("invalid pattern {:?}", args.pattern))?
         .compile_matcher();

@@ -89,6 +89,28 @@ pub enum Engine {
     Mirror,
     /// Deduplicating, compressed, optionally encrypted chunk repository.
     Vault,
+    /// Compatibility mode: plain folders written by the system `rsync` (`--link-dest`
+    /// snapshots), usable without Flux.
+    Rsync,
+    /// Compatibility mode: a standard Borg repository written by the system `borg`.
+    Borg,
+}
+
+impl Engine {
+    /// Compatibility-mode engines store everything in a standard tool's native format.
+    pub fn is_compat(self) -> bool {
+        matches!(self, Engine::Rsync | Engine::Borg)
+    }
+
+    /// Name shown to people.
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::Mirror => "Mirror",
+            Engine::Vault => "Vault",
+            Engine::Rsync => "rsync",
+            Engine::Borg => "Borg",
+        }
+    }
 }
 
 impl fmt::Display for Engine {
@@ -96,6 +118,8 @@ impl fmt::Display for Engine {
         f.write_str(match self {
             Engine::Mirror => "mirror",
             Engine::Vault => "vault",
+            Engine::Rsync => "rsync",
+            Engine::Borg => "borg",
         })
     }
 }
@@ -123,6 +147,42 @@ pub struct Profile {
     pub hooks: Hooks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsync: Option<RsyncOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borg: Option<BorgOptions>,
+    /// Upkeep done after scheduled backups when it's due.
+    #[serde(default, skip_serializing_if = "Maintenance::is_default")]
+    pub maintenance: Maintenance,
+}
+
+/// Upkeep after scheduled backups: a full verification now and then, and reclaiming the
+/// space of removed snapshots (Vault forgets them at each backup; the space comes back
+/// when unused data is deleted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Maintenance {
+    /// Read every stored byte back about once a month.
+    #[serde(default)]
+    pub verify_monthly: bool,
+    /// Vault: delete data no snapshot uses about once a week.
+    #[serde(default = "yes")]
+    pub free_space_weekly: bool,
+}
+
+impl Default for Maintenance {
+    fn default() -> Self {
+        Self {
+            verify_monthly: false,
+            free_space_weekly: true,
+        }
+    }
+}
+
+impl Maintenance {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 fn default_version() -> u32 {
@@ -264,6 +324,10 @@ pub struct Schedule {
     /// Do not start scheduled backups while running on battery.
     #[serde(default)]
     pub skip_on_battery: bool,
+    /// Do not start scheduled backups to a server over a metered connection (as
+    /// NetworkManager reports it: mobile data, a phone's hotspot…).
+    #[serde(default)]
+    pub skip_on_metered: bool,
     /// Also back up when the target drive (`target.fs_uuid`) is connected.
     #[serde(default)]
     pub on_connect: bool,
@@ -277,6 +341,7 @@ impl Default for Schedule {
             every: None,
             catch_up: true,
             skip_on_battery: false,
+            skip_on_metered: false,
             on_connect: false,
         }
     }
@@ -440,6 +505,122 @@ fn default_zstd() -> u8 {
     3
 }
 
+/// rsync-engine settings. Only meaningful when `engine = "rsync"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RsyncOptions {
+    /// Extra arguments added to every rsync backup command (e.g. `--compress` for slow
+    /// links). They're recorded with each snapshot and in the recovery script.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+/// Borg-engine settings. Only meaningful when `engine = "borg"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BorgOptions {
+    /// Fixed when the repository is created.
+    #[serde(default)]
+    pub encryption: BorgEncryption,
+    /// Borg's `--compression` value: `lz4`, `zstd,3`, `auto,zstd,10`, `none`, …
+    #[serde(default = "default_borg_compression")]
+    pub compression: String,
+    /// Where the passphrase comes from (not used when `encryption = "none"`).
+    #[serde(default)]
+    pub password_source: PasswordSource,
+    /// The borg program on the SSH server, when it isn't `borg` on its PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+    /// Extra arguments added to every `borg create`. Recorded in the recovery script.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl Default for BorgOptions {
+    fn default() -> Self {
+        Self {
+            encryption: BorgEncryption::default(),
+            compression: default_borg_compression(),
+            password_source: PasswordSource::default(),
+            remote_path: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+fn default_borg_compression() -> String {
+    "zstd,3".into()
+}
+
+/// Borg encryption modes Flux creates repositories with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BorgEncryption {
+    /// Authenticated encryption, the key stored in the repository and protected by the
+    /// passphrase (Borg's recommended mode).
+    #[default]
+    #[serde(rename = "repokey-blake2")]
+    RepokeyBlake2,
+    /// The same with SHA-256 (faster on CPUs with SHA extensions but slower BLAKE2).
+    #[serde(rename = "repokey")]
+    Repokey,
+    /// No encryption and no authentication.
+    #[serde(rename = "none")]
+    None,
+}
+
+impl BorgEncryption {
+    /// The value for `borg init --encryption`.
+    pub fn as_arg(self) -> &'static str {
+        match self {
+            BorgEncryption::RepokeyBlake2 => "repokey-blake2",
+            BorgEncryption::Repokey => "repokey",
+            BorgEncryption::None => "none",
+        }
+    }
+}
+
+/// borg create options that would break Flux's reading of the repository.
+pub const BORG_RESERVED_ARGS: &[&str] = &[
+    "--json",
+    "--log-json",
+    "--progress",
+    "--list",
+    "--filter",
+    "--comment",
+    "--dry-run",
+    "-n",
+    "--patterns-from",
+    "--stdin-name",
+    "--paths-from-stdin",
+    "--paths-from-command",
+    "--content-from-command",
+    "--encryption",
+    "-e",
+];
+
+/// rsync options that would break the snapshot layout or Flux's reading of it.
+pub const RSYNC_RESERVED_ARGS: &[&str] = &[
+    "--link-dest",
+    "--compare-dest",
+    "--copy-dest",
+    "--relative",
+    "-R",
+    "--no-relative",
+    "--files-from",
+    "--backup",
+    "-b",
+    "--backup-dir",
+    "--remove-source-files",
+    "--dry-run",
+    "-n",
+    "--list-only",
+    "--only-write-batch",
+    "--write-batch",
+    "--read-batch",
+    "--inplace",
+    "--fake-super",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PasswordSource {
@@ -479,6 +660,9 @@ impl Profile {
             options: Options::default(),
             hooks: Hooks::default(),
             vault: None,
+            rsync: None,
+            borg: None,
+            maintenance: Maintenance::default(),
         }
     }
 
@@ -493,19 +677,39 @@ impl Profile {
     /// Check the profile for problems. Errors make the profile unusable; warnings do not.
     /// [`Profile::validate`] plus what only matters in `scope`: system backups run without
     /// anyone logged in, so their Vault password must come from a file or a command.
+    /// Where this profile's password comes from, or `None` when it needs none (Mirror,
+    /// rsync, unencrypted Vault or Borg).
+    pub fn password_source(&self) -> Option<PasswordSource> {
+        match self.engine {
+            Engine::Vault => self.vault.as_ref().is_none_or(|v| v.encryption).then(|| {
+                self.vault
+                    .as_ref()
+                    .map(|v| v.password_source.clone())
+                    .unwrap_or_default()
+            }),
+            Engine::Borg => {
+                let b = self.borg.clone().unwrap_or_default();
+                (b.encryption != BorgEncryption::None).then_some(b.password_source)
+            }
+            Engine::Mirror | Engine::Rsync => None,
+        }
+    }
+
     pub fn validate_in(&self, scope: crate::Scope) -> Vec<Issue> {
         let mut issues = self.validate();
         if scope == crate::Scope::System
-            && self.engine == Engine::Vault
-            && self.vault.as_ref().is_none_or(|v| v.encryption)
             && matches!(
-                self.vault.as_ref().map(|v| &v.password_source),
-                None | Some(PasswordSource::Keyring | PasswordSource::Prompt)
+                self.password_source(),
+                Some(PasswordSource::Keyring | PasswordSource::Prompt)
             )
         {
             issues.push(Issue {
                 severity: Severity::Warning,
-                field: "vault.password_source".into(),
+                field: if self.engine == Engine::Borg {
+                    "borg.password_source".into()
+                } else {
+                    "vault.password_source".into()
+                },
                 message: "system backups run without anyone logged in, so they can't use a keyring or ask for the password; use a key file readable by root only (password_source = { file = \"/etc/flux-backup/keys/<id>\" })".into(),
             });
         }
@@ -675,11 +879,84 @@ impl Profile {
                     "zstd level must be 0-22".into(),
                 ));
             }
-            (Engine::Mirror, Some(_)) => v.push(Issue::warning(
+            (Engine::Mirror | Engine::Rsync | Engine::Borg, Some(_)) => v.push(Issue::warning(
                 "vault",
-                "[vault] settings are ignored for mirror profiles".into(),
+                format!("[vault] settings are ignored for {} profiles", self.engine),
             )),
             _ => {}
+        }
+        if self.engine != Engine::Rsync && self.rsync.is_some() {
+            v.push(Issue::warning(
+                "rsync",
+                format!("[rsync] settings are ignored for {} profiles", self.engine),
+            ));
+        }
+        if self.engine != Engine::Borg && self.borg.is_some() {
+            v.push(Issue::warning(
+                "borg",
+                format!("[borg] settings are ignored for {} profiles", self.engine),
+            ));
+        }
+        if self.engine == Engine::Borg {
+            let b = self.borg.clone().unwrap_or_default();
+            if b.compression.trim().is_empty() || b.compression.contains(char::is_whitespace) {
+                v.push(Issue::error(
+                    "borg.compression",
+                    "use a Borg compression such as lz4, zstd,3 or none".into(),
+                ));
+            }
+            if self.sources.exclude_larger_than.is_some() {
+                v.push(Issue::warning(
+                    "sources.exclude_larger_than",
+                    "Borg can't leave out files by size; this limit is ignored".into(),
+                ));
+            }
+            if self.options.symlinks != SymlinkMode::Preserve {
+                v.push(Issue::warning(
+                    "options.symlinks",
+                    "Borg always stores symbolic links as links; this setting is ignored".into(),
+                ));
+            }
+            for (i, arg) in b.extra_args.iter().enumerate() {
+                let name = arg.split('=').next().unwrap_or(arg);
+                if arg.trim().is_empty() || !arg.starts_with('-') {
+                    v.push(Issue::error(
+                        &format!("borg.extra_args[{i}]"),
+                        format!("{arg:?} is not an option (options start with -)"),
+                    ));
+                } else if BORG_RESERVED_ARGS.contains(&name) {
+                    v.push(Issue::error(
+                        &format!("borg.extra_args[{i}]"),
+                        format!("{name} is set by Flux and can't be changed here"),
+                    ));
+                }
+            }
+        }
+        if self.engine == Engine::Rsync {
+            for (i, arg) in self
+                .rsync
+                .iter()
+                .flat_map(|r| r.extra_args.iter())
+                .enumerate()
+            {
+                let name = arg.split('=').next().unwrap_or(arg);
+                if arg.trim().is_empty() {
+                    v.push(Issue::error(
+                        &format!("rsync.extra_args[{i}]"),
+                        "empty argument".into(),
+                    ));
+                } else if RSYNC_RESERVED_ARGS.contains(&name) {
+                    v.push(Issue::error(
+                        &format!("rsync.extra_args[{i}]"),
+                        format!("{name} is set by Flux and can't be changed here"),
+                    ));
+                } else if !arg.starts_with('-') {
+                    v.push(Issue::error(
+                        &format!("rsync.extra_args[{i}]"),
+                        format!("{arg:?} is not an option (options start with -)"),
+                    ));
+                }
+            }
         }
 
         v
@@ -855,6 +1132,39 @@ mod tests {
         ] {
             assert!(fields.iter().any(|x| x == f), "missing {f} in {fields:?}");
         }
+    }
+
+    #[test]
+    fn rsync_extra_args_are_checked() {
+        let mut p = sample();
+        p.engine = Engine::Rsync;
+        p.rsync = Some(RsyncOptions {
+            extra_args: vec![
+                "--compress".into(),
+                "--link-dest=/x".into(),
+                "-n".into(),
+                "oops".into(),
+            ],
+        });
+        let errors: Vec<_> = p
+            .validate()
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.field)
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                "rsync.extra_args[1]",
+                "rsync.extra_args[2]",
+                "rsync.extra_args[3]"
+            ]
+        );
+        let s = p.to_toml().unwrap();
+        assert!(s.contains("engine = \"rsync\""));
+        assert_eq!(Profile::from_toml(&s).unwrap(), p);
+        p.engine = Engine::Mirror;
+        assert!(p.validate().iter().any(|i| i.field == "rsync"));
     }
 
     #[test]

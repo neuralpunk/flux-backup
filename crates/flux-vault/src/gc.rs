@@ -217,6 +217,10 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
     // New index first, then remove old index files, then packs. A crash at any point
     // leaves every remaining snapshot readable.
     if !doomed.is_empty() || !orphans.is_empty() || index.files.len() > 1 {
+        // The new packs on disk before the index that names them.
+        repo.backend()
+            .flush_packs()
+            .map_err(|e| VaultError::io("data", e))?;
         write_index(
             repo.backend(),
             &repo.crypto,

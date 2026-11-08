@@ -1,5 +1,5 @@
 name: Release
-# Push a tag like v0.1.0 to build the packages and attach them to a draft GitHub release.
+# Push a tag like v0.2.0 to build the packages and attach them to a draft GitHub release.
 on:
   push:
     tags: ["v*"]

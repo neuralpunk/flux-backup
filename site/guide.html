@@ -44,6 +44,7 @@
         <li><a href="#ideas-in-two-minutes">Ideas in two minutes</a></li>
         <li><a href="#your-first-backup">Your first backup</a></li>
         <li><a href="#mirror-or-vault">Mirror or Vault?</a></li>
+            <li><a href="#compatibility-mode">Backups that don't need Flux</a></li>
         <li><a href="#where-backups-go">Where backups go</a></li>
         <li><a href="#choosing-what-to-back-up">Choosing what to back up</a></li>
         <li><a href="#automatic-backups">Automatic backups</a></li>
@@ -54,7 +55,8 @@
         <li><a href="#system-backups">System backups</a></li>
         <li><a href="#hooks">Hooks</a></li>
         <li><a href="#keeping-an-eye-on-things">Keeping an eye on things</a></li>
-        <li><a href="#profile-reference">Profile reference</a></li>
+        <li><a href="#exporting-and-importing-profiles">Exporting and importing profiles</a></li>
+            <li><a href="#profile-reference">Profile reference</a></li>
         <li><a href="#environment-variables">Environment variables</a></li>
         <li><a href="#troubleshooting">Troubleshooting</a></li>
       </ol>
@@ -70,6 +72,7 @@
             <li><a href="#ideas-in-two-minutes">Ideas in two minutes</a></li>
             <li><a href="#your-first-backup">Your first backup</a></li>
             <li><a href="#mirror-or-vault">Mirror or Vault?</a></li>
+            <li><a href="#compatibility-mode">Backups that don't need Flux</a></li>
             <li><a href="#where-backups-go">Where backups go</a></li>
             <li><a href="#choosing-what-to-back-up">Choosing what to back up</a></li>
             <li><a href="#automatic-backups">Automatic backups</a></li>
@@ -80,6 +83,7 @@
             <li><a href="#system-backups">System backups</a></li>
             <li><a href="#hooks">Hooks</a></li>
             <li><a href="#keeping-an-eye-on-things">Keeping an eye on things</a></li>
+            <li><a href="#exporting-and-importing-profiles">Exporting and importing profiles</a></li>
             <li><a href="#profile-reference">Profile reference</a></li>
             <li><a href="#environment-variables">Environment variables</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
@@ -96,7 +100,7 @@
             backups.
           </p>
           <div class="tags">
-            <span class="tag">Flux Backup 0.1</span>
+            <span class="tag">Flux Backup 0.2</span>
             <span class="tag">Desktop app and CLI</span>
           </div>
         </header>
@@ -166,10 +170,11 @@ sudo PREFIX=/usr packaging/install.sh
             <div class="card">
               <span class="label">In the app</span>
               <p>
-                Click <strong>New profile</strong> in the sidebar. Answer three questions: what to
-                back up (your home folder by default), where to keep it (a connected drive, a folder
-                or an SSH server), and when. Decide whether to encrypt, then click
-                <strong>Create backup</strong> and <strong>Back up now</strong>.
+                Click <strong>New backup</strong> in the sidebar. A short guide asks one question
+                per step: what to back up (your home folder by default), where to keep it (a
+                connected drive, a folder or an SSH server), how to protect it (plain, encrypted,
+                or written by rsync or Borg), and when. Review your answers, click
+                <strong>Create backup</strong>, then <strong>Back up now</strong>.
               </p>
             </div>
             <div class="card">
@@ -183,9 +188,23 @@ flux snapshots home
             </div>
           </div>
           <p>
-            Everything else (exclusions, retention, hooks…) is under <strong>Advanced options</strong>,
-            and the defaults are sensible. The first backup copies everything. Later ones only copy
-            what changed, and take seconds.
+            Everything else is one click away and has sensible defaults: each group of settings is a
+            row showing its current value; click it to open just that group in a dialog, and
+            <strong>Done</strong> to close it. Nothing is saved until you click <strong>Save</strong>. A row with a problem says so in red.
+          </p>
+          <p>
+            While you choose what to back up, Flux counts what it adds up to after the exclusions
+            (“About 32 GiB in 51,900 files”) and warns if that's more than the free space where it
+            would go. The first backup copies everything. Later ones only copy what changed, and take
+            seconds.
+          </p>
+          <p>
+            Each backup in the sidebar shows where it goes and how it's doing (“Backed up 2 hours
+            ago”, “Failed 2 days ago”). <strong>Right-click</strong> one, or use the <strong>⋯</strong>
+            button next to <em>Back up now</em>, to back it up, open its snapshots, activity or
+            settings, duplicate or export it, see its recovery guide, or <strong>delete</strong> it.
+            Deleting a profile never deletes the backups it made: they stay where they are. The menu
+            key or <kbd>Shift</kbd>+<kbd>F10</kbd> opens the same menu from the keyboard.
           </p>
         </section>
 
@@ -218,6 +237,50 @@ flux snapshots home
         </section>
 
         <!-- ================================================================ -->
+        <section id="compatibility-mode">
+          <h2>Backups that don't need Flux <a class="anchor" href="#compatibility-mode" aria-label="Link to this section">#</a></h2>
+          <p>
+            Mirror and Vault are Flux's own formats. If you'd rather your backups never depend on Flux,
+            choose <strong>compatibility mode</strong>: a standard, free tool writes them in its own
+            format, and Flux is only the app you use. In the profile, click <strong>Choose…</strong> next
+            to <em>Usable without Flux</em>, or use <code>--engine rsync</code> / <code>--engine borg</code>.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col"></th><th scope="col">rsync</th><th scope="col">Borg</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Stored as</th><td>plain folders written by <code>rsync</code>, one per snapshot</td><td>a standard Borg 1.x repository, one archive per snapshot</td></tr>
+                <tr><th scope="row">Without Flux</th><td>any file manager, <code>cp</code>, <code>rsync</code></td><td><code>borg list</code>, <code>borg mount</code>, <code>borg extract</code></td></tr>
+                <tr><th scope="row">Unchanged data</th><td>hard links</td><td>deduplicated chunks</td></tr>
+                <tr><th scope="row">Compression / encryption</th><td>no / use an encrypted drive</td><td>zstd / <code>repokey-blake2</code> with a passphrase</td></tr>
+                <tr><th scope="row">Needs</th><td><code>rsync</code> 3.1+ (and on the server)</td><td><code>borg</code> 1.2–1.4, package <code>borgbackup</code> (and on the server)</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            <strong>You don't need to know rsync or Borg.</strong> Next to your backups Flux keeps a
+            recovery kit: <code>FLUX-RECOVERY.txt</code>, a plain-text guide written for <em>this</em>
+            profile that starts with the basics (where your files are, what to copy and paste) and ends
+            with a reference for experts, and <code>flux-backup.sh</code>, which runs the same backup with
+            the tool alone. In the app, open it from <strong>Overview → Usable without Flux → Recovery
+            guide</strong>, copy any section, or save a copy to a USB stick. In a terminal:
+          </p>
+<pre><code data-lang="sh">flux recovery home                   # print the guide
+flux recovery home --script          # print the backup script
+flux recovery home --save /run/media/me/USB</code></pre>
+          <p>
+            Everything else works as with the other engines: browsing, restores (symlink-safe, keeping
+            your files), retention with pins and names, schedules, checks and <code>flux mount</code>.
+            The <a href="https://github.com/neuralpunk/flux-backup/blob/main/docs/USER_GUIDE.md#compatibility-mode-backups-that-dont-need-flux">full
+            user guide</a> has the exact layout and commands for rsync and Borg users.
+          </p>
+          <div class="callout">
+            <p>A Borg passphrase can't be recovered. Keep it safe, and keep a copy of the key too:
+            the recovery guide has the <code>borg key export</code> command for your repository.</p>
+          </div>
+        </section>
+
+        <!-- ================================================================ -->
         <section id="where-backups-go">
           <h2>Where backups go <a class="anchor" href="#where-backups-go" aria-label="Link to this section">#</a></h2>
 
@@ -241,7 +304,7 @@ flux ssh test docs          # can we log in, write, and (for Mirror) run rsync?
             hardware keys all work. Scheduled backups can't type passwords or accept new host keys.
             Set up a key once, and point the profile at it with
             <code>target.identity_file = "~/.ssh/flux_backup_ed25519"</code> (or in the app's
-            <em>Where to keep it</em> section, under <strong>Advanced options</strong>):
+            <em>Where to keep it</em> › <strong>Connection details</strong>):
           </p>
           <div class="code">
 <pre><code data-lang="sh">flux ssh keygen             # creates ~/.ssh/flux_backup_ed25519 (no passphrase, for timers)
@@ -282,7 +345,7 @@ flux ssh copy-id docs       # installs it on the profile's server (asks for your
             <li>stay on one filesystem (<code>one_file_system</code>).</li>
           </ul>
           <p>
-            In the app, <strong>Advanced options</strong> under <em>What to back up</em> suggests
+            In the app, <em>What to back up</em> › <strong>Leave some things out</strong> suggests
             common exclusions (caches, trash, build output) with how much space each takes in your
             sources.
           </p>
@@ -320,6 +383,11 @@ flux ssh copy-id docs       # installs it on the profile's server (asks for your
                   <td></td>
                   <td>scheduled runs wait for mains power</td>
                 </tr>
+                <tr>
+                  <td><code>skip_on_metered = true</code></td>
+                  <td></td>
+                  <td>scheduled runs to a server wait while the connection is metered (mobile data, a phone's hotspot, as NetworkManager reports it)</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -332,8 +400,38 @@ flux schedule remove home
           <p>
             Scheduled backups run at low CPU and I/O priority (<code>options.nice</code>,
             <code>options.io_priority</code>), keep the computer from suspending while they run, and
-            notify you if something went wrong.
+            notify you if something went wrong (and, if you turn it on in <strong>Preferences</strong>,
+            when they succeed).
           </p>
+          <p>
+            <strong>Pausing.</strong> For a presentation, a slow connection or a full disk: <em>Pause
+            all scheduled backups…</em> in any backup's menu, in <strong>Preferences</strong>, or in the
+            tray, for an hour, until tomorrow morning (7:00) or until you resume them. The sidebar shows
+            they're paused, with <strong>Resume</strong>. Backups that come due meanwhile are skipped,
+            not queued; backing up by hand still works.
+          </p>
+          <div class="code">
+<pre><code data-lang="sh">flux pause --for 2h      # or --tomorrow, or nothing: until `flux resume`
+flux resume
+</code></pre>
+          </div>
+          <p>
+            <strong>Upkeep.</strong> In <em>Settings › More schedule options</em>, a backup can verify
+            every stored byte once a month after a scheduled backup
+            (<code>[maintenance] verify_monthly = true</code>); you're notified if anything is wrong.
+            Vault backups also free the space of removed snapshots once a week
+            (<code>free_space_weekly</code>, on by default): each backup only marks old snapshots as
+            removed, and this deletes the data only they used. Results appear in the run's log in
+            <em>Activity</em>.
+          </p>
+          <p>
+            <strong>Preferences</strong> (bottom of the sidebar) also hold: start in the tray when you
+            log in, the theme, and the exclusions new backups start with.
+          </p>
+          <figure class="guide-shot">
+            <img src="assets/screenshots/preferences-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Preferences: scheduled backups paused with Resume now, notifications, start in the tray, theme, and default exclusions.">
+          </figure>
         </section>
 
         <!-- ================================================================ -->
@@ -350,15 +448,54 @@ flux schedule remove home
             <li><strong>back to where it was</strong>: identical files are skipped. Different files are kept as <code>name.flux-&lt;snapshot&gt;</code> unless you choose to replace them.</li>
           </ul>
           <p>
+            Before you restore, the dialog shows what would happen: how many items are added, which
+            files differ from what's there now (and whether they'd be kept or replaced), and how many
+            are already identical. Replacing files needs the red <strong>Restore and replace</strong>
+            button.
+          </p>
+          <figure class="guide-shot">
+            <img src="assets/screenshots/restore-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The restore dialog: back to where it was, with what will happen: 3 items added, 2 files that differ kept aside, 9 already identical.">
+          </figure>
+          <p>
             <strong>What changed</strong> shows the differences from the previous snapshot; the ⋯ menu
             also compares with the files on disk now.
+          </p>
+          <p>
+            To just look at a file, double-click it (or right-click › <strong>Open a copy</strong>).
+            Flux restores a read-only copy into a temporary folder and opens it with your usual app;
+            nothing on your computer changes. Save it somewhere else if you want to keep it, or restore
+            it. Temporary copies are removed after a day.
+          </p>
+          <p>
+            <strong>Don't know which snapshot?</strong> Type part of the name in <strong>Find in all
+            snapshots</strong> (above the snapshot list) and press <kbd>Enter</kbd>. Every file or folder
+            with that in its name is listed, from all snapshots; files you've since deleted are marked
+            <em>Deleted</em> with the last snapshot that had them. Click one to show it in its snapshot.
+            <code>*</code> works as a wildcard (<code>*.pdf</code>), and a <code>/</code> matches whole
+            paths (<code>Documents/*.odt</code>). <code>flux find</code> matches the same way.
+          </p>
+          <figure class="guide-shot">
+            <img src="assets/screenshots/search-dark.png" width="1200" height="780" loading="lazy"
+                 alt="Search results for “notes” across 34 snapshots, with Versions and Restore buttons on each.">
+          </figure>
+          <p>
+            <strong>Versions of a file.</strong> Right-click a file › <em>Versions of this file…</em>
+            (or select it and click <strong>Versions</strong>) lists each different version with its
+            date and size, and which snapshots hold it. Open one to look at it, or restore it.
+          </p>
+          <p>
+            The first search of a Vault, Borg, rsync or SSH backup reads every snapshot's listing;
+            Flux keeps an index of them in its cache folder (readable only by you), so later searches
+            and <em>Versions</em> are quick. Plain folders on a drive need none.
           </p>
 
           <h3 id="in-a-terminal">In a terminal</h3>
           <div class="code">
 <pre><code data-lang="sh">flux ls home                                   # the newest snapshot's top level
 flux ls home ~/Documents --snapshot 2026-11-01  # a folder in the snapshot of that day
-flux find home '*.odt'                         # search all snapshots
+flux find home report                          # search all snapshots (part of a name)
+flux find home '*.odt'                         # or a pattern
 flux history home ~/notes.md                   # every version of one file
 flux diff home --live                          # what changed since the newest snapshot
 flux restore home ~/Documents/report.odt --to ~/Restored
@@ -414,7 +551,7 @@ min_free_inodes_percent = 5
 </code></pre>
           </div>
           <p>
-            In the app (<em>What to keep</em>, under <strong>Advanced options</strong>), the retention
+            In the app (<em>What to keep</em> › <strong>Keep and remove snapshots</strong>), the retention
             editor shows which of your current snapshots each rule would keep or remove, and why.
           </p>
           <p>
@@ -443,6 +580,7 @@ min_free_inodes_percent = 5
             </table>
           </div>
           <p><code>FLUX_PASSWORD</code> overrides all of them, for scripts.</p>
+          <p><strong>The password is chosen when you set the backup up, not at its first run.</strong> In the app, choosing an encrypted format in a new backup (or turning on <em>Encrypt with a password</em> in its Settings) asks for it twice right there; when you click <em>Create backup</em>, Flux creates the encrypted Vault (or Borg repository) with it and keeps it in the keyring (or writes it to the key file, if that file doesn't exist yet). So the first backup, even a scheduled one at night, has nothing to ask. A backup that was set up before this, or whose drive wasn't connected at the time, shows the same fields in its Settings until its first backup. On the command line, <code>flux key init &lt;profile&gt;</code> does the same.</p>
           <p>A Vault can have several passwords. Each one opens it, and changing them never re-encrypts data:</p>
           <div class="code">
 <pre><code data-lang="sh">flux key list docs
@@ -482,8 +620,9 @@ flux check home --read-data  # also read and verify every byte (slow)
             <div class="card">
               <span class="label">In the app</span>
               <p>
-                Under <em>System</em>, click <strong>Authenticate</strong> and enter an administrator
-                password. System profiles then appear and work like your own. The app locks them again
+                Click <strong>System backups</strong> at the bottom of the sidebar. Flux explains what it
+                needs; then your desktop asks for an administrator password. System profiles then
+                appear and work like your own. The app locks them again
                 after 15 minutes without use, or when you click the lock.
               </p>
             </div>
@@ -556,9 +695,58 @@ flux log home --run last   # everything that happened in one run, including warn
             <span class="tag"><span class="dot run"></span>Running</span>
           </div>
           <p>
+            <em>Problems</em> in Activity shows only the runs that failed or skipped files.
+          </p>
+          <p>
+            The <em>Overview</em> tells you in words when something needs you: the drive hasn't been
+            connected for a while, the last few backups failed, no backup has succeeded for longer than
+            its schedule suggests (3 days for a daily backup, 30 for a manual one), or the destination
+            is almost full.
+          </p>
+          <p>
+            <strong>Space.</strong> For a backup on a drive, the Overview shows how full the drive has
+            been over the last weeks and, once there are a few backups to go on, when it fills up at
+            that rate (“full in about 3 months”), with the projection dashed on the chart. Hover the
+            chart or use the arrow keys for exact values, or open <em>Show as a table</em>. Under a
+            month left, it's also a warning at the top. Steady use (old snapshots removed as fast as new
+            ones are added) says so.
+          </p>
+          <figure class="guide-shot">
+            <img src="assets/screenshots/space-dark.png" width="1200" height="780" loading="lazy"
+                 alt="The Space on BackupDisk card: used space over two months and a dashed projection reaching full around late January.">
+          </figure>
+          <p>
+            To set up a similar backup (the same folders to a second drive, say), use
+            <strong>Duplicate</strong> in the backup's menu or <code>flux profile duplicate home</code>:
+            the copy is called “… (copy)” and opens in Settings.
+          </p>
+          <p>
+            <strong>Asking for help.</strong> <em>Copy diagnostics</em> (in Activity) or
+            <code>flux diagnostics home</code> gives a report to paste into a bug report: versions, the
+            profile with password commands and hooks hidden, and the latest runs and their messages.
+          </p>
+          <p>
             An interrupted backup (power cut, <kbd>Ctrl</kbd>+<kbd>C</kbd>, unplugged drive) doesn't
             damage anything. The unfinished snapshot is never shown, and the next run continues it.
           </p>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="exporting-and-importing-profiles">
+          <h2>Exporting and importing profiles <a class="anchor" href="#exporting-and-importing-profiles" aria-label="Link to this section">#</a></h2>
+          <p>
+            A profile can be exported, to keep a copy, set up another computer, or take the same
+            backup to another tool: as a <strong>Flux profile</strong> (importable again), a
+            <strong>borgmatic</strong> configuration, or a <strong>restic</strong>, <strong>rsync</strong>
+            or <strong>Borg</strong> script. Whatever a format can't express (pins and names, the
+            schedule, free-space floors…) is listed in the export dialog and as comments in the file.
+          </p>
+          <p>
+            In the app: right-click a backup › <strong>Export…</strong>. To import: <strong>+</strong>
+            next to <em>Your backups</em> › <strong>Import a profile…</strong>.
+          </p>
+<pre><code data-lang="sh">flux profile export home -f borgmatic -o ~/
+flux profile import home.flux-profile.toml</code></pre>
         </section>
 
         <!-- ================================================================ -->
@@ -614,7 +802,12 @@ trigger = "calendar"              # "manual", "calendar" or "interval"
 on_calendar = "daily"
 catch_up = true
 skip_on_battery = false
+skip_on_metered = false           # backups to a server wait on metered connections
 on_connect = false
+
+[maintenance]                     # upkeep after scheduled backups
+verify_monthly = false            # read every stored byte back about once a month
+free_space_weekly = true          # Vault: delete data no snapshot uses about once a week
 
 [options]
 preserve_acl = true

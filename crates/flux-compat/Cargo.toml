@@ -1,0 +1,33 @@
+[package]
+name = "flux-compat"
+description = "Flux Backup compatibility mode: backups in the native format of standard tools (rsync, Borg)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blake3.workspace = true
+getrandom = "0.4"
+flux-core.workspace = true
+flux-fs.workspace = true
+flux-mirror.workspace = true
+flux-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+jiff.workspace = true
+toml.workspace = true
+zeroize = "1.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

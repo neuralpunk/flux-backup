@@ -150,6 +150,146 @@ Tauri's bundler with the CLI, helper, polkit policy, man pages, completions and 
 data added through `bundle.linux.*.files`; `packaging/install.sh` covers source installs.
 The threat model (docs/THREAT_MODEL.md) covers the whole program, not just Vault.
 
+## Compatibility mode (agreed 2026-11-07)
+
+Some people want backups that never depend on Flux: if Flux disappeared tomorrow, they
+should still be able to list, browse, restore and keep taking backups with industry-standard
+tools. Compatibility mode adds two engines that store everything in the native format of a
+standard tool and use Flux only as the interface:
+
+| | **rsync** | **Borg** |
+|---|---|---|
+| Format | Plain folders written by `rsync --link-dest` (unchanged files hard-linked) | A standard Borg 1.x repository |
+| Who writes the data | the system `rsync` | the system `borg` (installed separately) |
+| Without Flux | any file manager, `cp`, `rsync` | `borg list / extract / mount / create / prune` |
+| Dedup / compression / encryption | per unchanged file / — / — | chunks / zstd / repokey (passphrase) |
+| Targets | local drives, SSH (server needs rsync) | local drives, SSH (server needs borg) |
+
+Rules both engines follow:
+* **Nothing Flux-only is needed to get data back.** Flux's own files (snapshot metadata,
+  pins, cached listings) are conveniences; losing them loses nothing.
+* **The recovery kit travels with the backups.** Next to every repository Flux keeps
+  `FLUX-RECOVERY.txt` (plain-text, step-by-step commands written for this profile and
+  target: list, browse, restore one file, restore everything, back up without Flux, delete
+  old backups), and `flux-backup.sh`, a POSIX shell script that runs the same backup with
+  the standard tool only. Each rsync snapshot also stores the exact command that wrote it
+  (`rsync-command.txt`). The kit is rewritten after every backup so it follows profile
+  changes. `flux recovery <profile>` prints it, and the app shows it.
+* **Only native features.** Options the tool can't do natively are either done the way
+  the tool does them (CACHEDIR.TAG for rsync: a marker search whose results are written
+  into the snapshot's filter file, and that the script repeats with `find`) or reported as
+  not supported by validation, never silently emulated with Flux-only data.
+* **Written for experts and for people who know nothing about the tool.** Every guide and
+  every screen starts with what a newcomer needs (where the files are, copy-paste
+  commands, what each part means) and keeps the exact commands, flags and layout one step
+  away for people who know rsync or Borg well.
+* Browsing, diff, find, history, restore (same keep/overwrite rules, symlink-safe as root),
+  mount, retention with pins and names, check, schedules, hooks and the app all work as for
+  the other engines.
+
+### Phase 10 — Compatibility mode I: rsync engine
+`engine = "rsync"`. New crate `flux-compat`: a target-neutral store (local folder, or SFTP
+plus remote shell), the rsync engine (backup with `--link-dest` into `.partial`, renamed into
+place; unchanged runs detected from `--stats`; per-file errors from exit codes 23/24;
+CACHEDIR.TAG/marker pass; gitignore → rsync filter translation that keeps the
+last-match-wins meaning), snapshot listing (also snapshots made by the script, without
+Flux's metadata), entries (local scan or remote `find -printf`, cached), restore through
+the generic restore, name/pin, delete, prune, check, mount, and the recovery kit. Runner,
+`AnyRepo`, CLI (`flux recovery`, `--engine rsync`) and service integration. Tests against
+real rsync, locally and over the SSH stand-in, including running the generated script.
+
+### Phase 11 — Compatibility mode II: Borg engine
+`engine = "borg"` with `[borg]` options (encryption `repokey-blake2`/`repokey`/`none`,
+compression, password source, remote borg path). Borg detection and version check;
+init and create with JSON progress; archives as snapshots (names and pins kept in the
+archive comment, set with `borg recreate --comment`); entries from
+`borg list --json-lines` (cached; archives never change); restore by extracting into a
+staging folder on the destination's side, then the generic restore; delete + compact,
+prune, check (`--verify-data` for "verify every byte"), mount through `borg mount`,
+`borg key export` into the recovery kit's advice. Tests against the real borg (skipped
+when borg isn't installed).
+
+### Phase 12 — Compatibility mode III: the app
+Engine choice gains "Compatibility mode" (rsync or Borg) with an explanatory modal, tool
+detection (version, missing tool with install hints), Borg settings and passphrase flow;
+a "Recovery kit" modal (Overview) with the commands for this profile and copy buttons;
+engine badges; restore dialog notes the equivalent command; demo data; screenshots;
+website and user guide.
+
+## UX rework (agreed 2026-11-08)
+
+A review against usability research (docs/UX_PRINCIPLES.md) found that much of the app
+didn't look like what it was: actionable rows read as information, tags looked like
+buttons, the sidebar read like settings pages, an administrator prompt appeared without
+explanation, and deleting a profile was hard to find. The visual design stays; the
+interaction design changes.
+
+### Phase 13 — UX I: foundations
+Research and rules (docs/UX_PRINCIPLES.md); one app-wide menu for right-click and ⋯
+buttons (keyboard: Menu key, Shift+F10, arrows, Escape; target outlined; inside the
+window); settings rows, right-aligned switches, descriptor tags, confirm dialog; the
+webview's own context menu replaced; snapshots get the shared menu.
+
+### Phase 14 — UX II: sidebar, profiles, system backups
+"Backups" sidebar with destination icons and a status line per backup; right-click and
+⋯ menus for backups (back up now, browse, settings, recovery guide, delete); delete with
+a clear confirmation, also from Settings; a compact "System backups" row whose unlock
+explains first; header tags with icons.
+
+### Phase 15 — UX III: settings and the rest
+Profile editor rebuilt from rows (switches right, values with chevrons, reasons for what
+can't change). Advanced options stop being one long page: a short list of named groups
+(exclusions, storage format, schedule details, what to keep, hooks, performance and
+behaviour), each with a one-line summary of its current values, opening just that group
+in a focused panel. The editor always opens in the basic view (advanced is never
+remembered across profiles or new ones). Context menus on files and activity;
+screenshots, website and guide.
+
+### Phase 16 — Export and import profiles (asked 2026-11-08)
+Export a profile as a Flux profile (TOML, importable again with `flux profile import` and
+the app), and for other tools where a faithful translation exists: borgmatic
+(config.yaml), restic (a script and an exclude file) and rsync (a script). Exclusions are
+translated per tool; whatever a format can't express (pins, cache markers, max age…) is
+listed as a comment in the export, never dropped silently. In the app: the backup's
+⋯/right-click menu and Settings; on the command line: `flux profile export|import`.
+
+## Toward 0.2: smaller improvements (agreed 2026-11-08)
+
+### Phase 17 — Quick wins
+Open a file from a snapshot (a temporary copy in its usual app); duplicate a profile;
+a one-time card after the first backup (how to get a file back); Overview health warnings
+in words (no successful backup for days, drive not seen since…); Activity filter (problems
+only); copy diagnostics (versions, profile without secrets, last run's log).
+
+### Phase 18 — Finding files
+Search all snapshots by name from the Snapshots tab; "Versions of this file" (every
+version with date and size, open or restore one); a restore preview (what will be replaced,
+kept aside or new) before restoring in place.
+
+### Phase 19 — Space
+A size estimate (files, bytes) in the new-backup page that follows the exclusions; a space
+forecast on Overview from the snapshot history ("fills in about 5 weeks") with a small
+growth chart.
+
+### Phase 20 — Control
+Pause scheduled backups (1 hour, until tomorrow, until resumed) from the tray and menus;
+skip scheduled backups on metered connections; optional scheduled maintenance (monthly
+verify, weekly free-up-space for Vault and Borg; notify on problems); an app preferences
+page (notifications incl. optional success, start at login, theme, default exclusions).
+
+### Phase 21 — Robustness
+Sparse files copied sparsely (SEEK_DATA/SEEK_HOLE); a path index so find and history don't
+decode every manifest; the flaky remote-lock test; a pass of the real desktop app (WebKitGTK)
+as far as this environment allows.
+
+### Phase 22 — Release 0.2
+Version 0.2.0 everywhere (workspace, app, packaging metadata, website); CHANGELOG.md with
+everything since 0.1.
+
+### Phase 23 — Website, guide and README for 0.2
+New screenshots of the app; the website (index and HTML guide) and README brought up to
+date with everything in 0.2 (asked 2026-11-08).
+
 ## Out of scope for v1 (candidates later)
 S3/B2 and other cloud backends (Vault's backend trait is designed for them), SMB/NFS
 mount management, Windows/macOS, Back in Time import.

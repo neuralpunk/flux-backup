@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::watch::Notice;
-use crate::{ApiError, Result, Service, actions, edit, views};
+use crate::{ApiError, Result, Service, actions, edit, extras, find, prefs, space, views};
 
 /// Bumped on incompatible changes; the app refuses a helper that speaks another version.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Longest accepted line (a profile, a list of restore paths…).
 pub const MAX_LINE: usize = 4 << 20;
 
@@ -41,6 +41,9 @@ pub enum Call {
     Overview {
         id: String,
     },
+    Status {
+        id: String,
+    },
     Snapshots {
         id: String,
     },
@@ -54,6 +57,10 @@ pub enum Call {
         password: String,
         #[serde(default)]
         create: bool,
+    },
+    SetPassword {
+        id: String,
+        password: String,
     },
     SaveKeyFile {
         id: String,
@@ -132,6 +139,60 @@ pub enum Call {
         id: String,
         read_data: bool,
     },
+    RecoveryKit {
+        id: String,
+    },
+    Tools,
+    ExportFormats,
+    ExportProfile {
+        id: String,
+        format: String,
+    },
+    /// A Flux profile's text (the app reads the file); `id`: the new id, else derived.
+    ImportProfile {
+        toml: String,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    OpenFile {
+        id: String,
+        snapshot: String,
+        path: String,
+    },
+    DuplicateProfile {
+        id: String,
+    },
+    Diagnostics {
+        id: String,
+    },
+    Find {
+        id: String,
+        query: String,
+    },
+    Versions {
+        id: String,
+        path: String,
+    },
+    RestorePreview {
+        id: String,
+        snapshot: String,
+        paths: Vec<String>,
+        to: Option<String>,
+        overwrite: bool,
+    },
+    /// What a profile being edited would back up (files, bytes).
+    Estimate {
+        profile: Value,
+    },
+    Preferences,
+    SavePreferences {
+        notify_success: bool,
+        default_exclude: Option<Vec<String>>,
+    },
+    /// `hour`, `tomorrow`, `resumed` (until resumed) or `off`.
+    SetPause {
+        pause: String,
+    },
 }
 
 impl Call {
@@ -140,9 +201,11 @@ impl Call {
         use Call::*;
         match self {
             Overview { id }
+            | Status { id }
             | Snapshots { id }
             | ListDir { id, .. }
             | Unlock { id, .. }
+            | SetPassword { id, .. }
             | SaveKeyFile { id }
             | BackupNow { id }
             | Cancel { id }
@@ -157,14 +220,29 @@ impl Call {
             | Runs { id, .. }
             | RunEvents { id, .. }
             | Prune { id, .. }
-            | Check { id, .. } => Some(id),
+            | Check { id, .. }
+            | RecoveryKit { id }
+            | ExportProfile { id, .. }
+            | OpenFile { id, .. }
+            | DuplicateProfile { id }
+            | Diagnostics { id }
+            | Find { id, .. }
+            | Versions { id, .. }
+            | RestorePreview { id, .. } => Some(id),
             Profiles
             | NewProfile
             | ValidateProfile { .. }
             | SuggestId { .. }
             | ExcludeSuggestions { .. }
             | Drives
-            | TestTarget { .. } => None,
+            | TestTarget { .. }
+            | Tools
+            | ExportFormats
+            | ImportProfile { .. }
+            | Estimate { .. }
+            | Preferences
+            | SavePreferences { .. }
+            | SetPause { .. } => None,
         }
     }
 
@@ -173,9 +251,11 @@ impl Call {
         match self {
             Profiles => "profiles",
             Overview { .. } => "overview",
+            Status { .. } => "status",
             Snapshots { .. } => "snapshots",
             ListDir { .. } => "list_dir",
             Unlock { .. } => "unlock",
+            SetPassword { .. } => "set_password",
             SaveKeyFile { .. } => "save_key_file",
             BackupNow { .. } => "backup_now",
             Cancel { .. } => "cancel",
@@ -197,6 +277,21 @@ impl Call {
             RunEvents { .. } => "run_events",
             Prune { .. } => "prune",
             Check { .. } => "check",
+            RecoveryKit { .. } => "recovery_kit",
+            Tools => "tools",
+            ExportFormats => "export_formats",
+            ExportProfile { .. } => "export_profile",
+            ImportProfile { .. } => "import_profile",
+            OpenFile { .. } => "open_file",
+            DuplicateProfile { .. } => "duplicate_profile",
+            Diagnostics { .. } => "diagnostics",
+            Find { .. } => "find",
+            Versions { .. } => "versions",
+            RestorePreview { .. } => "restore_preview",
+            Estimate { .. } => "estimate",
+            Preferences => "preferences",
+            SavePreferences { .. } => "save_preferences",
+            SetPause { .. } => "set_pause",
         }
     }
 }
@@ -233,6 +328,7 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
     match call {
         Call::Profiles => json(views::profiles_impl(s)?),
         Call::Overview { id } => json(views::overview_impl(s, id)?),
+        Call::Status { id } => json(views::status_impl(s, id)?),
         Call::Snapshots { id } => json(views::snapshots_impl(s, id)?),
         Call::ListDir { id, snapshot, path } => json(views::list_dir_impl(s, id, snapshot, path)?),
         Call::Unlock {
@@ -240,6 +336,7 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             password,
             create,
         } => json(views::unlock_impl(s, id, password, create)?),
+        Call::SetPassword { id, password } => json(views::set_password_impl(s, id, password)?),
         Call::SaveKeyFile { id } => json(edit::save_key_file_impl(s, id)?),
         Call::BackupNow { id } => json(views::backup_now_impl(s, id)?),
         Call::Cancel { id } => json(views::cancel_impl(s, id)?),
@@ -294,6 +391,38 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::RunEvents { id, run_id } => json(actions::run_events_impl(s, id, run_id)?),
         Call::Prune { id, dry_run } => json(actions::prune_impl(s, id, dry_run)?),
         Call::Check { id, read_data } => json(actions::check_impl(s, id, read_data)?),
+        Call::RecoveryKit { id } => json(views::recovery_kit_impl(s, id)?),
+        Call::Tools => json(views::tools_impl()),
+        Call::ExportFormats => json(edit::export_formats_impl()),
+        Call::ExportProfile { id, format } => json(edit::export_profile_impl(s, id, format)?),
+        Call::ImportProfile { toml, id } => json(edit::import_profile_impl(s, toml, id)?),
+        Call::OpenFile { id, snapshot, path } => {
+            json(extras::open_file_impl(s, id, snapshot, path)?)
+        }
+        Call::DuplicateProfile { id } => json(extras::duplicate_profile_impl(s, id)?),
+        Call::Diagnostics { id } => json(extras::diagnostics_impl(s, id)?),
+        Call::Find { id, query } => json(find::find_impl(s, id, query)?),
+        Call::Versions { id, path } => json(find::versions_impl(s, id, path)?),
+        Call::RestorePreview {
+            id,
+            snapshot,
+            paths,
+            to,
+            overwrite,
+        } => json(find::restore_preview_impl(
+            s, id, snapshot, paths, to, overwrite,
+        )?),
+        Call::Estimate { profile } => json(space::estimate_impl(s, profile)?),
+        Call::Preferences => json(prefs::preferences_impl(s)?),
+        Call::SavePreferences {
+            notify_success,
+            default_exclude,
+        } => json(prefs::save_preferences_impl(
+            s,
+            notify_success,
+            default_exclude,
+        )?),
+        Call::SetPause { pause } => json(prefs::set_pause_impl(s, pause)?),
     }
 }
 

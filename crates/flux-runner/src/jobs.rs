@@ -99,14 +99,25 @@ pub fn try_lock(paths: &Paths, id: &ProfileId) -> io::Result<Option<JobLock>> {
         .write(true)
         .mode(0o600)
         .open(dir.join(format!("{id}.lock")))?;
-    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(Some(JobLock {
-            _file: file,
-            info_path: dir.join(format!("{id}.json")),
-        })),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-        Err(e) => Err(e.into()),
+    // A lock just released can look taken for a moment: a process forked by another thread
+    // of this program shares the descriptor until it execs (close-on-exec). So look again
+    // a few times before calling the job busy.
+    for attempt in 0..5 {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {
+                return Ok(Some(JobLock {
+                    _file: file,
+                    info_path: dir.join(format!("{id}.json")),
+                }));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) if attempt < 4 => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
     }
+    unreachable!("the last attempt returns")
 }
 
 /// Socket path for a job. Unix socket paths are limited to ~107 bytes; if the runtime

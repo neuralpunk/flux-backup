@@ -1,7 +1,7 @@
 // Demo backend for running the UI in a browser. Not bundled into the Tauri build's hot
 // path: api.ts imports it lazily only when Tauri isn't present.
 
-import type { DirEntry, Issue, JobMessage, Listing, Overview, PreviewRow, Profile, ProfileSummary, RunRecord, SnapshotMeta, SnapshotStats } from "./types";
+import type { DirEntry, Found, Issue, JobMessage, Listing, Overview, PreviewRow, Profile, ProfileSummary, RunRecord, SnapshotMeta, SnapshotStats } from "./types";
 import { ApiError } from "./types";
 
 const DAY = 86_400_000;
@@ -9,6 +9,8 @@ const now = Date.now();
 const iso = (t: number) => new Date(t).toISOString();
 
 function stats(files: number, bytes: number, changed: number): SnapshotStats {
+  // Real days vary a lot (a few MiB to a few GiB): spread the sample data likewise.
+  const spread = [0.002, 0.03, 0.4, 0.008, 1, 0.06, 0.15][changed % 7]!;
   return {
     entries: files + Math.round(files / 9),
     files,
@@ -20,10 +22,10 @@ function stats(files: number, bytes: number, changed: number): SnapshotStats {
     changed: Math.round(changed * 0.6),
     unchanged: files - changed,
     deleted: Math.round(changed * 0.1),
-    copied_bytes: Math.round(bytes * 0.004 * (1 + (changed % 7))),
+    copied_bytes: Math.round(bytes * 0.004 * (1 + (changed % 7)) * spread),
     copied_files: changed,
     linked_files: files - changed,
-    stored_bytes: Math.round(bytes * 0.002 * (1 + (changed % 5))),
+    stored_bytes: Math.round(bytes * 0.002 * (1 + (changed % 5)) * spread),
   };
 }
 
@@ -60,6 +62,8 @@ const snapshots: Record<string, SnapshotMeta[]> = {
   home: snapshotSeries("home", 34, DAY, false),
   docs: snapshotSeries("docs", 48, DAY / 6, true),
   photos: snapshotSeries("photos", 6, 7 * DAY, true, 9 * DAY),
+  plain: snapshotSeries("plain", 14, DAY, false, 2 * 3_600_000),
+  borg: snapshotSeries("borg", 26, DAY / 2, false, 5 * 3_600_000),
   "system:etc": snapshotSeries("system:etc", 21, DAY, false, 5 * 3_600_000),
 };
 
@@ -81,24 +85,192 @@ function run(profile: string, s: SnapshotMeta | undefined, status: RunRecord["st
 }
 
 const profiles: ProfileSummary[] = [
-  { id: "home", scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
-  { id: "docs", scope: "user", name: "Documents → NAS", engine: "vault", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 4h", errors: [], last_run: null, running: false },
-  { id: "photos", scope: "user", name: "Photo library", engine: "vault", target: "/run/media/me/Archive", remote: false, schedule: "manual + when drive connected", errors: [], last_run: null, running: false },
-  { id: "system:etc", scope: "system", name: "System settings", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "home", sources: ["~"], scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "docs", sources: ["~/Documents"], scope: "user", name: "Documents → NAS", engine: "vault", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 4h", errors: [], last_run: null, running: false },
+  { id: "photos", sources: ["~/Pictures"], scope: "user", name: "Photo library", engine: "vault", target: "/run/media/me/Archive", remote: false, schedule: "manual + when drive connected", errors: [], last_run: null, running: false },
+  { id: "plain", sources: ["~/Projects"], scope: "user", name: "Projects (rsync)", engine: "rsync", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "borg", sources: ["~/.local/share/mail", "~/Notes"], scope: "user", name: "Mail & Notes (Borg)", engine: "borg", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 12h", errors: [], last_run: null, running: false },
+  { id: "system:etc", sources: ["/etc"], scope: "system", name: "System settings", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
 ];
 profiles[0]!.last_run = run("home", snapshots.home!.at(-1), "completed");
 profiles[1]!.last_run = run("docs", snapshots.docs!.at(-1), "completed");
 profiles[2]!.last_run = run("photos", undefined, "failed", "backup target /run/media/me/Archive does not exist (is the drive connected and mounted?)");
-profiles[3]!.last_run = run("system:etc", snapshots["system:etc"]!.at(-1), "completed");
+profiles[3]!.last_run = run("plain", snapshots.plain!.at(-1), "completed");
+profiles[4]!.last_run = run("borg", snapshots.borg!.at(-1), "completed");
+profiles[5]!.last_run = run("system:etc", snapshots["system:etc"]!.at(-1), "completed");
 
 /** Demo: system profiles need "authenticating" first. */
 let systemUnlocked = false;
+const FLUX_EXCLUDE = ["~/.cache/", "~/.local/share/Trash/", "node_modules/"];
+let prefs = { notify_success: false, default_exclude: null as string[] | null };
+let pausedUntil: string | null | undefined =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("paused") === "1" ? iso(Date.now() + 9 * 3_600_000) : undefined;
+let autostartOn = false;
+const prefsView = () => ({
+  notify_success: prefs.notify_success,
+  default_exclude: prefs.default_exclude ?? FLUX_EXCLUDE,
+  default_exclude_custom: prefs.default_exclude != null,
+  pause: pausedUntil === undefined ? null : { until: pausedUntil },
+});
 
-let unlocked = new Set<string>(["home", "photos"]);
+/** Demo: `?first=1` gives "Home folder" a single snapshot (the first-backup card). */
+if (typeof location !== "undefined" && new URLSearchParams(location.search).get("first") === "1") snapshots.home = snapshots.home!.slice(-1);
+
+let unlocked = new Set<string>(["home", "photos", "plain"]);
 
 function locked(id: string) {
   const p = profiles.find((x) => x.id === id);
-  return p?.engine === "vault" && !unlocked.has(id);
+  return (p?.engine === "vault" || p?.engine === "borg") && !unlocked.has(id);
+}
+
+/** Demo: `?tools=missing` shows the app without rsync and borg installed. */
+const toolsMissing = typeof location !== "undefined" && new URLSearchParams(location.search).get("tools") === "missing";
+
+function tools() {
+  return [
+    toolsMissing
+      ? { tool: "rsync", program: "rsync", version: null, supported: false, hint: "rsync is not installed. Install it with your package manager (for example `sudo dnf install rsync` or `sudo apt install rsync`)." }
+      : { tool: "rsync", program: "rsync", version: "3.4.1", supported: true, hint: null },
+    toolsMissing
+      ? { tool: "borg", program: "borg", version: null, supported: false, hint: "Borg is not installed. Install the “borgbackup” package (for example `sudo dnf install borgbackup` or `sudo apt install borgbackup`)." }
+      : { tool: "borg", program: "borg", version: "1.4.5", supported: true, hint: null },
+  ];
+}
+
+function recoveryKit(id: string) {
+  const p = profiles.find((x) => x.id === id)!;
+  const newest = snapshots[id]?.at(-1)?.id ?? "2026-11-07_20-00-00";
+  if (p.engine === "borg") {
+    const repo = "ssh://me@nas/srv/flux/flux-borg/nyx/me/borg/repo";
+    return {
+      engine: "borg",
+      location: "me@nas:/srv/flux/flux-borg/nyx/me/borg",
+      tool: tools()[1],
+      recovery: `FLUX BACKUP — RECOVERY GUIDE (Borg compatibility mode)
+=============================================================
+
+These are backups of “${p.name}”, made by Flux Backup in Borg compatibility mode.
+They're stored in a standard Borg repository, written by borg itself. You don't
+need Flux to get your files back or to keep making backups: borg is enough.
+
+  Profile:     ${p.name} (borg)
+  Repository:  ${repo}
+  Encryption:  repokey-blake2        Compression: zstd,3
+
+IN SHORT
+--------
+  Your files are inside the repository folder above, in Borg's own format
+  (compressed, deduplicated and encrypted), so you can't open them there directly.
+  To get them back you need the program borg and your passphrase, then:
+    1. open a terminal and paste the lines under SET UP,
+    2. type   borg list                    to see your backups (archives),
+    3. mount them like a folder (BROWSE) or extract what you need (RESTORE).
+
+NEW TO BORG
+-----------
+  borg is a free backup program in every Linux distribution. Install the
+  “borgbackup” package if  borg --version  says it's missing.
+
+  * Each backup is an “archive”, named after the date and time it was made.
+    In commands, ::NAME means “archive NAME in the repository”.
+  * borg extract writes files into the folder you're in, so cd there first.
+
+SET UP (once per terminal window)
+-------------------------------
+  export BORG_REPO=${repo}
+  export BORG_PASSCOMMAND='secret-tool lookup service flux-backup profile borg'
+
+LIST THE BACKUPS
+----------------
+  borg list                              every archive
+  borg list ::${newest}     the files in one archive
+
+BROWSE
+------
+  mkdir -p ~/flux-backups && borg mount :: ~/flux-backups
+  When you're done:  borg umount ~/flux-backups
+
+RESTORE ONE FILE
+----------------
+  mkdir -p ~/restored && cd ~/restored && borg extract ::${newest} home/me/path/to/file
+
+RESTORE EVERYTHING
+------------------
+  cd / && sudo --preserve-env=BORG_REPO,BORG_RSH borg extract --list ::${newest}
+
+KEEP A COPY OF THE KEY
+----------------------
+  borg key export :: ~/flux-borg-key-borg.txt
+
+FOR BORG USERS
+--------------
+  borg create --stats --compression=zstd,3 --exclude-caches --patterns-from=flux-patterns.txt '::{now:%Y-%m-%d_%H-%M-%S}' /home/me
+`,
+      script: `#!/bin/sh
+# Flux Backup recovery kit: back up "${p.name}" (borg) with plain borg, without Flux.
+set -eu
+
+export BORG_REPO=${repo}
+[ -n "\${BORG_PASSPHRASE:-}\${BORG_PASSCOMMAND:-}" ] || export BORG_PASSCOMMAND='secret-tool lookup service flux-backup profile borg'
+...
+`,
+    };
+  }
+  const repo = "/run/media/me/BackupDisk/flux-rsync/nyx/me/plain";
+  return {
+    engine: "rsync",
+    location: repo,
+    tool: tools()[0],
+    recovery: `FLUX BACKUP — RECOVERY GUIDE (rsync compatibility mode)
+==============================================================
+
+These are backups of “${p.name}”, made by Flux Backup in rsync compatibility mode.
+Every snapshot is a plain folder written by rsync, a standard Linux copying tool.
+You don't need Flux to get your files back or to keep making backups.
+
+IN SHORT
+--------
+  Your files are ordinary files and folders. To get one back, open
+    ${repo}/latest/data
+  in your file manager, go to the file's usual place (for example
+  /home/me/path/to), and copy it out. That's all: no program, no password.
+
+NEW TO RSYNC
+------------
+  rsync copies files and folders. Each command below is one line: copy the whole
+  line into a terminal and press Enter.
+    * A slash at the end of a folder (folder/) means “what's inside this folder”.
+    * --dry-run only shows what would happen. Add it first when you're unsure.
+
+WHERE YOUR FILES ARE
+--------------------
+  snapshots/<date and time>/data/<the file's usual path>
+  for example
+    snapshots/${newest}/data/home/me/path/to/file
+
+RESTORE ONE FILE
+----------------
+  rsync -aHAX ${repo}/latest/data/home/me/path/to/file /home/me/path/to/
+
+RESTORE A FOLDER (to where it was)
+----------------------------------
+  rsync -aHAX --numeric-ids ${repo}/latest/data/home/me/ /home/me/
+
+MAKE A NEW BACKUP WITHOUT FLUX
+------------------------------
+  sh ${repo}/flux-backup.sh            (or add --dry-run to only show what would change)
+
+FOR RSYNC USERS
+---------------
+  rsync --archive --hard-links --numeric-ids --relative --delete --delete-excluded --acls --xattrs --exclude-from=${repo}/snapshots/.partial/rsync-filter.txt '--link-dest=../../<previous snapshot>/data' /home/me/ ${repo}/snapshots/.partial/data/
+`,
+    script: `#!/bin/sh
+# Flux Backup recovery kit: back up "${p.name}" (plain) with plain rsync, without Flux.
+set -eu
+REPO=${repo}
+...
+`,
+  };
 }
 
 // A small, realistic file tree for browsing.
@@ -141,6 +313,22 @@ const tree: Record<string, [string, "dir" | "file" | "symlink", number][]> = {
   "/home/me/.config": [["flux-backup", "dir", 0]],
 };
 
+/** Free space after each backup: the home drive fills up, the NAS stays steady. */
+function spaceFor(id: string): Overview["space"] {
+  if (id !== "home" && id !== "plain") return null;
+  const size = 2_000_000_000_000;
+  const free = 742_000_000_000;
+  const filling = id === "home";
+  const points = Array.from({ length: 31 }, (_, i) => {
+    const daysAgo = 60 - i * 2;
+    const wobble = Math.sin(i * 1.7) * 4_000_000_000;
+    const f = filling ? free + daysAgo * 9_500_000_000 + wobble : free + wobble + (i % 7 === 0 ? 12_000_000_000 : 0);
+    return { t: iso(now - daysAgo * DAY - (daysAgo ? 3_600_000 : 0)), free: Math.round(f) };
+  });
+  points[points.length - 1] = { t: iso(now), free };
+  return { free, size, points, per_day: filling ? -9_500_000_000 : 120_000_000, days_left: filling ? 78 : null };
+}
+
 function listing(path: string): Listing {
   const items = tree[path] ?? [];
   const entries: DirEntry[] = items.map(([name, kind, size], i) => {
@@ -177,6 +365,7 @@ function fullProfile(p: ProfileSummary): Profile {
     options: { preserve_acl: true, preserve_xattr: true, symlinks: "preserve", change_detection: "metadata", continue_on_errors: true, snapshot_if_unchanged: false, nice: 10, io_priority: "best_effort_low", notify: true, backup_before_restore: true, threads: 0 },
     hooks: { pre_backup: [], post_backup: [], on_error: [] },
     vault: p.engine === "vault" ? { compression_level: 3, encryption: true, password_source: { from: "keyring" } } : null,
+    borg: p.engine === "borg" ? { encryption: "repokey-blake2", compression: "zstd,3", password_source: { from: "keyring" }, remote_path: null, extra_args: [] } : null,
   };
 }
 
@@ -298,7 +487,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
   const id = args.id as string;
   const needsUnlock = () => {
     const p = profiles.find((x) => x.id === id);
-    if (p?.engine === "vault" && !unlocked.has(id)) throw new ApiError("password_required", `The Vault of “${p.name}” is locked.`);
+    if ((p?.engine === "vault" || p?.engine === "borg") && !unlocked.has(id)) throw new ApiError("password_required", `The backups of “${p.name}” are locked.`);
   };
   if (id?.startsWith("system:") && !systemUnlocked) throw new ApiError("locked", "Authenticate to manage system backups.");
   switch (cmd) {
@@ -315,6 +504,9 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       systemUnlocked = false;
       emit("flux://system", { unlocked: false });
       return null;
+    case "set_password":
+      unlocked.add(id);
+      return null;
     case "save_key_file":
       return `/etc/flux-backup/keys/${id.replace("system:", "")}`;
     case "overview": {
@@ -329,13 +521,42 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         recent_runs: s.slice(-6).reverse().map((x, i) =>
           i === 3 ? { ...run(id, x, "unchanged"), stats: null } : run(id, x, x.status === "complete" ? "completed" : "completed_with_errors"),
         ),
-        next_run: p.schedule.startsWith("manual") ? null : new Date(now + 5 * 3_600_000).toString(),
+        next_run: p.schedule.startsWith("manual") ? null : new Date(now + 5 * 3_600_000).toISOString(),
         timer_active: !p.schedule.startsWith("manual"),
         free_bytes: id === "photos" ? null : 742_000_000_000,
         repo_error: null,
+        space: spaceFor(id),
+        health:
+          id === "photos"
+            ? [
+                { level: "warning", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." },
+              ]
+            : [],
       };
       if (id === "photos") o.recent_runs.unshift(p.last_run!);
       return o;
+    }
+    case "status": {
+      const p = profiles.find((x) => x.id === id)!;
+      const s = snapshots[id] ?? [];
+      const stored = p.engine === "vault" || p.engine === "borg";
+      const day = (t: number) => {
+        const d = new Date(t);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      };
+      const days = Array.from({ length: 30 }, (_, i) => ({ date: day(now - (29 - i) * DAY), state: "none" as "ok" | "failed" | "none", bytes: 0 }));
+      for (const x of s) {
+        const d = days.find((d) => d.date === day(Date.parse(x.finished)));
+        if (d) (d.state = "ok"), (d.bytes += (stored ? x.stats?.stored_bytes : x.stats?.copied_bytes) ?? 0);
+      }
+      if (id === "photos") days[27]!.state = "failed";
+      return {
+        next_run: p.schedule.startsWith("manual") ? null : iso(now + (id === "docs" || id === "borg" ? 1 : 5) * 3_600_000),
+        timer_active: !p.schedule.startsWith("manual"),
+        last_good: s.at(-1)?.finished ?? null,
+        health: id === "photos" ? [{ level: "warning", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." }] : [],
+        days,
+      };
     }
     case "snapshots":
       needsUnlock();
@@ -426,7 +647,8 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "delete_snapshot": {
       const gone = snapshots[id]?.find((x) => x.id === args.snapshot);
       snapshots[id] = (snapshots[id] ?? []).filter((x) => x.id !== args.snapshot);
-      return profiles.find((p) => p.id === id)?.engine === "vault" ? (gone?.stats.stored_bytes ?? 0) : null;
+      const e = profiles.find((p) => p.id === id)?.engine;
+      return e === "vault" || e === "borg" ? (gone?.stats.stored_bytes ?? 0) : null;
     }
     case "compare":
       await delay(400);
@@ -469,6 +691,122 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "check":
       await delay(args.readData ? 1500 : 600);
       return { snapshots: snapshots[id]?.length ?? 0, checked: 112_435, bytes_read: args.readData ? 92_000_000_000 : 0, errors: [], warnings: [] };
+    case "tools":
+      return tools();
+    case "open_snapshot_file":
+      await delay(400);
+      return `/home/me/.cache/flux-backup/opened/${args.snapshot}/${(args.path as string).split("/").pop()}`;
+    case "duplicate_profile": {
+      const src = profiles.find((x) => x.id === id)!;
+      const copy = { ...structuredClone(src), id: `${id}-copy`, name: `${src.name} (copy)`, last_run: null };
+      profiles.push(copy);
+      stored[copy.id] = { ...structuredClone(stored[id]!), name: copy.name };
+      snapshots[copy.id] = [];
+      return copy.id;
+    }
+    case "find": {
+      await delay(500);
+      const q = (args.query as string).trim().toLowerCase();
+      const snaps = snapshots[id] ?? [];
+      const hits: Found[] = [];
+      for (const [dir, items] of Object.entries(tree)) {
+        for (const [name, kind, size] of items) {
+          if (!name.toLowerCase().includes(q)) continue;
+          const path = dir === "/" ? `/${name}` : `${dir}/${name}`;
+          const versions = kind === "dir" ? 1 : 1 + (name.length % 4);
+          hits.push({ path, kind, versions, snapshots: snaps.length, latest: snaps.at(-1)!.id, latest_size: size, latest_mtime: Math.floor((now - 3 * DAY) / 1000) });
+        }
+      }
+      // A file that was deleted a while ago: only in older snapshots.
+      if ("notes-old.md".includes(q) && snaps.length > 6) {
+        hits.push({ path: "/home/me/notes-old.md", kind: "file", versions: 2, snapshots: snaps.length - 5, latest: snaps.at(-6)!.id, latest_size: 7_441_870, latest_mtime: Math.floor((now - 9 * DAY) / 1000) });
+      }
+      return { hits, total: hits.length, snapshots: snaps.length };
+    }
+    case "versions": {
+      await delay(350);
+      const snaps = snapshots[id] ?? [];
+      const n = Math.min(4, snaps.length);
+      const step = Math.max(1, Math.floor(snaps.length / n));
+      return Array.from({ length: n }, (_, i) => {
+        const first = snaps[i * step]!;
+        const last = snaps[Math.min(snaps.length - 1, (i + 1) * step - 1)]!;
+        const count = i === n - 1 ? snaps.length - i * step : step;
+        return { first: first.id, last: i === n - 1 ? snaps.at(-1)!.id : last.id, snapshots: count, kind: "file", size: 18_204 - (n - 1 - i) * 1_310, mtime: Math.floor(new Date(first.started).getTime() / 1000) - 3600 };
+      });
+    }
+    case "preferences":
+      return prefsView();
+    case "save_preferences":
+      prefs = { notify_success: args.notifySuccess as boolean, default_exclude: (args.defaultExclude as string[] | null) ?? null };
+      return prefsView();
+    case "set_pause": {
+      const k = args.pause as string;
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(7, 0, 0, 0);
+      pausedUntil = k === "off" ? undefined : k === "hour" ? iso(Date.now() + 3_600_000) : k === "tomorrow" ? tomorrow.toISOString() : null;
+      return prefsView().pause;
+    }
+    case "autostart":
+      return autostartOn;
+    case "set_autostart":
+      autostartOn = args.on as boolean;
+      return null;
+    case "estimate": {
+      await delay(900);
+      const paths = (args.profile as Profile).sources.paths;
+      const excluded = (args.profile as Profile).sources.exclude.length;
+      return { files: 61_200 * paths.length - excluded * 3_100, folders: 7_400 * paths.length, bytes: 41_800_000_000 * paths.length - excluded * 2_600_000_000, unreadable: 3, missing: [], free: 742_000_000_000 };
+    }
+    case "restore_preview": {
+      await delay(300);
+      const inPlace = args.to == null;
+      const differ = inPlace ? ["/home/me/notes.md", "/home/me/Documents/budget-2026.ods"] : [];
+      return {
+        new: inPlace ? 3 : 14,
+        differ: differ.length,
+        identical: inPlace ? 9 : 0,
+        new_folders: inPlace ? 0 : 2,
+        bytes: 4_211_877,
+        keep_existing: !args.overwrite,
+        differ_paths: differ,
+        new_paths: ["/home/me/Pictures/2026/IMG_2041.jpg"],
+        unsafe_paths: 0,
+      };
+    }
+    case "diagnostics":
+      return `Flux Backup diagnostics\n\nFlux Backup 0.2.0 (demo)\n--- profile ${id} ---\n…`;
+    case "export_formats":
+      return [
+        { id: "flux", label: "Flux Backup profile", description: "This profile as a file, to import on another computer or keep as a copy.", works_with: "Flux Backup (flux profile import)" },
+        { id: "borgmatic", label: "borgmatic configuration", description: "The same backup as a borgmatic config: Borg with schedules, retention and checks.", works_with: "borgmatic 1.8 or newer, and Borg" },
+        { id: "restic", label: "restic script", description: "A script that runs the same backup with restic, including retention.", works_with: "restic 0.16 or newer" },
+        { id: "rsync", label: "rsync script", description: "A script that runs the same backup with rsync: plain-folder snapshots.", works_with: "rsync 3.1 or newer" },
+        { id: "borg", label: "Borg script", description: "A script that runs the same backup with borg create.", works_with: "Borg 1.2 to 1.4" },
+      ];
+    case "export_profile": {
+      const p = profiles.find((x) => x.id === id)!;
+      const f = args.format as string;
+      const notes = f === "flux" ? [] : ["Pinned and named snapshots are a Flux feature; other tools' retention may remove them.", "The schedule (at *-*-* 20:00:00) isn't part of the export: run it from cron or a systemd timer."];
+      const contents =
+        f === "flux"
+          ? `# Export of the Flux Backup profile “${p.name}” (${id}).\n# flux-profile-id = "${id}"\n\nversion = 1\nname = "${p.name}"\nengine = "${p.engine}"\n\n[target]\nkind = "local"\npath = "${p.target}"\n\n[sources]\npaths = ["/home/me"]\nexclude = ["~/.cache/", "node_modules/", "*.tmp"]\n`
+          : f === "borgmatic"
+            ? `# borgmatic configuration of the Flux Backup profile “${p.name}” (${id}).\n${notes.map((n) => "# Note: " + n).join("\n")}\n\nsource_directories:\n    - "/home/me"\n\nrepositories:\n    - path: "${p.target}/flux-borg/nyx/me/${id}/repo"\n      label: "flux-${id}"\n\npatterns:\n    - "! sh:**/node_modules"\n    - "! sh:**/*.tmp"\nexclude_caches: true\ncompression: "zstd,3"\nkeep_daily: 7\nkeep_weekly: 4\n`
+            : `#!/bin/sh\n# ${f} equivalent of the Flux Backup profile “${p.name}” (${id}).\nset -eu\n...\n`;
+      return { format: f, filename: f === "flux" ? `${id}.flux-profile.toml` : f === "borgmatic" ? `${id}-borgmatic.yaml` : `${id}-${f}-backup.sh`, contents, executable: f !== "flux" && f !== "borgmatic", notes };
+    }
+    case "save_export":
+      return `${args.dir}/${id}-export`;
+    case "import_profile":
+      return { id: "home", issues: [] };
+    case "recovery_kit":
+      return recoveryKit(id);
+    case "save_recovery_kit": {
+      const short = id.replace("system:", "");
+      return [`${args.dir}/${short}-FLUX-RECOVERY.txt`, `${args.dir}/${short}-flux-backup.sh`];
+    }
     default:
       throw new ApiError("error", `unknown command ${cmd}`);
   }

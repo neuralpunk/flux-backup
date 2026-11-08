@@ -179,6 +179,8 @@ pub struct SnapshotFs {
     /// Show only this snapshot, at the root.
     only: Option<usize>,
     views: Mutex<VecDeque<(usize, Arc<Loaded>)>>,
+    /// Held while a snapshot's listing loads.
+    loading: Mutex<()>,
     handles: Mutex<HashMap<u64, Handle>>,
     next_fh: AtomicU64,
     uid: u32,
@@ -201,6 +203,7 @@ impl SnapshotFs {
             by_name,
             only,
             views: Mutex::new(VecDeque::new()),
+            loading: Mutex::new(()),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             uid: rustix::process::geteuid().as_raw(),
@@ -249,6 +252,18 @@ impl SnapshotFs {
             })
         } {
             return Ok(l);
+        }
+        // One load at a time: listing a snapshot can be slow (and, for Borg, takes the
+        // repository lock), and lookups often arrive in parallel.
+        let _loading = self.loading.lock().expect("loading");
+        if let Some((_, l)) = self
+            .views
+            .lock()
+            .expect("views")
+            .iter()
+            .find(|(n, _)| *n == k)
+        {
+            return Ok(l.clone());
         }
         let view = SnapshotView::load(&self.repo, self.snapshots[k].clone()).map_err(|e| {
             tracing::warn!("cannot read snapshot {}: {e}", self.snapshots[k].id);

@@ -5,6 +5,7 @@ mod lifecycle_cmd;
 mod mount_cmd;
 mod output;
 mod profile_cmd;
+mod recovery_cmd;
 mod schedule_cmd;
 mod ssh_cmd;
 mod target_spec;
@@ -77,6 +78,12 @@ enum Command {
     Log(lifecycle_cmd::LogArgs),
     /// Verify a profile's backups.
     Check(vault_cmd::CheckArgs),
+    /// Print diagnostics for a bug report: versions, tools, the profile (secrets hidden)
+    /// and its recent runs.
+    Diagnostics { profile: String },
+    /// Show the recovery kit of a compatibility-mode profile: how to use its backups
+    /// without Flux.
+    Recovery(recovery_cmd::RecoveryArgs),
     /// Manage the passwords of a Vault.
     #[command(subcommand)]
     Key(vault_cmd::KeyCmd),
@@ -88,6 +95,17 @@ enum Command {
     Schedule(schedule_cmd::ScheduleCmd),
     /// What's running, how the last backups went, and what's next.
     Status(schedule_cmd::StatusArgs),
+    /// Pause scheduled backups (backing up by hand still works).
+    Pause {
+        /// For how long, e.g. 1h, 3d (default: until `flux resume`).
+        #[arg(long = "for", value_name = "DURATION", conflicts_with = "tomorrow")]
+        duration: Option<flux_core::HumanDuration>,
+        /// Until 7:00 tomorrow.
+        #[arg(long)]
+        tomorrow: bool,
+    },
+    /// Let scheduled backups run again after `flux pause`.
+    Resume,
     /// Follow a running backup's progress.
     Watch(schedule_cmd::ProfileArg),
     /// Stop a running backup (it resumes next time).
@@ -152,10 +170,22 @@ fn main() -> ExitCode {
         Command::Delete(a) => lifecycle_cmd::run_delete(&ctx, a),
         Command::Log(a) => lifecycle_cmd::run_log(&ctx, a),
         Command::Check(a) => vault_cmd::run_check(&ctx, a),
+        Command::Recovery(a) => recovery_cmd::run(&ctx, a),
+        Command::Diagnostics { profile } => {
+            let service = flux_service::Service::new(ctx.paths.clone());
+            flux_service::extras::diagnostics_impl(&service, profile)
+                .map(|text| {
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        }
         Command::Key(cmd) => vault_cmd::run_key(&ctx, cmd),
         Command::Ssh(cmd) => ssh_cmd::run_ssh(&ctx, cmd),
         Command::Schedule(cmd) => schedule_cmd::run_schedule(&ctx, cmd),
         Command::Status(a) => schedule_cmd::run_status(&ctx, a),
+        Command::Pause { duration, tomorrow } => schedule_cmd::run_pause(&ctx, duration, tomorrow),
+        Command::Resume => schedule_cmd::run_resume(&ctx),
         Command::Watch(a) => schedule_cmd::run_watch(&ctx, a),
         Command::Cancel(a) => schedule_cmd::run_cancel(&ctx, a),
         Command::Profile(cmd) => profile_cmd::run(&ctx, cmd),

@@ -68,6 +68,32 @@ right size, and `--read-data` reads each one back, comparing it with its recorde
 where one exists (`change_detection = "checksum"`). That catches accidental damage, not
 deliberate tampering by someone who can also rewrite the manifest.
 
+### rsync compatibility mode (plain folders)
+
+The same as Mirror: ordinary files with their original permissions, in a repository folder
+created with mode 0700, readable by anyone holding the drive. Use an encrypted drive for
+anything sensitive. The recovery kit (`FLUX-RECOVERY.txt`, `flux-backup.sh`) lists the
+backed-up paths and exclusions, but no secrets. `flux-backup.sh` is a shell script on the
+backup drive: anyone who can write to the drive can change it, so read it before running a
+copy you didn't make yourself (`flux recovery <profile> --script` prints a fresh one from
+your profile). Restores from Flux use the same symlink-safe restore as the other engines;
+the rsync commands in the guide are the equivalent for use without Flux and have rsync's
+own behaviour.
+
+### Borg compatibility mode
+
+The repository is a standard Borg 1.x repository with Borg's own protections: with the
+default `repokey-blake2`, contents and metadata are encrypted and authenticated by Borg, and
+the key is stored in the repository protected by the passphrase (`encryption = "none"`
+gives neither). Flux passes the passphrase to borg in its environment (`BORG_PASSPHRASE`)
+for the duration of one borg process; it never logs it or writes it to disk (except where
+the profile's password source keeps it: keyring, key file). The recovery guide lists the
+repository location, encryption mode and password source, but no secrets. Archive
+comments (Flux's names and pins) are inside the encrypted repository. Restores extract into
+a temporary folder, inside the `--to` folder or Flux's cache, removed afterwards; restores
+as root then go through the symlink-safe restore. Borg's caches (`~/.cache/borg`) and
+security folder are Borg's own; their threat model is Borg's.
+
 ## In transit (SSH)
 
 Flux uses the system `ssh`, so host-key verification and authentication are OpenSSH's.

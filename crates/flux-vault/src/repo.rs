@@ -188,6 +188,22 @@ impl VaultRepo {
         repo_id: &str,
         password: &str,
     ) -> Result<(MasterKey, String), VaultError> {
+        // Opened before with this password, and its key slot is still there: skip Argon2id.
+        if let Some((master, sid)) = unlocked::get(repo_id, password)
+            && backend.exists(&format!("keys/{sid}")).unwrap_or(false)
+        {
+            return Ok((master, sid));
+        }
+        let (master, sid) = Self::try_slots_slow(backend, repo_id, password)?;
+        unlocked::put(repo_id, password, &master, &sid);
+        Ok((master, sid))
+    }
+
+    fn try_slots_slow(
+        backend: &dyn Backend,
+        repo_id: &str,
+        password: &str,
+    ) -> Result<(MasterKey, String), VaultError> {
         let slots = backend
             .list("keys")
             .map_err(|e| VaultError::io("keys", e))?;
@@ -428,3 +444,54 @@ impl VaultRepo {
 
 /// Blob ids of a snapshot's content, by file path (for restore).
 pub type ContentMap = HashMap<Vec<u8>, Vec<BlobId>>;
+
+/// Master keys this process has unlocked, so opening the same Vault again with the same
+/// password skips Argon2id (0.2–0.5 s of CPU per try, by design). The app opens a Vault for
+/// nearly every view; without this, each one paid that cost again.
+///
+/// Passwords are not kept: entries are found by a keyed hash of the password, under a key
+/// that exists only in this process. A key whose slot was removed (`flux key remove`) is
+/// not used. The master key is what the open repository would hold in memory anyway.
+mod unlocked {
+    use std::sync::{LazyLock, Mutex};
+
+    use crate::crypto::{MasterKey, random};
+
+    struct Unlocked {
+        repo: String,
+        tag: [u8; 32],
+        sid: String,
+        master: MasterKey,
+    }
+
+    const KEEP: usize = 16;
+    static TAG_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| random().unwrap_or([7; 32]));
+    static CACHE: Mutex<Vec<Unlocked>> = Mutex::new(Vec::new());
+
+    fn tag(password: &str) -> [u8; 32] {
+        *blake3::keyed_hash(&TAG_KEY, password.as_bytes()).as_bytes()
+    }
+
+    pub(super) fn get(repo: &str, password: &str) -> Option<(MasterKey, String)> {
+        let t = tag(password);
+        let c = CACHE.lock().ok()?;
+        c.iter()
+            .find(|u| u.repo == repo && u.tag == t)
+            .map(|u| (u.master.clone(), u.sid.clone()))
+    }
+
+    pub(super) fn put(repo: &str, password: &str, master: &MasterKey, sid: &str) {
+        let t = tag(password);
+        let Ok(mut c) = CACHE.lock() else { return };
+        c.retain(|u| !(u.repo == repo && u.tag == t));
+        if c.len() >= KEEP {
+            c.remove(0);
+        }
+        c.push(Unlocked {
+            repo: repo.to_owned(),
+            tag: t,
+            sid: sid.to_owned(),
+            master: master.clone(),
+        });
+    }
+}

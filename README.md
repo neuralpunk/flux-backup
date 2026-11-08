@@ -6,7 +6,7 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 0.1, the first release. Read the [user guide](docs/USER_GUIDE.md) to get
+> **Status:** 0.2. See the [changelog](CHANGELOG.md) for what's new. Read the [user guide](docs/USER_GUIDE.md) to get
 > started, and the [threat model](docs/THREAT_MODEL.md) for what Flux protects against.
 > [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md) show how it was built. As with
 > any new backup tool, keep another copy of anything precious until you trust it.
@@ -29,35 +29,84 @@ build from source, see [Building](#building).
 
 Each profile picks its engine.
 
+### Compatibility mode: rsync and Borg
+
+For backups that never depend on Flux, a profile can use **compatibility mode**: the data
+is written by an industry-standard tool, in its native format, and Flux is the interface.
+
+- `--engine rsync`: every snapshot is a plain folder written by the system `rsync`
+  (`--link-dest`, so unchanged files are hard links). Each snapshot records the exact
+  rsync command that wrote it.
+- `--engine borg`: a standard Borg 1.x repository written by the system `borg`
+  (install `borgbackup`), encrypted with `repokey-blake2` and deduplicated.
+
+Next to the backups Flux keeps a recovery kit: `FLUX-RECOVERY.txt`, a plain-text guide
+with the exact commands for that profile (list, browse, restore, back up, prune, check),
+written for people new to the tool and for experts alike, and `flux-backup.sh`, which
+runs the same backup with the tool alone. `flux recovery <profile>` prints the kit.
+Everything else (browsing, restores, retention with pins, schedules, mount) works as with
+the other engines. See the
+[user guide](docs/USER_GUIDE.md#compatibility-mode-backups-that-dont-need-flux).
+
 ## Desktop app
 
 ![Overview with a backup running](docs/screenshots/overview-dark.png)
 
-| Snapshots and file browser | Profile editor |
+| Snapshots and file browser | Settings |
 |---|---|
-| ![Snapshots](docs/screenshots/snapshots-dark.png) | ![Profile editor](docs/screenshots/settings-dark.png) |
+| ![Snapshots](docs/screenshots/snapshots-dark.png) | ![A backup's settings](docs/screenshots/settings-dark.png) |
 | **Activity log** | **Light theme** |
 | ![Activity](docs/screenshots/activity-dark.png) | ![Light theme](docs/screenshots/overview-light.png) |
+| **Compatibility mode** | **Recovery kit** |
+| ![Choosing Vault, rsync or Borg while setting up](docs/screenshots/compat-dark.png) | ![Recovery kit](docs/screenshots/recovery-dark.png) |
+| **Find in all snapshots** | **Versions of a file** |
+| ![Search results across snapshots](docs/screenshots/search-dark.png) | ![Versions of a file](docs/screenshots/versions-dark.png) |
+| **Restore preview** | **Space forecast** |
+| ![What a restore would change](docs/screenshots/restore-dark.png) | ![Used space and when the drive is full](docs/screenshots/space-dark.png) |
+| **Warnings in words** | **Preferences and pausing** |
+| ![All backups, with the one that needs attention explained](docs/screenshots/health-dark.png) | ![Preferences with schedules paused](docs/screenshots/preferences-dark.png) |
+| **Export to other tools** | **Size estimate** |
+| ![Export dialog](docs/screenshots/export-dark.png) | ![New backup, step one, with a size estimate](docs/screenshots/new-dark.png) |
 
 The app (Tauri 2, Svelte 5, Tailwind 4, the "Graphite Tonal" design in
 [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
 - **Overview:** the running backup's progress, last and next backup, snapshots, free space,
-  recent backups, and maintenance (check, verify every byte, free up space).
+  recent backups, and maintenance (check, verify every byte, free up space). Warnings in
+  words when something needs you (a drive not seen for days, repeated failures, little
+  space), and a chart of used space with a forecast of when the drive is full.
 - **Snapshots:** every snapshot with an instant file browser. "What changed" compares with the
-  one before; name, pin, other comparisons and delete are in the ⋯ menu. Restore to the
-  original place or another folder, keeping differing files by default.
-- **Activity:** every run with its log, warnings and hook output.
-- **Setting up a backup:** three questions (what, where, when) and an encryption switch.
+  one before; name, pin, other comparisons and delete are in the ⋯ menu. **Find in all
+  snapshots** searches by name (deleted files included), **Versions** lists every version
+  of a file, and double-click opens a read-only copy. Restore to the original place or
+  another folder, with a preview of what would be added, kept aside or replaced.
+- **Activity:** every run with its log, warnings and hook output; a Problems filter and
+  **Copy diagnostics** for bug reports.
+- **Setting up a backup:** a short guide, one question per step (what, where, protection,
+  when), a review of every answer, and an offer to run the first backup.
   Connected USB drives are offered (and tied to their filesystem, so an unplugged drive is
-  never mistaken for its empty mount point). **Advanced options** opens the rest:
-  exclusions with suggestions and real sizes, SSH details, the storage engine, schedules,
-  retention rules with a live preview of what would be kept, hooks and more.
+  never mistaken for its empty mount point). Everything else is a row with its current
+  value that opens just that group: exclusions with suggestions and real sizes, connection
+  details, how backups are stored (including rsync and Borg), more schedules (wait for
+  power, not on metered connections, monthly verification), retention rules with a live
+  preview of what would be kept, hooks, and performance. A new backup shows how much it
+  will copy, following the exclusions.
+- **Right-click** a backup in the sidebar (or use the **⋯** button next to *Back up now*)
+  to back it up, open its snapshots, activity or settings, duplicate, export or delete it,
+  or pause all scheduled backups. Snapshots, files and runs have the same kind of menu.
+- **Preferences:** pause scheduled backups (an hour, until tomorrow, until resumed),
+  notifications for successful backups, start in the tray at login, theme, and the
+  exclusions new backups start with.
+- **Compatibility mode:** a **Usable without Flux** choice lets rsync or Borg write the
+  backups in their own formats; the Overview's **Recovery guide** shows the kit kept next to
+  them, copyable section by section and saveable to a USB stick.
 - **System backups:** profiles for the whole computer (`/etc`, `/root`, other users' files)
-  in their own section. Click **Authenticate**, enter an administrator password, and manage
-  them like your own; they lock again after 15 idle minutes. See
+  in their own section. Click **System backups**; Flux explains what it needs, then your
+  desktop asks for an administrator password, and you manage them like your own; they lock
+  again after 15 idle minutes. See
   [System backups](#system-backups-root).
-- A tray icon that lights up while a backup runs (open, back up everything, quit), keyboard
-  shortcuts (`?` lists them), and dark, light or automatic themes.
+- A tray icon that lights up while a backup runs (open, back up everything, pause or resume
+  schedules, quit), keyboard shortcuts (`?` lists them), and dark, light or automatic
+  themes.
 
 "Back up now" runs `flux backup` as a separate process, so a backup keeps going when you
 close the window. The app follows every running backup, scheduled or started from a
@@ -89,15 +138,20 @@ flux ls home ~/Documents -l       # browse a snapshot (instant: reads the manife
 flux restore home ~/Documents/report.odt            # back to where it was
 flux restore home ~/Documents --to /tmp/rescue -s 2026-11-04_18-30-00
 flux profile edit home            # opens $EDITOR, validates before saving
+flux profile export home -f borgmatic -o ~/   # or flux, restic, rsync, borg
+flux profile import home.flux-profile.toml
+flux profile duplicate home         # a copy to change (e.g. a second drive)
+flux diagnostics home               # what to paste when asking for help
 
 flux diff home                    # latest snapshot vs. the one before
 flux diff home --live --path ~/Documents   # what changed on disk since the latest snapshot
-flux find home '*.odt' -i         # search every snapshot
+flux find home report             # search every snapshot (part of a name; or '*.odt')
 flux history home ~/thesis.tex    # every version of a file, and where to restore it from
 flux prune home --dry-run         # what retention would remove, and why each one is kept
 flux name home latest before-upgrade && flux pin home before-upgrade
 flux log home                     # recent runs; `--run last` shows one run's events
 flux mount home ~/snapshots       # every snapshot as a read-only folder (any engine)
+flux recovery home                # compatibility mode: how to use the backups without Flux
 ```
 
 Every command accepts `--json` for scripting and `--system` for root-mode profiles in
@@ -109,7 +163,8 @@ files could not be backed up or restored.
 
 ```sh
 flux profile create docs --target /run/media/$USER/Backup --source ~/Documents --engine vault
-flux backup docs                  # first run asks for a new password and saves it in the keyring
+flux key init docs                # choose the password now: creates the Vault, keeps it in the keyring
+flux backup docs                  # runs without asking (so do scheduled ones)
 flux check docs --read-data       # verify every stored byte
 flux key list docs                # passwords (key slots) that open the Vault
 flux key add docs                 # add another password; `key passwd` changes it
@@ -133,14 +188,15 @@ Password sources, set with `[vault] password_source`:
 longer keeps; `flux prune` reclaims their space.
 
 Vault compared with Borg (`repokey-blake2`, `--compression zstd,3`) on the 1 GiB benchmark
-data (tmpfs, 16 cores):
+data (tmpfs, 16 cores, median of three runs of `bench/bench.sh`; both make a snapshot even
+when nothing changed):
 
 | scenario | Flux Vault | Borg 1.4 |
 |---|---:|---:|
-| initial backup | 1.8 s | 15.3 s |
-| no changes | 0.5 s | 7.7 s |
-| 1% of files changed | 0.6–1.0 s | 8.0 s |
-| repository size | 864 MiB | 873 MiB |
+| initial backup | 1.73 s | 15.81 s |
+| no changes, new snapshot | 0.51 s | 8.17 s |
+| 1% of small files + 1 large file changed | 0.51 s | 8.18 s |
+| repository size | 864 MiB | 869 MiB |
 
 Full restore took 1.2 s and was byte-identical to the source. `check --read-data`
 verified all 860 MiB in 0.5 s.
@@ -184,6 +240,7 @@ flux schedule install home    # write and enable systemd user units for this pro
 flux schedule sync            # make all timers match all profiles
 flux schedule status          # timer state, next and last run
 flux status                   # all profiles: running now, last run, next run
+flux pause --tomorrow         # pause scheduled backups (--for 2h; `flux resume`)
 flux watch home               # follow a running backup (also one started by a timer)
 flux cancel home              # stop it; the next run resumes the partial snapshot
 ```
@@ -300,17 +357,20 @@ writes to that exact filesystem. It also never backs up its own backups.
 ### Benchmark
 
 `bench/bench.sh`: 100,000 small files plus 20 × 20 MiB (1 GiB), on tmpfs, on a 16-core
-machine, compared with `rsync -aHAX --link-dest` (Back in Time's approach):
+machine (median of three runs, rsync 3.5, Borg 1.4.5), compared with
+`rsync -aHAX --link-dest` (Back in Time's approach). With borg installed, the same script
+also compares Vault with Borg (the table above). It touches nothing outside its work
+folder:
 
 | scenario | Flux | rsync |
 |---|---:|---:|
-| initial full backup | 0.6 s | 4.1 s |
-| no changes, new snapshot | 0.37 s | 9.1 s |
-| 1% of small files + 1 large file changed | 0.37 s | 9.2 s |
-| no changes (Flux default: skip, no snapshot) | 0.13 s | — |
+| initial full backup | 0.46 s | 4.28 s |
+| no changes, new snapshot | 0.26 s | 7.67 s |
+| 1% of small files + 1 large file changed | 0.26 s | 7.73 s |
+| no changes (Flux default: skip, no snapshot) | 0.16 s | — |
 
-With Back in Time's default flags (`rsync -aH`, no ACLs/xattrs), the 1%-change run took
-7.3 s against Flux's 0.37 s. Much of the gap comes from Flux using every core while rsync
+With Back in Time's default flags (`rsync -aH`, no ACLs/xattrs), rsync's 1%-change run took
+7.3 s in the 0.2 measurement. Much of the gap comes from Flux using every core while rsync
 is single-threaded, so expect a smaller gap on spinning disks, where I/O dominates. The
 snapshots were checked byte-for-byte against the source and against rsync's output.
 

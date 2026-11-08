@@ -21,7 +21,9 @@ pub enum ProfileCmd {
     /// Create a profile.
     #[command(after_help = "Examples:\n  \
         flux profile create home --target /run/media/me/Backup --source ~\n  \
-        flux profile create docs --target me@nas:/srv/backup --source ~/Documents --engine vault")]
+        flux profile create docs --target me@nas:/srv/backup --source ~/Documents --engine vault\n  \
+        flux profile create plain --target /run/media/me/Backup --source ~ --engine rsync\n  \
+        flux profile create borg --target me@nas:/srv/backup --source ~ --engine borg")]
     Create {
         /// Profile id (lowercase letters, digits, '-' and '_').
         id: String,
@@ -52,6 +54,32 @@ pub enum ProfileCmd {
     },
     /// Check profiles for errors (all profiles when no id is given).
     Validate { ids: Vec<String> },
+    /// Export a profile: as a Flux profile, or for another backup tool.
+    #[command(after_help = "Formats:\n  \
+        flux       a Flux profile (TOML), for flux profile import\n  \
+        borgmatic  a borgmatic configuration (YAML)\n  \
+        restic     a restic backup script\n  \
+        rsync      an rsync backup script\n  \
+        borg       a borg backup script\n\n\
+        Whatever a format can't express is listed as a note, in the file and on stderr.")]
+    Export {
+        id: String,
+        /// flux, borgmatic, restic, rsync or borg.
+        #[arg(long, short, default_value = "flux")]
+        format: String,
+        /// Write here instead of printing (a folder gets the suggested file name).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Copy a profile under a new id (`<id>-copy`), with its schedule.
+    Duplicate { id: String },
+    /// Import a profile exported with `flux profile export` (or written by hand).
+    Import {
+        file: PathBuf,
+        /// The new profile's id (default: the one it was exported under, or its name).
+        #[arg(long)]
+        id: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -60,6 +88,10 @@ pub enum EngineArg {
     Mirror,
     /// Deduplicated, compressed, encrypted repository.
     Vault,
+    /// Compatibility mode: plain folders written by the system rsync, usable without Flux.
+    Rsync,
+    /// Compatibility mode: a standard Borg repository written by the system borg.
+    Borg,
 }
 
 pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
@@ -83,9 +115,17 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
                 .collect::<anyhow::Result<_>>()?;
             let mut p = Profile::new(name.unwrap_or_else(|| id.to_string()), target, sources);
             p.sources.exclude = exclude;
-            if let EngineArg::Vault = engine {
-                p.engine = Engine::Vault;
-                p.vault = Some(VaultOptions::default());
+            match engine {
+                EngineArg::Mirror => {}
+                EngineArg::Vault => {
+                    p.engine = Engine::Vault;
+                    p.vault = Some(VaultOptions::default());
+                }
+                EngineArg::Rsync => p.engine = Engine::Rsync,
+                EngineArg::Borg => {
+                    p.engine = Engine::Borg;
+                    p.borg = Some(flux_core::profile::BorgOptions::default());
+                }
             }
             let issues = p.validate_in(ctx.paths.scope);
             report_issues(&id, &issues);
@@ -126,6 +166,84 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         ProfileCmd::Validate { ids } => validate(ctx, &store, ids),
+        ProfileCmd::Export { id, format, output } => {
+            let id = parse_id(&id)?;
+            let p = store.load(&id)?;
+            let Some(f) = flux_compat::export::Format::parse(&format) else {
+                bail!("unknown format {format:?}; use flux, borgmatic, restic, rsync or borg");
+            };
+            let e = flux_compat::export::export(&id, &p, f);
+            for n in &e.notes {
+                eprintln!("note: {n}");
+            }
+            match output {
+                None => print!("{}", e.contents),
+                Some(out) => {
+                    let out = absolutize(out)?;
+                    let path = if out.is_dir() {
+                        out.join(&e.filename)
+                    } else {
+                        out
+                    };
+                    flux_core::store::write_atomic(
+                        &path,
+                        e.contents.as_bytes(),
+                        if e.executable { 0o755 } else { 0o644 },
+                    )?;
+                    if ctx.json {
+                        output::print_json(&serde_json::json!({ "path": path, "notes": e.notes }))?;
+                    } else {
+                        println!("Exported {id} as {} to {}", f.info().label, path.display());
+                    }
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfileCmd::Duplicate { id } => {
+            let id = parse_id(&id)?;
+            if !store.exists(&id) {
+                bail!("profile {id:?} not found");
+            }
+            let service = flux_service::Service::new(ctx.paths.clone());
+            let new = flux_service::extras::duplicate_profile_impl(&service, id.to_string())
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            if ctx.json {
+                output::print_json(&serde_json::json!({ "id": new }))?;
+            } else {
+                println!(
+                    "Copied {id} to {new}. Change its destination with `flux profile edit {new}`."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfileCmd::Import { file, id } => {
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("cannot read {}", file.display()))?;
+            let (exported_id, p) = flux_compat::export::parse_flux(&text)
+                .map_err(|e| anyhow::anyhow!("{} is not a Flux profile: {e}", file.display()))?;
+            let id = match id.or(exported_id) {
+                Some(i) => parse_id(&i)?,
+                None => ProfileId::slugify(&p.name).context("give the profile an id with --id")?,
+            };
+            if store.exists(&id) {
+                bail!("a profile “{id}” exists already; choose another id with --id");
+            }
+            let issues = p.validate_in(ctx.paths.scope);
+            report_issues(&id, &issues);
+            if has_errors(&issues) {
+                return Ok(ExitCode::from(EXIT_INVALID));
+            }
+            let path = store.create(&id, &p)?;
+            if ctx.json {
+                output::print_json(&serde_json::json!({ "id": id, "path": path }))?;
+            } else {
+                println!(
+                    "Imported {id} ({}). Check its destination with `flux profile show {id}`.",
+                    path.display()
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

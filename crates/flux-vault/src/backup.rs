@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -12,7 +12,6 @@ use rayon::prelude::*;
 
 use flux_core::Profile;
 use flux_core::progress::{Event, Phase, Progress, Reporter};
-use flux_fs::diff::diff;
 use flux_fs::entry::{Entry, Kind};
 use flux_fs::outcome::{BackupOutcome, PlanStats};
 use flux_fs::snapshot::{FileError, SnapshotMeta, SnapshotStats, SnapshotStatus};
@@ -32,18 +31,36 @@ pub struct BackupRequest<'a> {
     pub dry_run: bool,
     /// Paths never scanned (the repository itself).
     pub never: Vec<PathBuf>,
+    /// Where to keep the latest snapshot's file list between runs (Flux's cache), so the
+    /// next backup needn't rebuild it from the repository's trees. `None`: always rebuild.
+    pub cache_dir: Option<PathBuf>,
 }
 
-/// Blobs this run has stored or decided to store (dedup within the run).
+/// Blobs this run has stored or decided to store (dedup within the run). Split into
+/// shards by the id's first byte (ids are uniformly random), so threads claiming chunks
+/// rarely wait on each other.
 struct Seen<'a> {
     index: &'a crate::pack::Index,
-    new: Mutex<HashSet<BlobId>>,
+    new: [Mutex<HashSet<BlobId>>; SEEN_SHARDS],
 }
 
-impl Seen<'_> {
+const SEEN_SHARDS: usize = 64;
+
+impl<'a> Seen<'a> {
+    fn new(index: &'a crate::pack::Index) -> Self {
+        Self {
+            index,
+            new: std::array::from_fn(|_| Mutex::new(HashSet::new())),
+        }
+    }
+
     /// True if the blob must be stored now (first time anyone sees it).
     fn claim(&self, id: &BlobId) -> bool {
-        !self.index.contains(id) && self.new.lock().expect("seen lock").insert(*id)
+        !self.index.contains(id)
+            && self.new[id[0] as usize % SEEN_SHARDS]
+                .lock()
+                .expect("seen lock")
+                .insert(*id)
     }
 }
 
@@ -75,8 +92,18 @@ pub fn backup(
         .records()?
         .into_iter()
         .rfind(|r| req.owner.matches(&r.meta));
+    let flat_cache = req
+        .cache_dir
+        .as_ref()
+        .map(|d| flat_cache_path(d, repo, req.owner));
     let parent_flat = match &parent {
-        Some(p) => repo.flatten(p)?,
+        Some(p) => match flat_cache
+            .as_ref()
+            .and_then(|f| load_flat(f, repo, &p.tree))
+        {
+            Some(flat) => flat,
+            None => repo.flatten(p)?,
+        },
         None => Vec::new(),
     };
     let index = repo.index()?;
@@ -102,14 +129,8 @@ pub fn backup(
             _ => to_read.push(i),
         }
     }
-    let (_, summary) = diff(
-        parent_flat
-            .iter()
-            .map(|(e, _)| Ok::<_, std::convert::Infallible>(e.clone())),
-        entries.iter().map(|e| Ok(e.clone())),
-        b"",
-    )
-    .unwrap_or_default();
+    // Counts only: no entry is copied (both lists are sorted by path).
+    let summary = flux_fs::diff::summarize(parent_flat.iter().map(|(e, _)| e), entries.iter());
     let mut stats = PlanStats {
         entries: entries.len() as u64,
         new: summary.added,
@@ -160,12 +181,19 @@ pub fn backup(
     progress.entries_total.store(to_read.len() as u64, Relaxed);
     progress.bytes_total.store(stats.copy_bytes, Relaxed);
     let level = profile.vault.as_ref().map_or(3, |v| v.compression_level);
-    let seen = Seen {
-        index: &index,
-        new: Mutex::new(HashSet::new()),
-    };
+    let seen = Seen::new(&index);
     let data_packer = Packer::new(repo.backend(), &repo.crypto);
     let read_bytes = AtomicU64::new(0);
+    // Sources on a spinning disk: read large files two at a time (no seeking between many).
+    let gate = flux_fs::disk::IoGate::for_paths(profile.sources.paths.iter().map(|p| p.as_path()));
+    if gate.is_limited() {
+        report(Event::Info {
+            message: format!(
+                "a spinning disk is involved: reading large files {} at a time",
+                flux_fs::disk::ROTATIONAL_STREAMS
+            ),
+        });
+    }
     let failures: Mutex<Vec<(usize, FileError)>> = Mutex::new(Vec::new());
     let results: Vec<(usize, Vec<BlobId>, u64)> = pool.install(|| {
         to_read
@@ -175,7 +203,10 @@ pub fn backup(
                     return None;
                 }
                 let e = &entries[i];
-                let r = store_file(repo, &seen, &data_packer, e, level, progress);
+                let r = {
+                    let _turn = gate.enter(e.size);
+                    store_file(repo, &seen, &data_packer, e, level, progress)
+                };
                 progress.entries_done.fetch_add(1, Relaxed);
                 match r {
                     Ok((blobs, n)) => {
@@ -240,6 +271,10 @@ pub fn backup(
         .sum();
     packs.extend(tree_packer.finish()?);
     if !packs.is_empty() {
+        // Every pack on disk before the index that names them (one sync, not two per pack).
+        repo.backend()
+            .flush_packs()
+            .map_err(|e| VaultError::io("data", e))?;
         write_index(
             repo.backend(),
             &repo.crypto,
@@ -296,6 +331,24 @@ pub fn backup(
         errors_total,
         flux_version: flux_core::VERSION.to_owned(),
     };
+    // The new snapshot's file list for the next run, exactly as `flatten` would return it.
+    if let Some(f) = &flat_cache {
+        let flat: Vec<(Entry, Vec<BlobId>)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !failed.contains(i))
+            .map(|(i, e)| {
+                let entry = Node::from_entry(e, Vec::new()).to_entry(e.path.clone());
+                let blobs = if e.kind == Kind::File {
+                    content[i].clone().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                (entry, blobs)
+            })
+            .collect();
+        save_flat(f, repo, &root_hex, &flat);
+    }
     repo.write_record(&SnapshotRecord {
         meta: meta.clone(),
         tree: root_hex,
@@ -368,7 +421,10 @@ fn store_file(
         use std::io::Seek;
         f.rewind().map_err(io_err)?;
     }
-    let chunker = fastcdc::v2020::StreamCDC::with_level_and_seed(
+    // Larger files: this thread reads and cuts the next batch of chunks while the pool's
+    // other threads hash, compress and encrypt the batch before it, so one big file (a
+    // disk image, a video) no longer runs on a single core. Chunks keep their order.
+    let mut chunks = fastcdc::v2020::StreamCDC::with_level_and_seed(
         BufReader::with_capacity(1 << 20, f),
         min,
         avg,
@@ -376,12 +432,99 @@ fn store_file(
         level1,
         seed,
     );
-    for chunk in chunker {
-        let chunk = chunk.map_err(|err| io_err(std::io::Error::other(err.to_string())))?;
-        store(&chunk.data)?;
+    let mut read_batch = || -> Result<Vec<Vec<u8>>, VaultError> {
+        let mut batch = Vec::new();
+        let mut bytes = 0;
+        while bytes < STREAM_BATCH {
+            let Some(chunk) = chunks.next() else { break };
+            let chunk = chunk.map_err(|err| io_err(std::io::Error::other(err.to_string())))?;
+            bytes += chunk.data.len();
+            batch.push(chunk.data);
+        }
+        Ok(batch)
+    };
+    let mut current = read_batch()?;
+    while !current.is_empty() {
+        if progress.is_cancelled() {
+            return Err(VaultError::Cancelled);
+        }
+        let (next, sealed) = rayon::join(&mut read_batch, || {
+            current
+                .par_iter()
+                .map(|data| -> Result<(BlobId, Option<Vec<u8>>), VaultError> {
+                    let id = repo.crypto.blob_id(data);
+                    let sealed = if seen.claim(&id) {
+                        Some(encode_blob(&repo.crypto, data, level)?.1)
+                    } else {
+                        None
+                    };
+                    Ok((id, sealed))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        });
+        for (data, (id, sealed)) in current.iter().zip(sealed?) {
+            if let Some(sealed) = sealed {
+                packer.add(BlobKind::Data, id, data.len(), &sealed)?;
+            }
+            blobs.push(id);
+            total += data.len() as u64;
+            progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
+        }
+        current = next?;
     }
     Ok((blobs, total))
 }
+
+/// The cached file list of the latest snapshot, one file per repository and owner.
+fn flat_cache_path(dir: &Path, repo: &VaultRepo, owner: &Owner) -> PathBuf {
+    let key = format!(
+        "{}\0{}\0{}\0{}",
+        repo.config.id, owner.profile, owner.host, owner.user
+    );
+    dir.join(format!(
+        "flat-{}",
+        &blake3::hash(key.as_bytes()).to_hex()[..24]
+    ))
+}
+
+type Flat = Vec<(Entry, Vec<BlobId>)>;
+
+/// The file list cached in `cache_dir` for `owner`'s snapshot with root tree `tree`, if any
+/// (what the next backup will use instead of [`VaultRepo::flatten`]).
+pub fn cached_file_list(
+    cache_dir: &Path,
+    repo: &VaultRepo,
+    owner: &Owner,
+    tree: &str,
+) -> Option<Flat> {
+    load_flat(&flat_cache_path(cache_dir, repo, owner), repo, tree)
+}
+
+/// The cached list, if it belongs to the snapshot whose root tree is `tree` (encrypted with
+/// the repository's own key; anything unreadable is ignored and rebuilt).
+fn load_flat(path: &Path, repo: &VaultRepo, tree: &str) -> Option<Flat> {
+    let sealed = std::fs::read(path).ok()?;
+    let plain = repo.crypto.open(&sealed).ok()?;
+    let raw = zstd::bulk::decompress(&plain, 1 << 30).ok()?;
+    let (cached_tree, flat): (String, Flat) = postcard::from_bytes(&raw).ok()?;
+    (cached_tree == tree).then_some(flat)
+}
+
+fn save_flat(path: &Path, repo: &VaultRepo, tree: &str, flat: &Flat) {
+    let write = || -> Option<()> {
+        let raw = postcard::to_allocvec(&(tree, flat)).ok()?;
+        let packed = zstd::bulk::compress(&raw, 1).ok()?;
+        let sealed = repo.crypto.seal(&packed).ok()?;
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        flux_core::store::write_atomic(path, &sealed, 0o600).ok()
+    };
+    if write().is_none() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// How much of a large file is read ahead while the batch before is processed.
+const STREAM_BATCH: usize = 16 << 20;
 
 /// Build tree blobs from sorted entries, deepest directories first. Returns the root id.
 fn build_trees(

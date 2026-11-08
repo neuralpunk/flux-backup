@@ -1,6 +1,7 @@
-//! Getting the Vault password for a profile.
+//! Getting the password of a Vault (or the passphrase of a Borg repository) for a profile.
 //!
-//! Order: `FLUX_PASSWORD` (for scripts), then the profile's `vault.password_source`:
+//! Order: `FLUX_PASSWORD` (for scripts), then the profile's `vault.password_source` (or
+//! `borg.password_source`):
 //!
 //! * `keyring`: the desktop keyring (Secret Service, through `secret-tool`), with
 //!   attributes `service=flux-backup profile=<id>`. If it's missing and someone can be
@@ -107,7 +108,7 @@ fn first_line(s: &str) -> Secret {
     Zeroizing::new(s.lines().next().unwrap_or("").to_owned())
 }
 
-/// The password for a Vault profile.
+/// The password for a Vault profile, or the passphrase for a Borg profile.
 pub fn obtain(
     id: &ProfileId,
     profile: &Profile,
@@ -119,14 +120,15 @@ pub fn obtain(
     {
         return Ok(Zeroizing::new(pw));
     }
-    let source = profile
-        .vault
-        .as_ref()
-        .map(|v| v.password_source.clone())
-        .unwrap_or_default();
+    let source = profile.password_source().unwrap_or_default();
+    let what = if profile.engine == flux_core::Engine::Borg {
+        "Borg passphrase"
+    } else {
+        "Vault password"
+    };
     let prompt = match purpose {
-        Purpose::Open => format!("Vault password for “{}”: ", profile.name),
-        Purpose::Create => format!("New Vault password for “{}”: ", profile.name),
+        Purpose::Open => format!("{what} for “{}”: ", profile.name),
+        Purpose::Create => format!("New {what} for “{}”: ", profile.name),
     };
     let unavailable = |why: &str| PasswordError::Unavailable(id.to_string(), why.to_owned());
     match source {

@@ -127,11 +127,29 @@ fn test(ctx: &Ctx, profile: &str) -> anyhow::Result<ExitCode> {
     let host = t.run("uname -n").unwrap_or_default();
     ok(&format!("connected ({})", host.trim()));
 
-    if p.engine == Engine::Mirror {
+    if matches!(p.engine, Engine::Mirror | Engine::Rsync) {
         match t.run("rsync --version | head -n 1") {
             Ok(v) => ok(&format!("rsync on the server: {}", v.trim())),
             Err(_) => bail!(
-                "rsync is not installed on the server; Mirror over SSH needs it (or use the Vault engine)"
+                "rsync is not installed on the server; the {} engine over SSH needs it",
+                p.engine.label()
+            ),
+        }
+    }
+    if p.engine == Engine::Borg {
+        let remote = p
+            .borg
+            .as_ref()
+            .and_then(|b| b.remote_path.clone())
+            .unwrap_or_else(|| "borg".into());
+        match t.run(&format!(
+            "{} --version",
+            flux_transport::shell_quote(&remote)
+        )) {
+            Ok(v) => ok(&format!("borg on the server: {}", v.trim())),
+            Err(_) => bail!(
+                "borg is not installed on the server; the Borg engine over SSH needs it \
+                 (or set borg.remote_path to where it is)"
             ),
         }
     }

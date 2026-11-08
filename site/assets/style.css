@@ -590,21 +590,24 @@ kbd {
   gap: 10px;
 }
 
+/* Block layout with a positioned bullet: inline <code> in the text must flow as text
+   (as flex items, each one became its own column). */
 .engine li {
-  display: flex;
-  gap: 10px;
+  position: relative;
+  padding-left: 16px;
   color: var(--fg-2);
   font-size: 15px;
 }
 
 .engine li::before {
   content: "";
+  position: absolute;
+  left: 0;
+  top: 0.62em;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--brand);
-  flex: none;
-  margin-top: 0.62em;
 }
 
 .engine .pick {
@@ -612,6 +615,27 @@ kbd {
   padding-top: 14px;
   font-size: 14px;
   color: var(--fg-muted);
+}
+
+/* Any code block in the guide scrolls on its own, never the page. */
+.guide-inner pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Screenshots inside the guide's text */
+.guide-shot {
+  margin: 18px 0 22px;
+  padding: 8px;
+  background: var(--surface-2);
+  border-radius: var(--radius-card);
+}
+
+.guide-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
 }
 
 /* Gallery */

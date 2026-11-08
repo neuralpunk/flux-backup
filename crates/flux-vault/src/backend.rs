@@ -23,8 +23,20 @@ pub trait Backend: Send + Sync {
     fn describe(&self) -> String;
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     fn read_range(&self, path: &str, offset: u64, len: u64) -> io::Result<Vec<u8>>;
-    /// Create or replace `path` atomically (readers see the old or the new content).
+    /// Create or replace `path` atomically (readers see the old or the new content), and
+    /// make it durable before returning.
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
+    /// Like [`Backend::write`], but durability may wait for [`Backend::flush_packs`]. For
+    /// pack files, which nothing refers to until an index is written: a backup writes all
+    /// its packs, flushes once, then writes the index. A crash before that leaves packs no
+    /// index names, which the next prune removes.
+    fn write_pack(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write(path, data)
+    }
+    /// Make every [`Backend::write_pack`] so far durable.
+    fn flush_packs(&self) -> io::Result<()> {
+        Ok(())
+    }
     /// Files directly in `dir`, or (for `data`) in its two-hex-digit subdirectories:
     /// `(name, size)`. A missing directory is empty.
     fn list(&self, dir: &str) -> io::Result<Vec<(String, u64)>>;
@@ -52,6 +64,39 @@ impl LocalBackend {
         debug_assert!(!rel.contains(".."), "relative repository path {rel:?}");
         self.root.join(rel)
     }
+
+    /// Write via a temporary file and a rename (readers see the old or the new content);
+    /// `durable`: fsync the file and its directory before returning.
+    fn write_file(&self, path: &str, data: &[u8], durable: bool) -> io::Result<()> {
+        let dest = self.path(path);
+        let dir = dest.parent().expect("repository files live in directories");
+        fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!(
+            ".tmp-{}-{:x}",
+            std::process::id(),
+            u64::from_le_bytes(crate::crypto::random().map_err(io::Error::other)?)
+        ));
+        let result = (|| {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(data)?;
+            if durable {
+                f.sync_all()?;
+            }
+            fs::rename(&tmp, &dest)?;
+            if durable {
+                File::open(dir)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
 }
 
 impl Backend for LocalBackend {
@@ -72,29 +117,18 @@ impl Backend for LocalBackend {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let dest = self.path(path);
-        let dir = dest.parent().expect("repository files live in directories");
-        fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!(
-            ".tmp-{}-{:x}",
-            std::process::id(),
-            u64::from_le_bytes(crate::crypto::random().map_err(io::Error::other)?)
-        ));
-        let result = (|| {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            f.write_all(data)?;
-            f.sync_all()?;
-            fs::rename(&tmp, &dest)?;
-            File::open(dir)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result
+        self.write_file(path, data, true)
+    }
+
+    /// No fsync of the pack and its directory (two per 16 MiB pack: on a USB hard drive,
+    /// minutes over a large first backup); one `syncfs` in [`Backend::flush_packs`].
+    fn write_pack(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, false)
+    }
+
+    fn flush_packs(&self) -> io::Result<()> {
+        let root = File::open(&self.root)?;
+        rustix::fs::syncfs(&root).map_err(io::Error::from)
     }
 
     fn list(&self, dir: &str) -> io::Result<Vec<(String, u64)>> {

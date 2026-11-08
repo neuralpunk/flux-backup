@@ -1,44 +1,48 @@
 @import "tailwindcss";
 
-/* Fonts are bundled locally, so they work offline */
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
-@import "@fontsource/ibm-plex-mono/400.css";
-@import "@fontsource/ibm-plex-mono/500.css";
+/* Fonts are bundled locally, so they work offline. Inter is the face GNOME's Adwaita Sans
+   is built on; JetBrains Mono is for machine data only (paths, sizes, counts, times). */
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
 
 /*
- * "Graphite Tonal" (docs/design: THEME 2a). No borders: hierarchy comes from tonal surface
- * steps (window → content panel → cards → chips). One accent hue (blue, ~250°) in two
- * strengths, primary and primary-container; other hues only for status.
+ * "At home on the desktop" (docs/DESIGN.md). The GNOME/Adwaita screen tradition in
+ * graphite and calm blue: a blue-graphite shell (sidebar, titlebar) around a flatter
+ * graphite view; content in grouped lists (one rounded group, rows split by hairlines).
  *
- * Components use semantic names only (bg-surface-2, text-fg-muted…), so the light theme is
- * just another set of values. <html data-theme> is always the resolved theme, dark or light.
+ * Colour has one job each:
+ *   blue (primary)              = act: the one primary button, progress, focus
+ *   green / amber / red         = state, always next to words
+ *   selected (a neutral lift)   = where you are (sidebar item, tab)
+ *
+ * Components use semantic names only, so the light theme is another set of values.
+ * <html data-theme> is always the resolved theme, dark or light.
  */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-sans: "Inter Variable", "Adwaita Sans", Cantarell, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Adwaita Mono", ui-monospace, monospace;
 
-  --radius-panel: 24px;
-  --radius-card: 20px;
+  --radius-panel: 14px;
+  --radius-card: 12px;
 
-  /* Semantic colours point at runtime vars, so utilities like bg-surface-2 switch with the theme */
+  /* Semantic colours point at runtime vars, so utilities switch with the theme. */
   --color-bg: var(--c-bg);
   --color-surface-1: var(--c-surface-1);
   --color-surface-2: var(--c-surface-2);
   --color-surface-3: var(--c-surface-3);
   --color-surface-sunken: var(--c-surface-sunken);
-  --color-tag: var(--c-tag);
   --color-track: var(--c-track);
+  --color-sep: var(--c-sep);
+  --color-selected: var(--c-selected);
+  --color-on-selected: var(--c-on-selected);
   --color-fg: var(--c-fg);
   --color-fg-2: var(--c-fg-2);
   --color-fg-muted: var(--c-fg-muted);
   --color-primary: var(--c-primary);
   --color-on-primary: var(--c-on-primary);
-  --color-primary-container: var(--c-primary-container);
-  --color-on-primary-container: var(--c-on-primary-container);
   --color-brand: var(--c-brand);
   --color-success: var(--c-success);
   --color-warning: var(--c-warning);
@@ -48,47 +52,64 @@
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
-  --c-bg: #0e0f11;
-  --c-surface-1: #15171a;
-  --c-surface-2: #1b1d21;
-  --c-surface-3: #24272c;
-  --c-surface-sunken: #17191c;
-  --c-tag: #1f2226;
-  --c-track: #2a2d33;
-  --c-fg: #e8e9eb;
-  --c-fg-2: #b9bcc2;
-  --c-fg-muted: #8b9099;
-  --c-primary: oklch(0.78 0.12 250);
+  /* The shell: sidebar and titlebar, a blue-tinted graphite. */
+  --c-bg: #15181d;
+  /* The view the content sits on. */
+  --c-surface-1: #1c1e22;
+  /* Groups (grouped lists, panels). */
+  --c-surface-2: #25272c;
+  /* Controls: buttons, inputs. */
+  --c-surface-3: #2f3238;
+  /* Hover in the shell. */
+  --c-surface-sunken: #1f232a;
+  /* Control hover, progress and switch tracks. */
+  --c-track: #3a3d44;
+  /* Hairlines between rows of a group. */
+  --c-sep: #34373d;
+  /* Where you are: a neutral lift, never blue. */
+  --c-selected: #2b3038;
+  --c-on-selected: #eceef1;
+  --c-fg: #eceef1;
+  --c-fg-2: #b8bcc3;
+  --c-fg-muted: #949aa4;
+  --c-primary: #78b0f0;
   --c-on-primary: #0b1626;
-  --c-primary-container: oklch(0.32 0.06 250);
-  --c-on-primary-container: oklch(0.9 0.06 250);
-  --c-brand: oklch(0.72 0.14 250);
-  --c-success: oklch(0.78 0.12 155);
-  --c-warning: oklch(0.82 0.12 80);
-  --c-danger: oklch(0.72 0.14 25);
+  --c-brand: #7abdff;
+  /* Chart series (≥3:1 on groups). */
+  --c-chart: #6aa6ea;
+  --c-success: #72c79a;
+  --c-warning: #e7b65a;
+  --c-danger: #ef8576;
+  /* A group's edge: only the light theme needs one. */
+  --c-group-edge: transparent;
+  /* The chosen button of a segmented control. */
+  --c-seg-on: #4a4e56;
 }
 
 [data-theme="light"] {
   color-scheme: light;
-  --c-bg: #eef0f3;
-  --c-surface-1: #f8f9fb;
+  --c-bg: #e4e8ee;
+  --c-surface-1: #f6f7f9;
   --c-surface-2: #ffffff;
-  --c-surface-3: #eceef2;
-  --c-surface-sunken: #e4e7ec;
-  --c-tag: #e8ebef;
+  --c-surface-3: #e9ecf0;
+  --c-surface-sunken: #d9dee6;
   --c-track: #dde1e7;
-  --c-fg: #16181c;
-  --c-fg-2: #3d424a;
-  --c-fg-muted: #646a74;
-  --c-primary: oklch(0.55 0.15 250);
+  --c-sep: #e2e5ea;
+  --c-selected: #d3dae4;
+  --c-on-selected: #17191d;
+  --c-fg: #17191d;
+  --c-fg-2: #3f444c;
+  --c-fg-muted: #555c66;
+  --c-primary: #2759a4;
   --c-on-primary: #ffffff;
-  --c-primary-container: oklch(0.9 0.05 250);
-  --c-on-primary-container: oklch(0.3 0.08 250);
-  --c-brand: oklch(0.6 0.15 250);
-  /* Status hues keep their hue; darker so text on light surfaces stays readable (AA). */
-  --c-success: oklch(0.5 0.12 155);
-  --c-warning: oklch(0.52 0.12 70);
-  --c-danger: oklch(0.53 0.17 25);
+  --c-brand: #2759a4;
+  --c-chart: #2759a4;
+  /* Status hues stay; darker so text on the shell and groups stays AA. */
+  --c-success: #1b6e45;
+  --c-warning: #7d5200;
+  --c-danger: #b3321f;
+  --c-group-edge: rgb(0 0 6 / 0.09);
+  --c-seg-on: #ffffff;
 }
 
 @layer base {
@@ -96,8 +117,10 @@
   body {
     @apply h-full bg-bg font-sans text-fg antialiased;
     overflow: hidden;
+    font-feature-settings: "cv11";
   }
   body {
+    font-size: 14px;
     user-select: none; /* desktop feel; re-enabled on selectable text */
   }
   .selectable,
@@ -106,15 +129,22 @@
   .font-mono {
     user-select: text;
   }
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
   #app {
     height: 100%;
   }
   ::selection {
-    background: color-mix(in oklab, var(--c-primary) 35%, transparent);
+    background: color-mix(in oklab, var(--c-primary) 38%, transparent);
   }
   :focus-visible {
     outline: 2px solid var(--c-primary);
     outline-offset: 2px;
+  }
+  input,
+  textarea {
+    caret-color: var(--c-primary);
   }
   * {
     scrollbar-width: thin;
@@ -134,10 +164,6 @@
   }
 }
 
-/* Utilities you'll reuse a lot */
-@utility pill {
-  border-radius: 9999px;
-}
 @utility num {
   font-variant-numeric: tabular-nums;
 }
@@ -146,62 +172,64 @@
 }
 
 @layer components {
-  /* Content on the panel: one surface step up, no outline. */
+  /* A group: content on the view, one step up. */
   .card {
     background: var(--c-surface-2);
     border-radius: var(--radius-card);
+    box-shadow: 0 0 0 1px var(--c-group-edge);
   }
 
-  /* Buttons. Rule: one filled button per view; tonal for its sibling; chips inside cards. */
+  /* Page heading inside the view. */
+  .page-title {
+    font-size: 22px;
+    font-weight: 650;
+    letter-spacing: -0.012em;
+    line-height: 1.2;
+  }
+  /* A group's heading, above it (GNOME preference group title). */
+  .group-title {
+    font-size: 13px;
+    font-weight: 650;
+    color: var(--c-fg-2);
+    padding: 0 2px 8px;
+  }
+
+  /* Buttons. One primary (blue) button per view; everything else is neutral. */
   .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
-    height: 2.25rem;
-    padding: 0 1rem;
-    border-radius: 12px;
+    height: 2.125rem;
+    padding: 0 0.875rem;
+    border-radius: 8px;
     font-size: 13.5px;
+    font-weight: 550;
     background: var(--c-surface-3);
     color: var(--c-fg);
     white-space: nowrap;
     transition:
-      background-color 150ms,
-      color 150ms,
-      filter 150ms,
-      transform 60ms;
+      background-color 120ms,
+      color 120ms,
+      filter 120ms;
   }
   .btn:hover:not(:disabled) {
     background: var(--c-track);
   }
   .btn:active:not(:disabled) {
-    transform: scale(0.98);
+    filter: brightness(0.94);
   }
   .btn:disabled {
-    opacity: 0.4;
+    opacity: 0.45;
   }
   .btn-primary {
-    border-radius: 9999px;
-    padding: 0 1.25rem;
-    font-size: 14px;
-    font-weight: 600;
+    font-weight: 650;
     background: var(--c-primary);
     color: var(--c-on-primary);
   }
   .btn-primary:hover:not(:disabled) {
     background: var(--c-primary);
-    filter: brightness(1.1);
-  }
-  .btn-tonal {
-    border-radius: 9999px;
-    padding: 0 1.25rem;
-    font-size: 14px;
-    font-weight: 500;
-    background: var(--c-primary-container);
-    color: var(--c-on-primary-container);
-  }
-  .btn-tonal:hover:not(:disabled) {
-    background: var(--c-primary-container);
-    filter: brightness(1.25);
+    filter: brightness(1.08);
   }
   .btn-ghost {
     background: transparent;
@@ -214,16 +242,44 @@
   .btn-danger {
     color: var(--c-danger);
   }
+  .btn-danger-filled {
+    font-weight: 650;
+    background: var(--c-danger);
+    color: var(--c-surface-1);
+  }
+  .btn-danger-filled:hover:not(:disabled) {
+    background: var(--c-danger);
+    filter: brightness(1.08);
+  }
+  [data-theme="light"] .btn-danger-filled {
+    color: #fff;
+  }
+  /* A round icon-only button (titlebar, toolbars). */
+  .btn-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 2.125rem;
+    height: 2.125rem;
+    border-radius: 8px;
+    color: var(--c-fg-2);
+    transition:
+      background-color 120ms,
+      color 120ms;
+  }
+  .btn-icon:hover:not(:disabled) {
+    background: var(--c-surface-3);
+    color: var(--c-fg);
+  }
 
   .input {
-    height: 2.5rem;
+    height: 2.25rem;
     width: 100%;
-    border-radius: 12px;
+    border-radius: 8px;
     background: var(--c-surface-3);
-    padding: 0 0.875rem;
+    padding: 0 0.75rem;
     font-size: 14px;
     color: var(--c-fg);
-    transition: background-color 150ms;
+    transition: background-color 120ms;
   }
   .input::placeholder {
     color: var(--c-fg-muted);
@@ -233,32 +289,208 @@
   }
   .input:focus {
     outline: 2px solid var(--c-primary);
-    outline-offset: 0;
+    outline-offset: -1px;
   }
   select.input {
     padding-right: 2rem;
   }
 
-  /* Field label, stat caption. */
+  /* Field label, caption. */
   .label {
     font-size: 12.5px;
     color: var(--c-fg-muted);
   }
-  /* Card heading. */
+  /* Heading inside a group. */
   .title {
     font-size: 15px;
-    font-weight: 500;
+    font-weight: 650;
     color: var(--c-fg);
   }
-  /* Metadata chip under a title. */
+
+  /* Descriptor tag (where, when, how): information, never a control. Outlined and
+     square-ish so it can't be mistaken for a button (filled). */
   .tag {
     display: inline-flex;
     align-items: center;
     gap: 0.375rem;
-    padding: 0.25rem 0.625rem;
-    border-radius: 8px;
-    background: var(--c-tag);
+    height: 1.5rem;
+    padding: 0 0.5rem;
+    border-radius: 6px;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c-fg) 16%, transparent);
     color: var(--c-fg-2);
     font-size: 12.5px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .tag > svg {
+    opacity: 0.8;
+    flex: none;
+  }
+  .tag-accent {
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c-success) 45%, transparent);
+    color: var(--c-success);
+  }
+  .tag-warn {
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c-warning) 45%, transparent);
+    color: var(--c-warning);
+  }
+
+  /* Grouped list (GNOME's boxed list): one rounded group, rows split by hairlines.
+     Interactive rows lift a little on hover and end in a chevron or a control;
+     informational rows don't react. */
+  .rows {
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--radius-card);
+    background: var(--c-surface-2);
+    box-shadow: 0 0 0 1px var(--c-group-edge);
+    overflow: hidden;
+  }
+  .row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.875rem;
+    min-height: 3.25rem;
+    padding: 0.625rem 1rem;
+    text-align: left;
+  }
+  .rows > .row + .row,
+  .rows > * + .row,
+  .rows > .contents > .row + .row {
+    box-shadow: inset 0 1px 0 var(--c-sep);
+  }
+  .row:not(.rows .row) {
+    background: var(--c-surface-2);
+    border-radius: var(--radius-card);
+    box-shadow: 0 0 0 1px var(--c-group-edge);
+  }
+  .row-link {
+    transition: background-color 120ms;
+  }
+  .row-link:hover:not(:disabled) {
+    background-color: color-mix(in oklab, var(--c-fg) 5%, var(--c-surface-2));
+  }
+  .row-link:disabled {
+    opacity: 0.6;
+  }
+
+  /* On/off switch (role="switch"), Adwaita proportions. */
+  .switch {
+    position: relative;
+    flex: none;
+    width: 2.75rem;
+    height: 1.5rem;
+    border-radius: 9999px;
+    background: var(--c-track);
+    transition: background-color 150ms;
+  }
+  .switch[aria-checked="true"] {
+    background: var(--c-primary);
+  }
+  .switch-knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 9999px;
+    background: #f4f5f7;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+    transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .switch[aria-checked="true"] .switch-knob {
+    transform: translateX(1.25rem);
+  }
+  .switch:disabled {
+    opacity: 0.6;
+  }
+
+  /* A state glyph: the round mark beside a backup that repeats its state in colour
+     (the words next to it always say the same). */
+  .glyph {
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    border-radius: 9999px;
+    width: 1.5rem;
+    height: 1.5rem;
+    color: var(--c-fg-muted);
+    background: color-mix(in oklab, var(--c-fg) 7%, transparent);
+  }
+  .glyph-ok {
+    color: var(--c-success);
+    background: color-mix(in oklab, var(--c-success) 16%, transparent);
+  }
+  .glyph-warn {
+    color: var(--c-warning);
+    background: color-mix(in oklab, var(--c-warning) 16%, transparent);
+  }
+  .glyph-bad {
+    color: var(--c-danger);
+    background: color-mix(in oklab, var(--c-danger) 17%, transparent);
+  }
+  .glyph-run {
+    color: var(--c-primary);
+    background: color-mix(in oklab, var(--c-primary) 17%, transparent);
+  }
+
+  /* Segmented control (Adwaita toggle group): views of one thing, or one choice of a few.
+     The chosen one is lifted, never blue. Buttons carry role="tab" + aria-selected or
+     role="radio" + aria-checked. */
+  .segmented {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--c-surface-3);
+  }
+  .segmented > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4375rem;
+    height: 1.875rem;
+    padding: 0 0.875rem;
+    border-radius: 7px;
+    font-size: 13.5px;
+    font-weight: 550;
+    color: var(--c-fg-2);
+    transition:
+      background-color 120ms,
+      color 120ms;
+  }
+  .segmented > button:hover:not([aria-selected="true"], [aria-checked="true"]) {
+    color: var(--c-fg);
+    background: color-mix(in oklab, var(--c-fg) 6%, transparent);
+  }
+  .segmented > button[aria-selected="true"],
+  .segmented > button[aria-checked="true"] {
+    background: var(--c-seg-on);
+    color: var(--c-fg);
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.22),
+      0 0 0 1px rgb(0 0 0 / 0.04);
+  }
+
+  /* A wizard step arriving: a short slide in the direction of travel (--step-dir: 1
+     forward, -1 back). Off under prefers-reduced-motion like every animation. */
+  .animate-step {
+    animation: step-in 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes step-in {
+    from {
+      opacity: 0;
+      transform: translateX(calc(14px * var(--step-dir, 1)));
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* The item whose context menu is open. */
+  [data-menu-target] {
+    box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--c-primary) 60%, transparent);
   }
 }

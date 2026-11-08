@@ -202,8 +202,9 @@ impl<'a> Packer<'a> {
         let (id, bytes, entries) = finish(self.crypto, b)?;
         let hex = hex_id(&id);
         let path = pack_path(&hex);
+        // Durable later: the caller flushes once before writing the index (see write_pack).
         self.backend
-            .write(&path, &bytes)
+            .write_pack(&path, &bytes)
             .map_err(|e| VaultError::io(&path, e))?;
         self.bytes_written
             .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);

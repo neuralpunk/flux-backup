@@ -30,6 +30,8 @@ pub struct ProfileSummary {
     engine: Engine,
     target: String,
     remote: bool,
+    /// What it backs up, home shown as `~`.
+    sources: Vec<String>,
     schedule: String,
     pub errors: Vec<String>,
     last_run: Option<RunRecord>,
@@ -67,6 +69,7 @@ fn summary(
         engine: p.engine,
         target: target_label(&p.target),
         remote: matches!(p.target, Target::Ssh { .. }),
+        sources: p.sources.paths.iter().map(|s| tilde(s)).collect(),
         schedule: schedule::summary(p),
         errors: p
             .validate()
@@ -76,6 +79,17 @@ fn summary(
             .collect(),
         last_run: runlog::recent_runs(paths, id, 1).into_iter().next(),
         running: running.iter().any(|j| j.profile == id.as_str()),
+    }
+}
+
+/// `/home/me/Documents` as `~/Documents` (only the current user's home).
+fn tilde(path: &std::path::Path) -> String {
+    match flux_core::sys::home_dir()
+        .and_then(|h| path.strip_prefix(&h).ok().map(|r| r.to_path_buf()))
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
@@ -92,6 +106,7 @@ pub fn profiles_impl(state: &Service) -> Result<Vec<ProfileSummary>> {
                 engine: Engine::Mirror,
                 target: String::new(),
                 remote: false,
+                sources: Vec::new(),
                 schedule: String::new(),
                 errors: vec![e.to_string()],
                 last_run: None,
@@ -109,11 +124,17 @@ pub struct Overview {
     oldest: Option<jiff::Timestamp>,
     latest: Option<SnapshotMeta>,
     recent_runs: Vec<RunRecord>,
-    next_run: Option<String>,
+    /// When the timer fires next (RFC 3339; systemd's display string doesn't parse in
+    /// every browser engine).
+    next_run: Option<jiff::Timestamp>,
     timer_active: bool,
     free_bytes: Option<u64>,
     /// Why snapshots couldn't be read (e.g. the drive isn't connected).
     repo_error: Option<String>,
+    /// Things worth knowing, in words (no recent backup, drive not connected…).
+    health: Vec<crate::extras::Health>,
+    /// Free space, its history and forecast (local targets).
+    space: Option<crate::space::Space>,
 }
 
 pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
@@ -129,23 +150,166 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         Err(e) => (Vec::new(), Some(e.message)),
     };
     let st = schedule::status(&Systemd::new(&state.paths), &id, &p, &state.unit_env());
-    let free_bytes = match &p.target {
-        Target::Local { path, .. } => rustix::fs::statvfs(path)
-            .ok()
-            .map(|v| v.f_bavail.saturating_mul(v.f_frsize)),
-        Target::Ssh { .. } => None,
-    };
+    let free_bytes = flux_runner::free_space(&p.target);
+    let now = jiff::Timestamp::now();
+    let runs = runlog::recent_runs(&state.paths, &id, 300);
+    let space = crate::space::forecast(&runs, free_bytes, flux_runner::disk_size(&p.target), now);
+    let health = crate::extras::health(
+        &p,
+        &runs,
+        free_bytes,
+        space.as_ref().and_then(|s| s.days_left),
+        now,
+    );
     Ok(Overview {
+        health,
+        space,
         profile: summary(&state.paths, &id, &p, &running),
         snapshot_count: snaps.len(),
         oldest: snaps.first().map(|s| s.started),
         latest: snaps.last().cloned(),
-        recent_runs: runlog::recent_runs(&state.paths, &id, 8),
-        next_run: st.next_run,
+        recent_runs: runs.iter().take(8).cloned().collect(),
+        next_run: st.next_run_at,
         timer_active: st.timer_active,
         free_bytes,
         repo_error,
     })
+}
+
+/// One day of a backup's history, for the strip of days on the app's overviews.
+#[derive(Debug, Serialize)]
+pub struct Day {
+    /// The local calendar day.
+    date: jiff::civil::Date,
+    /// `ok` (a backup succeeded that day), `failed` (only failures), or `none`.
+    state: &'static str,
+    /// Bytes the day's backups copied (Mirror, rsync) or stored (Vault, Borg).
+    bytes: u64,
+}
+
+/// How a backup is doing, without opening its repository: cheap enough to ask for every
+/// backup at once, and it never needs a password.
+#[derive(Debug, Serialize)]
+pub struct Status {
+    next_run: Option<jiff::Timestamp>,
+    timer_active: bool,
+    /// The last backup that kept a copy (some files skipped still counts).
+    last_good: Option<jiff::Timestamp>,
+    health: Vec<crate::extras::Health>,
+    /// The last [`STATUS_DAYS`] days, oldest first, today last.
+    days: Vec<Day>,
+}
+
+pub const STATUS_DAYS: usize = 30;
+
+pub fn status_impl(state: &Service, id: String) -> Result<Status> {
+    let (id, p) = state.load(&id)?;
+    let st = schedule::status(&Systemd::new(&state.paths), &id, &p, &state.unit_env());
+    let now = jiff::Timestamp::now();
+    let runs = runlog::recent_runs(&state.paths, &id, 300);
+    let free = flux_runner::free_space(&p.target);
+    let space = crate::space::forecast(&runs, free, flux_runner::disk_size(&p.target), now);
+    let health = crate::extras::health(
+        &p,
+        &runs,
+        free,
+        space.as_ref().and_then(|s| s.days_left),
+        now,
+    );
+    let tz = jiff::tz::TimeZone::system();
+    Ok(Status {
+        next_run: st.next_run_at,
+        timer_active: st.timer_active,
+        last_good: runs
+            .iter()
+            .find(|r| kept_copy(r.status))
+            .map(|r| r.finished),
+        health,
+        days: days(&runs, p.engine, now.to_zoned(tz.clone()).date(), &tz),
+    })
+}
+
+fn kept_copy(s: runlog::RunStatus) -> bool {
+    use runlog::RunStatus::*;
+    matches!(s, Completed | CompletedWithErrors | Unchanged)
+}
+
+/// Bucket runs (newest first) into the [`STATUS_DAYS`] days ending `today`.
+fn days(
+    runs: &[RunRecord],
+    engine: Engine,
+    today: jiff::civil::Date,
+    tz: &jiff::tz::TimeZone,
+) -> Vec<Day> {
+    let stored = matches!(engine, Engine::Vault | Engine::Borg);
+    let mut out: Vec<Day> = (0..STATUS_DAYS as i32)
+        .rev()
+        .filter_map(|back| today.checked_sub(jiff::Span::new().days(back)).ok())
+        .map(|date| Day {
+            date,
+            state: "none",
+            bytes: 0,
+        })
+        .collect();
+    for r in runs {
+        let date = r.finished.to_zoned(tz.clone()).date();
+        let Some(d) = out.iter_mut().find(|d| d.date == date) else {
+            continue;
+        };
+        if kept_copy(r.status) {
+            d.state = "ok";
+            d.bytes += r.stats.as_ref().map_or(0, |s| {
+                if stored {
+                    s.stored_bytes
+                } else {
+                    s.copied_bytes
+                }
+            });
+        } else if r.status == runlog::RunStatus::Failed && d.state == "none" {
+            d.state = "failed";
+        }
+    }
+    out
+}
+
+/// The recovery kit of a compatibility-mode profile: how to use its backups without Flux.
+#[derive(Debug, Serialize)]
+pub struct RecoveryKit {
+    engine: Engine,
+    /// Where the kit and the backups are kept (a local path or `user@host:path`).
+    location: String,
+    recovery: String,
+    script: String,
+    tool: flux_compat::tools::ToolStatus,
+}
+
+pub fn recovery_kit_impl(state: &Service, id: String) -> Result<RecoveryKit> {
+    let (pid, p) = state.load(&id)?;
+    let Some(kit) = flux_compat::kit::for_profile(&pid, &p) else {
+        return Err(ApiError::new(
+            "error",
+            "Recovery kits come with compatibility mode (rsync or Borg).",
+        ));
+    };
+    Ok(RecoveryKit {
+        engine: p.engine,
+        location: flux_compat::kit::location(&pid, &p),
+        recovery: kit.recovery,
+        script: kit.script,
+        tool: if p.engine == Engine::Borg {
+            flux_compat::tools::borg_status()
+        } else {
+            flux_compat::tools::rsync_status()
+        },
+    })
+}
+
+/// Whether rsync and borg are installed (for choosing compatibility mode).
+pub fn tools_impl() -> Vec<flux_compat::tools::ToolStatus> {
+    vec![
+        flux_compat::tools::rsync_status(),
+        flux_compat::tools::borg_status(),
+    ]
 }
 
 pub fn snapshots_impl(state: &Service, id: String) -> Result<Vec<SnapshotMeta>> {
@@ -177,6 +341,31 @@ fn parent_of(p: &[u8]) -> &[u8] {
         .map_or(&[][..], |i| &p[..i])
 }
 
+/// A snapshot's entries with each folder's children, built once when the snapshot is first
+/// browsed: opening a folder is then a lookup, not a pass over every entry of the snapshot.
+pub struct SnapshotIndex {
+    entries: Vec<Entry>,
+    /// Folder path (`b""` for the top) → indexes of its children, in entry order.
+    folders: HashMap<Vec<u8>, Vec<u32>>,
+}
+
+impl SnapshotIndex {
+    fn new(entries: Vec<Entry>) -> Self {
+        let mut folders: HashMap<Vec<u8>, Vec<u32>> = HashMap::new();
+        folders.insert(Vec::new(), Vec::new());
+        for e in entries.iter().filter(|e| e.kind == Kind::Dir) {
+            folders.insert(e.path.clone(), Vec::new());
+        }
+        for (i, e) in entries.iter().enumerate() {
+            // Children of something that isn't a folder of this snapshot stay unreachable.
+            if let Some(children) = folders.get_mut(parent_of(&e.path)) {
+                children.push(i as u32);
+            }
+        }
+        Self { entries, folders }
+    }
+}
+
 pub fn list_dir_impl(
     state: &Service,
     id: String,
@@ -184,14 +373,17 @@ pub fn list_dir_impl(
     path: String,
 ) -> Result<Listing> {
     let key = (id.clone(), snapshot.clone());
-    let cached = state
-        .entries
-        .lock()
-        .expect("cache")
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.clone());
-    let all = match cached {
+    let cached = {
+        let mut c = state.entries.lock().expect("cache");
+        // Most recently used first: move a hit to the front.
+        c.iter().position(|(k, _)| *k == key).map(|i| {
+            let hit = c.remove(i).expect("position is in range");
+            let v = hit.1.clone();
+            c.push_front(hit);
+            v
+        })
+    };
+    let index = match cached {
         Some(v) => v,
         None => {
             let (pid, p) = state.load(&id)?;
@@ -200,7 +392,7 @@ pub fn list_dir_impl(
             let v: Vec<Entry> = repo
                 .entries(&snap)?
                 .collect::<std::result::Result<_, _>>()?;
-            let v = Arc::new(v);
+            let v = Arc::new(SnapshotIndex::new(v));
             let mut c = state.entries.lock().expect("cache");
             c.push_front((key, v.clone()));
             c.truncate(CACHE_SNAPSHOTS);
@@ -212,46 +404,64 @@ pub fn list_dir_impl(
         .trim_start_matches('/')
         .as_bytes()
         .to_vec();
-    if !want.is_empty() && !all.iter().any(|e| e.path == want && e.kind == Kind::Dir) {
+    let Some(children) = index.folders.get(&want) else {
         return Err(ApiError::new(
             "error",
             format!("{path} is not a folder in this snapshot"),
         ));
-    }
-    let mut children: HashMap<&[u8], usize> = HashMap::new();
-    for e in all.iter() {
-        *children.entry(parent_of(&e.path)).or_default() += 1;
-    }
-    let entries = all
+    };
+    let entries = children
         .iter()
-        .filter(|e| parent_of(&e.path) == want.as_slice())
-        .map(|e| DirEntry {
-            name: String::from_utf8_lossy(
-                &e.path[parent_of(&e.path).len() + usize::from(!want.is_empty())..],
-            )
-            .into_owned(),
-            path: format!("/{}", String::from_utf8_lossy(&e.path)),
-            kind: e.kind,
-            size: e.size,
-            mtime: e.mtime,
-            mode: e.mode,
-            link: e
-                .link
-                .as_ref()
-                .map(|l| String::from_utf8_lossy(l).into_owned()),
-            children: (e.kind == Kind::Dir)
-                .then(|| children.get(e.path.as_slice()).copied().unwrap_or(0)),
+        .map(|&i| {
+            let e = &index.entries[i as usize];
+            DirEntry {
+                name: String::from_utf8_lossy(
+                    &e.path[parent_of(&e.path).len() + usize::from(!want.is_empty())..],
+                )
+                .into_owned(),
+                path: format!("/{}", String::from_utf8_lossy(&e.path)),
+                kind: e.kind,
+                size: e.size,
+                mtime: e.mtime,
+                mode: e.mode,
+                link: e
+                    .link
+                    .as_ref()
+                    .map(|l| String::from_utf8_lossy(l).into_owned()),
+                children: (e.kind == Kind::Dir)
+                    .then(|| index.folders.get(&e.path).map_or(0, Vec::len)),
+            }
         })
         .collect();
     Ok(Listing { path, entries })
 }
 
-/// Check a Vault password and keep it in memory. If the Vault doesn't exist yet, the
+/// Check a Vault password (or Borg passphrase) and keep it in memory. If the Vault doesn't exist yet, the
 /// password becomes the new Vault's when `create` is set (the first backup creates it);
 /// otherwise the answer is `new_vault`, so the app can ask for it twice.
 pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) -> Result<()> {
     let password = Zeroizing::new(password);
     let (pid, p) = state.load(&id)?;
+    if p.engine == Engine::Borg {
+        let repo = flux_compat::borg::BorgRepo::for_profile(
+            &state.paths,
+            &pid,
+            &p,
+            Some(password.clone()),
+            true,
+        )
+        .map_err(flux_runner::repo::RepoError::from)?;
+        if repo.exists() {
+            repo.verify().map_err(flux_runner::repo::RepoError::from)?;
+        } else if !create {
+            return Err(ApiError::new(
+                "new_vault",
+                "This Borg repository doesn't exist yet. Choose its passphrase; the first backup creates it.",
+            ));
+        }
+        state.remember_password(&pid, password);
+        return Ok(());
+    }
     let pool = flux_runner::repo::sftp_pool(&state.paths, &p, true);
     match flux_vault::VaultRepo::open(flux_runner::repo::vault_backend(&p, pool), Some(&password)) {
         Ok(_) => {}
@@ -271,23 +481,107 @@ pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) 
     Ok(())
 }
 
+/// Set up encryption while a backup is being set up, so its first run (scheduled or not)
+/// needs nobody to type anything: create its encrypted Vault or Borg repository now with
+/// `password` (or check that `password` opens the one already there), then keep the
+/// password where the profile says it comes from (the desktop keyring, or a key file that
+/// doesn't exist yet). `password` may be empty when the profile reads it from a file or a
+/// command; then that is what's used.
+pub fn set_password_impl(state: &Service, id: String, password: String) -> Result<()> {
+    use flux_runner::repo::RepoError;
+    let password = Zeroizing::new(password);
+    let (pid, p) = state.load(&id)?;
+    let Some(source) = p.password_source() else {
+        return Err(ApiError::new("error", "This backup isn't encrypted."));
+    };
+    let typed = !password.is_empty();
+    if !typed && matches!(source, PasswordSource::Keyring | PasswordSource::Prompt) {
+        return Err(ApiError::new(
+            "password_required",
+            "Choose a password first.",
+        ));
+    }
+    if typed
+        && let PasswordSource::File { path } = &source
+        && !path.exists()
+    {
+        write_secret_file(path, &password)?;
+    }
+
+    // Use exactly what was typed (not an older keyring entry): the same profile with the
+    // password coming from `ask`.
+    let mut with_typed = p.clone();
+    if typed {
+        match p.engine {
+            Engine::Vault => {
+                with_typed
+                    .vault
+                    .get_or_insert_with(Default::default)
+                    .password_source = PasswordSource::Prompt
+            }
+            Engine::Borg => {
+                with_typed
+                    .borg
+                    .get_or_insert_with(Default::default)
+                    .password_source = PasswordSource::Prompt
+            }
+            Engine::Mirror | Engine::Rsync => {}
+        }
+    }
+    let given = password.clone();
+    let ask = move |_: &str, _: bool| (!given.is_empty()).then(|| given.clone());
+    match p.engine {
+        Engine::Vault => {
+            flux_runner::repo::open_vault(&state.paths, &pid, &with_typed, true, Some(&ask))?;
+        }
+        Engine::Borg => {
+            flux_compat::tools::require_borg().map_err(RepoError::from)?;
+            let repo =
+                flux_runner::repo::open_borg(&state.paths, &pid, &with_typed, true, Some(&ask))?;
+            if repo.exists() {
+                repo.verify().map_err(RepoError::from)?;
+            } else {
+                repo.init(p.borg.clone().unwrap_or_default().encryption)
+                    .map_err(RepoError::from)?;
+            }
+        }
+        Engine::Mirror | Engine::Rsync => {}
+    }
+    if typed {
+        if source == PasswordSource::Keyring {
+            password::keyring_store(&pid, &p.name, &password).map_err(RepoError::from)?;
+        }
+        state.remember_password(&pid, password);
+    }
+    Ok(())
+}
+
+/// Write a password into a new file only its owner can read.
+fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(secret.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(())
+}
+
 /// Would a background `flux backup` of this profile be unable to get its password?
 pub fn needs_password(state: &Service, id: &ProfileId, p: &Profile) -> bool {
-    if p.engine != Engine::Vault
-        || p.vault.as_ref().is_some_and(|v| !v.encryption)
-        || std::env::var_os("FLUX_PASSWORD").is_some()
-    {
+    let Some(source) = p.password_source() else {
+        return false;
+    };
+    if std::env::var_os("FLUX_PASSWORD").is_some() || state.password(id).is_some() {
         return false;
     }
-    if state.password(id).is_some() {
-        return false;
-    }
-    match p
-        .vault
-        .as_ref()
-        .map(|v| &v.password_source)
-        .unwrap_or(&PasswordSource::Keyring)
-    {
+    match source {
         // Root has no desktop keyring to look in.
         PasswordSource::Keyring if state.scope() == Scope::System => true,
         PasswordSource::Keyring => !matches!(password::keyring_lookup(id), Ok(Some(_))),
@@ -365,6 +659,50 @@ pub fn cancel_impl(state: &Service, id: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    fn run(finished: &str, status: &str, copied: u64) -> RunRecord {
+        serde_json::from_value(serde_json::json!({
+            "run_id": finished, "profile": "p", "trigger": "scheduled",
+            "started": finished, "finished": finished, "status": status,
+            "stats": {"entries":0,"files":0,"dirs":0,"symlinks":0,"specials":0,"total_bytes":0,
+                      "new":0,"changed":0,"unchanged":0,"deleted":0,"copied_bytes":copied,
+                      "copied_files":0,"linked_files":0,"stored_bytes":7}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn days_bucket_runs_by_local_date() {
+        let tz = jiff::tz::TimeZone::UTC;
+        let today = jiff::civil::date(2026, 11, 8);
+        // Newest first, as the run log returns them.
+        let runs = [
+            run("2026-11-08T09:00:00Z", "failed", 0),
+            run("2026-11-08T01:00:00Z", "completed", 100),
+            run("2026-11-07T10:00:00Z", "failed", 0),
+            run("2026-11-06T10:00:00Z", "unchanged", 0),
+            run("2026-11-06T09:00:00Z", "completed", 50),
+            run("2026-09-01T10:00:00Z", "completed", 999), // too old
+        ];
+        let d = days(&runs, Engine::Mirror, today, &tz);
+        assert_eq!(d.len(), STATUS_DAYS);
+        assert_eq!(d.last().unwrap().date, today);
+        let state = |i: usize| (d[d.len() - 1 - i].state, d[d.len() - 1 - i].bytes);
+        assert_eq!(
+            state(0),
+            ("ok", 100),
+            "a success that day wins over a later failure"
+        );
+        assert_eq!(state(1), ("failed", 0));
+        assert_eq!(state(2), ("ok", 50));
+        assert_eq!(state(3), ("none", 0));
+        // Vault and Borg count what was stored.
+        assert_eq!(
+            days(&runs, Engine::Borg, today, &tz).last().unwrap().bytes,
+            7
+        );
+    }
+
     use super::*;
     use flux_core::profile::VaultOptions;
     use flux_core::progress::{Progress, silent};
@@ -401,6 +739,9 @@ mod tests {
                 ..VaultOptions::default()
             });
         }
+        if engine == Engine::Rsync {
+            p.engine = Engine::Rsync;
+        }
         let id = ProfileId::new("t").unwrap();
         ProfileStore::new(&paths).create(&id, &p).unwrap();
         let ask = |_: &str, _: bool| Some(Zeroizing::new("pw".to_owned()));
@@ -425,6 +766,95 @@ mod tests {
             state: Service::new(paths),
             src,
         }
+    }
+
+    #[test]
+    fn folder_index_matches_a_full_pass() {
+        let mk = |p: &str, kind: Kind| Entry {
+            path: p.as_bytes().to_vec(),
+            kind,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            size: 1,
+            mtime: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            nlink: 1,
+            rdev: 0,
+            link: None,
+            hash: None,
+            xattrs: vec![],
+        };
+        let entries = vec![
+            mk("home", Kind::Dir),
+            mk("home/me", Kind::Dir),
+            mk("home/me/a.txt", Kind::File),
+            mk("home/me/docs", Kind::Dir),
+            mk("home/me/docs/b.txt", Kind::File),
+            mk("home/me/empty", Kind::Dir),
+            mk("home/me/a.txt/odd", Kind::File), // parent isn't a folder
+            mk("etc", Kind::Dir),
+        ];
+        let idx = SnapshotIndex::new(entries.clone());
+        for folder in ["", "home", "home/me", "home/me/docs", "home/me/empty"] {
+            let naive: Vec<u32> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| parent_of(&e.path) == folder.as_bytes())
+                .map(|(i, _)| i as u32)
+                .collect();
+            assert_eq!(idx.folders[folder.as_bytes()], naive, "{folder:?}");
+        }
+        assert!(
+            !idx.folders.contains_key(&b"home/me/a.txt"[..]),
+            "a file is no folder"
+        );
+        assert_eq!(idx.folders[&b"home/me/empty"[..]].len(), 0);
+    }
+
+    /// Setting the password while setting a backup up creates the encrypted Vault right
+    /// away, so the first (scheduled) backup has nothing to ask; a wrong password for an
+    /// existing Vault is refused.
+    #[test]
+    fn set_password_creates_the_vault_at_setup() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tgt")).unwrap();
+        let paths = Paths::under(tmp.path().join("home"), flux_core::Scope::User);
+        let key = tmp.path().join("keys/t.key");
+        let mut p = Profile::new(
+            "Test",
+            Target::Local {
+                path: tmp.path().join("tgt"),
+                fs_uuid: None,
+            },
+            vec![tmp.path().to_path_buf()],
+        );
+        p.engine = Engine::Vault;
+        p.vault = Some(VaultOptions {
+            password_source: PasswordSource::File { path: key.clone() },
+            ..VaultOptions::default()
+        });
+        let id = ProfileId::new("t").unwrap();
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        let state = Service::new(paths.clone());
+
+        set_password_impl(&state, "t".into(), "s3cret".into()).unwrap();
+        // The key file didn't exist: it now holds the password, readable by its owner only.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::read_to_string(&key).unwrap().trim(), "s3cret");
+        assert_eq!(
+            std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // The Vault exists and opens with no one asked (the key file is the source).
+        assert!(flux_runner::repo::open_vault(&paths, &id, &p, false, None).is_ok());
+        assert!(!needs_password(&state, &id, &p));
+        // A wrong password for the existing Vault is refused.
+        let e = set_password_impl(&state, "t".into(), "wrong".into()).unwrap_err();
+        assert_eq!(e.code(), "wrong_password");
+        assert!(set_password_impl(&state, "t".into(), "s3cret".into()).is_ok());
     }
 
     #[test]
@@ -480,6 +910,103 @@ mod tests {
             std::fs::read_to_string(out.join("docs/a.txt")).unwrap(),
             "alpha"
         );
+    }
+
+    #[test]
+    fn finding_files() {
+        let e = env(Engine::Mirror);
+        // A second snapshot where b.txt changed.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(e.src.join("b.txt"), "beta, longer").unwrap();
+        let (id, p) = e.state.load("t").unwrap();
+        let r = run_backup(
+            &BackupJob {
+                paths: &e.state.paths,
+                id: &id,
+                profile: &p,
+                name: None,
+                dry_run: false,
+                trigger: Trigger::Manual,
+                prune: false,
+                only_if_due: false,
+                ask: None,
+            },
+            &Progress::new(),
+            &silent,
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome.err());
+        assert!(
+            r.record.free_after.is_some(),
+            "free space is recorded for the forecast"
+        );
+        let snaps = snapshots_impl(&e.state, "t".into()).unwrap();
+        assert_eq!(snaps.len(), 2);
+
+        let found = crate::find::find_impl(&e.state, "t".into(), "B.TXT".into()).unwrap();
+        assert_eq!(found.snapshots, 2);
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].versions, 2);
+        assert_eq!(found.hits[0].latest_size, 12);
+        let path = format!("{}/b.txt", e.src.display());
+        assert_eq!(found.hits[0].path, path);
+
+        // The estimate follows the exclusions.
+        let mut prof = serde_json::to_value(&p).unwrap();
+        let est = crate::space::estimate_impl(&e.state, prof.clone()).unwrap();
+        assert_eq!((est.files, est.bytes), (2, 5 + 12));
+        assert!(est.free.is_some());
+        prof["sources"]["exclude"] = serde_json::json!(["docs/"]);
+        let est = crate::space::estimate_impl(&e.state, prof).unwrap();
+        assert_eq!((est.files, est.bytes), (1, 12));
+
+        let v = crate::find::versions_impl(&e.state, "t".into(), path.clone()).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].size, v[1].size), (4, 12));
+
+        // Restoring the first version in place: b.txt differs, docs/a.txt is identical.
+        let pv = crate::find::restore_preview_impl(
+            &e.state,
+            "t".into(),
+            snaps[0].id.clone(),
+            vec![e.src.display().to_string()],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!((pv.new, pv.differ, pv.identical), (0, 1, 1));
+        assert_eq!(pv.differ_paths, vec![e.src.join("b.txt")]);
+        assert!(pv.keep_existing);
+        assert_eq!(
+            std::fs::read_to_string(e.src.join("b.txt")).unwrap(),
+            "beta, longer",
+            "a preview changes nothing"
+        );
+    }
+
+    #[test]
+    fn search_uses_an_index() {
+        let e = env(Engine::Rsync);
+        let idx = e.state.paths.cache_dir.join("index/t");
+        assert!(!idx.exists());
+        let found = crate::find::find_impl(&e.state, "t".into(), "a.txt".into()).unwrap();
+        assert_eq!(found.hits.len(), 1);
+        let files: Vec<_> = std::fs::read_dir(&idx).unwrap().flatten().collect();
+        assert_eq!(files.len(), 1, "one index file per snapshot");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            files[0].metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Searching again reads the index: the same answer.
+        let again = crate::find::find_impl(&e.state, "t".into(), "a.txt".into()).unwrap();
+        assert_eq!(again.hits[0].path, found.hits[0].path);
+        // A file for a snapshot that's gone is dropped.
+        std::fs::write(idx.join("gone-1.idx"), b"x").unwrap();
+        crate::find::versions_impl(&e.state, "t".into(), found.hits[0].path.clone()).unwrap();
+        assert!(!idx.join("gone-1.idx").exists());
+        // Deleting the profile removes its index.
+        crate::edit::delete_profile_impl(&e.state, "t".into()).unwrap();
+        assert!(!idx.exists());
     }
 
     #[test]
@@ -623,5 +1150,46 @@ mod tests {
         let c = actions::compare_impl(st, "t".into(), snap.id.clone(), None).unwrap();
         assert_eq!(c.added(), 1);
         assert_eq!(actions::runs_impl(st, "t".into(), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compatibility_mode_views() {
+        if std::process::Command::new("rsync")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let e = env(Engine::Rsync);
+        // Browsing works on the plain folders.
+        let snaps = snapshots_impl(&e.state, "t".into()).unwrap();
+        assert_eq!(snaps.len(), 1);
+        let dir = e.src.join("docs").display().to_string();
+        let l = list_dir_impl(&e.state, "t".into(), snaps[0].id.clone(), dir).unwrap();
+        assert_eq!(l.entries.len(), 1);
+        // The recovery kit, and the tools.
+        let kit = recovery_kit_impl(&e.state, "t".into()).unwrap();
+        assert_eq!(kit.engine, Engine::Rsync);
+        assert!(kit.recovery.contains("RESTORE ONE FILE"));
+        assert!(kit.script.starts_with("#!/bin/sh"));
+        assert!(kit.location.contains("flux-rsync"));
+        let tools = tools_impl();
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].supported);
+        // rsync has no password; an encrypted Borg profile needs one.
+        let (id, mut p) = e.state.load("t").unwrap();
+        assert!(!needs_password(&e.state, &id, &p));
+        p.engine = Engine::Borg;
+        p.borg = Some(flux_core::profile::BorgOptions {
+            password_source: PasswordSource::Prompt,
+            ..Default::default()
+        });
+        assert!(needs_password(&e.state, &id, &p));
+        p.borg.as_mut().unwrap().encryption = flux_core::profile::BorgEncryption::None;
+        assert!(!needs_password(&e.state, &id, &p));
+        // Other engines have no kit.
+        let m = env(Engine::Mirror);
+        assert!(recovery_kit_impl(&m.state, "t".into()).is_err());
     }
 }

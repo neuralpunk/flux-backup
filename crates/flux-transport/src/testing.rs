@@ -37,10 +37,21 @@ if [ $subsystem = 1 ]; then exec {server}; fi
 exec sh -c "$*"
 "#
     );
-    std::fs::write(&path, script).ok()?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
-    Some(path)
+    // Never hold the executable open for writing in this (multithreaded) process: a child
+    // forked meanwhile by another test would share that descriptor until its exec, and
+    // running the script then fails with "Text file busy". Write the text elsewhere and
+    // let `install`, a process of its own that has exited by the time we run it, create
+    // the executable.
+    let text = dir.join("fake-ssh.txt");
+    std::fs::write(&text, script).ok()?;
+    let ok = std::process::Command::new("install")
+        .args(["-m", "0755"])
+        .arg(&text)
+        .arg(&path)
+        .status()
+        .ok()?
+        .success();
+    ok.then_some(path)
 }
 
 /// An [`SshTarget`] for "localhost" through [`fake_ssh`] (no connection sharing).

@@ -239,6 +239,18 @@ pub fn backup(
     let prev_data = previous.as_ref().map(|p| repo.data_dir(&p.id));
     let policy = ApplyPolicy::new(xattrs);
     let copier = Copier::default();
+    let gate = flux_fs::disk::IoGate::for_paths(
+        std::iter::once(target_path.as_path())
+            .chain(profile.sources.paths.iter().map(PathBuf::as_path)),
+    );
+    if gate.is_limited() {
+        report(Event::Info {
+            message: format!(
+                "a spinning disk is involved: copying large files {} at a time",
+                flux_fs::disk::ROTATIONAL_STREAMS
+            ),
+        });
+    }
     let result = pool.install(|| {
         execute(&ExecCtx {
             plan: &the_plan,
@@ -247,6 +259,7 @@ pub fn backup(
             resume,
             policy: &policy,
             copier: &copier,
+            gate: &gate,
             progress,
             report,
             continue_on_errors: opts.continue_on_errors,

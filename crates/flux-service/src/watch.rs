@@ -43,6 +43,9 @@ pub type Sink = Arc<dyn Fn(Notice) + Send + Sync>;
 pub fn start(paths: Paths, sink: Sink) {
     let watching: Arc<Mutex<HashSet<String>>> = Arc::default();
     std::thread::spawn(move || {
+        // Woken as soon as a job file appears (inotify), with a slow re-check as a safety
+        // net; without inotify, the old polling.
+        let waker = Waker::new(&jobs::jobs_dir(&paths));
         loop {
             for job in jobs::running(&paths) {
                 if !watching
@@ -58,9 +61,49 @@ pub fn start(paths: Paths, sink: Sink) {
                     watching.lock().expect("watch set").remove(&job.profile);
                 });
             }
-            std::thread::sleep(Duration::from_millis(700));
+            match &waker {
+                Some(w) => w.wait(Duration::from_secs(5)),
+                None => std::thread::sleep(Duration::from_millis(700)),
+            }
         }
     });
+}
+
+/// Wakes up when anything changes in the jobs folder (a job starts or ends).
+struct Waker {
+    fd: rustix::fd::OwnedFd,
+}
+
+impl Waker {
+    fn new(dir: &std::path::Path) -> Option<Self> {
+        use rustix::fs::inotify;
+        std::fs::create_dir_all(dir).ok()?;
+        let fd =
+            inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).ok()?;
+        inotify::add_watch(
+            &fd,
+            dir,
+            inotify::WatchFlags::CREATE
+                | inotify::WatchFlags::MOVED_TO
+                | inotify::WatchFlags::CLOSE_WRITE
+                | inotify::WatchFlags::DELETE,
+        )
+        .ok()?;
+        Some(Self { fd })
+    }
+
+    /// Wait for a change, or `timeout`, then drain what's queued.
+    fn wait(&self, timeout: Duration) {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        let t = Timespec {
+            tv_sec: timeout.as_secs() as _,
+            tv_nsec: timeout.subsec_nanos() as _,
+        };
+        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+        let _ = poll(&mut fds, Some(&t));
+        let mut buf = [0u8; 4096];
+        while matches!(rustix::io::read(&self.fd, &mut buf), Ok(n) if n > 0) {}
+    }
 }
 
 fn follow(sink: &(dyn Fn(Notice) + Send + Sync), paths: &Paths, profile: &str) {
@@ -82,5 +125,33 @@ fn follow(sink: &(dyn Fn(Notice) + Send + Sync), paths: &Paths, profile: &str) {
             });
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod waker_tests {
+    use super::*;
+
+    #[test]
+    fn wakes_when_a_job_file_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = dir.path().join("jobs");
+        let w = Waker::new(&jobs).expect("inotify");
+        let started = std::time::Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                flux_core::store::write_atomic(&jobs.join("p.json"), b"{}", 0o600).unwrap();
+            });
+            w.wait(Duration::from_secs(5));
+        });
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(2), "woke after {waited:?}");
+        // An atomic write is several events (create, close, rename); once they're drained,
+        // a quiet folder lets the wait run to its timeout.
+        w.wait(Duration::ZERO);
+        let t = std::time::Instant::now();
+        w.wait(Duration::from_millis(200));
+        assert!(t.elapsed() >= Duration::from_millis(150));
     }
 }

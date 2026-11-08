@@ -319,7 +319,8 @@ impl Copier {
     pub fn copy_to(&self, src: &Path, output: &File, progress: &Progress) -> io::Result<u64> {
         let mut output = output;
         let mut input = File::open(src)?;
-        let len = input.metadata()?.len();
+        let meta = input.metadata()?;
+        let len = meta.len();
 
         if self.reflink.load(Relaxed) {
             match rustix::fs::ioctl_ficlone(output, &input) {
@@ -329,6 +330,13 @@ impl Copier {
                 }
                 Err(_) => self.reflink.store(false, Relaxed),
             }
+        }
+
+        // Sparse files (disk images, databases) keep their holes: only the data is copied.
+        if is_sparse(&meta)
+            && let Some(n) = self.copy_sparse(&input, output, len, progress)?
+        {
+            return Ok(n);
         }
 
         let mut copied = 0u64;
@@ -371,6 +379,96 @@ impl Copier {
             progress.bytes_done.fetch_add(n as u64, Relaxed);
         }
         Ok(copied)
+    }
+}
+
+/// Fewer blocks allocated than the size needs: the file has holes (or the filesystem
+/// compresses it; then the whole file is data and nothing is lost by looking).
+fn is_sparse(m: &fs::Metadata) -> bool {
+    m.len() > 0 && m.blocks().saturating_mul(512) < m.len()
+}
+
+impl Copier {
+    /// Copy only the data regions of `input` (`SEEK_DATA`/`SEEK_HOLE`), then set the
+    /// length so a trailing hole stays a hole. `None` if the filesystem can't say where the
+    /// data is. Returns the data bytes copied; progress counts the whole length.
+    fn copy_sparse(
+        &self,
+        input: &File,
+        output: &File,
+        len: u64,
+        progress: &Progress,
+    ) -> io::Result<Option<u64>> {
+        use rustix::fs::{SeekFrom, seek};
+        let mut pos = 0u64;
+        let mut data_bytes = 0u64;
+        while pos < len {
+            let start = match seek(input, SeekFrom::Data(pos)) {
+                Ok(s) => s,
+                // No data after `pos`: the rest is a hole.
+                Err(Errno::NXIO) => break,
+                Err(Errno::INVAL | Errno::OPNOTSUPP) if pos == 0 => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+            let end = seek(input, SeekFrom::Hole(start))?.min(len);
+            self.copy_segment(input, output, start, end, progress)?;
+            data_bytes += end - start;
+            pos = end;
+        }
+        output.set_len(len)?;
+        progress.bytes_done.fetch_add(len - data_bytes, Relaxed);
+        Ok(Some(data_bytes))
+    }
+
+    /// Copy bytes `start..end` of `input` to the same offsets of `output`.
+    fn copy_segment(
+        &self,
+        input: &File,
+        output: &File,
+        start: u64,
+        end: u64,
+        progress: &Progress,
+    ) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        let (mut off_in, mut off_out) = (start, start);
+        while off_in < end {
+            if progress.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            let want = ((end - off_in) as usize).min(CHUNK);
+            let n = if self.copy_range.load(Relaxed) {
+                match rustix::fs::copy_file_range(
+                    input,
+                    Some(&mut off_in),
+                    output,
+                    Some(&mut off_out),
+                    want,
+                ) {
+                    Ok(0) => break, // the file shrank under us
+                    Ok(n) => n,
+                    Err(Errno::INTR) => continue,
+                    Err(Errno::XDEV | Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP) => {
+                        self.copy_range.store(false, Relaxed);
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            } else {
+                let mut buf = vec![0u8; want.min(1 << 20)];
+                let n = match input.read_at(&mut buf, off_in) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                };
+                output.write_all_at(&buf[..n], off_out)?;
+                off_in += n as u64;
+                off_out += n as u64;
+                n
+            };
+            progress.bytes_done.fetch_add(n as u64, Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -474,5 +572,43 @@ mod tests {
         set_mtime(&l, 1_000_000_000, 5).unwrap();
         let m = fs::symlink_metadata(&l).unwrap();
         assert_eq!((m.mtime(), m.mtime_nsec()), (1_000_000_000, 5));
+    }
+
+    #[test]
+    fn sparse_files_stay_sparse() {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("disk.img");
+        let f = File::create(&src).unwrap();
+        f.set_len(64 << 20).unwrap();
+        f.write_all_at(b"start", 0).unwrap();
+        f.write_all_at(&[7u8; 8192], 32 << 20).unwrap();
+        drop(f);
+        if !is_sparse(&fs::metadata(&src).unwrap()) {
+            eprintln!("this filesystem doesn't make sparse files; skipping");
+            return;
+        }
+        for copy_range in [true, false] {
+            let c = Copier {
+                reflink: AtomicBool::new(false),
+                copy_range: AtomicBool::new(copy_range),
+            };
+            let dst = t.path().join(format!("copy-{copy_range}"));
+            let p = Progress::new();
+            c.copy(&src, &dst, &p).unwrap();
+            let m = fs::metadata(&dst).unwrap();
+            assert_eq!(m.len(), 64 << 20);
+            assert!(
+                m.blocks() * 512 < 4 << 20,
+                "copy is sparse: {} blocks",
+                m.blocks()
+            );
+            assert_eq!(fs::read(&dst).unwrap(), fs::read(&src).unwrap());
+            assert_eq!(
+                p.bytes_done.load(Relaxed),
+                64 << 20,
+                "progress counts the whole file"
+            );
+        }
     }
 }

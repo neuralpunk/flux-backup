@@ -75,3 +75,41 @@ mod tests {
         assert!(!on_battery_in(t.path()), "only a wireless mouse battery");
     }
 }
+
+/// Whether NetworkManager says the connection is metered (mobile data, a phone's hotspot,
+/// or one the user marked so). Unknown counts as not metered.
+pub fn metered() -> bool {
+    let out = std::process::Command::new("busctl")
+        .args([
+            "--system",
+            "get-property",
+            "org.freedesktop.NetworkManager",
+            "/org/freedesktop/NetworkManager",
+            "org.freedesktop.NetworkManager",
+            "Metered",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => metered_from(&String::from_utf8_lossy(&o.stdout)),
+        _ => false,
+    }
+}
+
+/// `busctl` prints `u 1`: NetworkManager's NMMetered (1 yes, 3 guessed yes; 0 unknown,
+/// 2 no, 4 guessed no).
+fn metered_from(busctl: &str) -> bool {
+    matches!(busctl.trim().strip_prefix("u "), Some("1" | "3"))
+}
+
+#[cfg(test)]
+mod metered_tests {
+    #[test]
+    fn reads_network_manager() {
+        assert!(super::metered_from("u 1\n"));
+        assert!(super::metered_from("u 3"));
+        for no in ["u 0", "u 2", "u 4", "", "garbage"] {
+            assert!(!super::metered_from(no), "{no}");
+        }
+    }
+}

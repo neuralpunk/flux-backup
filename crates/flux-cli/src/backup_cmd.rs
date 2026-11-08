@@ -291,8 +291,10 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
                     group(st.deleted)
                 );
                 let (verb, reuse) = match profile.engine {
-                    flux_core::Engine::Mirror => ("copied", "hard-linked"),
-                    flux_core::Engine::Vault => ("read", "reused"),
+                    flux_core::Engine::Mirror | flux_core::Engine::Rsync => {
+                        ("copied", "hard-linked")
+                    }
+                    flux_core::Engine::Vault | flux_core::Engine::Borg => ("read", "reused"),
                 };
                 println!(
                     "  {verb} {} in {} files, {reuse} {} unchanged files",
@@ -300,7 +302,10 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
                     group(st.copied_files),
                     group(st.linked_files)
                 );
-                if profile.engine == flux_core::Engine::Vault {
+                if matches!(
+                    profile.engine,
+                    flux_core::Engine::Vault | flux_core::Engine::Borg
+                ) {
                     println!(
                         "  stored {} after deduplication and compression",
                         ByteSize(st.stored_bytes).display_approx()
@@ -463,7 +468,10 @@ pub fn run_info(ctx: &Ctx, args: InfoArgs) -> anyhow::Result<ExitCode> {
         ),
         (
             "stored",
-            if repo.engine() == flux_core::Engine::Vault {
+            if matches!(
+                repo.engine(),
+                flux_core::Engine::Vault | flux_core::Engine::Borg
+            ) {
                 format!(
                     "{} new data after deduplication and compression",
                     ByteSize(st.stored_bytes).display_approx()

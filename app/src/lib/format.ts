@@ -20,6 +20,9 @@ const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 export function ago(when: string | number | Date | null | undefined): string {
   if (when == null) return "never";
   const t = new Date(when).getTime();
+  // An unparseable date must never throw (RelativeTimeFormat rejects NaN, and a throw
+  // while rendering leaves the whole view blank): show it as given instead.
+  if (!Number.isFinite(t)) return typeof when === "string" ? when : "unknown";
   const s = Math.round((t - Date.now()) / 1000);
   const a = Math.abs(s);
   if (a < 45) return s <= 0 ? "just now" : "in a moment";
@@ -39,6 +42,14 @@ export function shortDateTime(when: string | number | Date): string {
   const d = new Date(when);
   if (d.getFullYear() !== new Date().getFullYear()) return d.toLocaleDateString(undefined, { dateStyle: "medium" });
   return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${d.toLocaleTimeString(undefined, { timeStyle: "short" })}`;
+}
+
+/** "Oct 6" this year, "Oct 6, 2025" before. */
+export function shortDate(when: string | number | Date): string {
+  const d = new Date(when);
+  if (!Number.isFinite(d.getTime())) return String(when);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { dateStyle: "medium" });
 }
 
 export function dayLabel(when: string | number | Date): string {

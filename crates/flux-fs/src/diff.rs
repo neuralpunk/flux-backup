@@ -61,7 +61,7 @@ impl Change {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DiffSummary {
     pub added: u64,
     pub removed: u64,
@@ -191,6 +191,51 @@ where
     Ok((out, summary))
 }
 
+/// The [`DiffSummary`] of `old` against `new` (both sorted by path), without copying any
+/// entry or collecting the changes: what a backup needs for its counts. Same rules as
+/// [`diff`].
+pub fn summarize<'a>(
+    old: impl Iterator<Item = &'a Entry>,
+    new: impl Iterator<Item = &'a Entry>,
+) -> DiffSummary {
+    let (mut old, mut new) = (old.peekable(), new.peekable());
+    let mut summary = DiffSummary::default();
+    // Only the kind of change and the sizes count: no path is copied.
+    let mut count = |change, o: Option<&Entry>, n: Option<&Entry>, fields| {
+        summary.add(&Change {
+            change,
+            kind: n.or(o).map_or(Kind::File, |e| e.kind),
+            fields,
+            old_size: o.and_then(size_of),
+            new_size: n.and_then(size_of),
+            path: Vec::new(),
+        });
+    };
+    loop {
+        match (old.peek(), new.peek()) {
+            (None, None) => break,
+            (Some(_), None) => count(ChangeKind::Removed, old.next(), None, vec![]),
+            (None, Some(_)) => count(ChangeKind::Added, None, new.next(), vec![]),
+            (Some(a), Some(b)) => match a.path.cmp(&b.path) {
+                Ordering::Less => count(ChangeKind::Removed, old.next(), None, vec![]),
+                Ordering::Greater => count(ChangeKind::Added, None, new.next(), vec![]),
+                Ordering::Equal => {
+                    let (o, n) = (old.next().unwrap(), new.next().unwrap());
+                    if o.kind != n.kind {
+                        count(ChangeKind::TypeChanged, Some(o), Some(n), vec![]);
+                    } else {
+                        let f = fields(o, n);
+                        if !f.is_empty() {
+                            count(ChangeKind::Modified, Some(o), Some(n), f);
+                        }
+                    }
+                }
+            },
+        }
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +243,30 @@ mod tests {
 
     fn ok(v: Vec<Entry>) -> impl Iterator<Item = Result<Entry, std::io::Error>> {
         v.into_iter().map(Ok)
+    }
+
+    #[test]
+    fn summarize_matches_diff() {
+        let mut f = entry("a/f", Kind::File);
+        f.size = 10;
+        let old = vec![
+            entry("a", Kind::Dir),
+            f.clone(),
+            entry("a/gone", Kind::File),
+            entry("a/x", Kind::File),
+        ];
+        let mut f2 = f.clone();
+        f2.size = 15;
+        f2.mtime += 1;
+        let new = vec![
+            entry("a", Kind::Dir),
+            f2,
+            entry("a/new", Kind::File),
+            entry("a/x", Kind::Dir),
+        ];
+        let (_, by_diff) = diff(ok(old.clone()), ok(new.clone()), b"").unwrap();
+        assert_eq!(summarize(old.iter(), new.iter()), by_diff);
+        assert_eq!(summarize([].iter(), new.iter()).added, 4);
     }
 
     #[test]

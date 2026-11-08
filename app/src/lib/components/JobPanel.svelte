@@ -11,11 +11,11 @@
   const phase = $derived(job.finished ? "Finished" : p?.phase === "transferring" ? "Copying" : phaseLabel[p?.phase ?? "preparing"]);
 </script>
 
-<section class="card flex flex-col gap-4 px-6 py-[22px]" aria-live="polite" aria-label="Backup in progress">
+<section class="card flex flex-col gap-3 px-5 py-4" aria-live="polite" aria-label="Backup in progress">
   <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
     <div class="flex items-baseline gap-3">
-      <span class="text-lg font-medium">{phase}</span>
-      {#if pct != null}<span class="num font-mono text-lg font-medium text-primary">{pct}%</span>{/if}
+      <span class="text-[16px] font-semibold">{phase}</span>
+      {#if pct != null}<span class="num font-mono text-[16px] font-medium text-primary">{pct}%</span>{/if}
       {#if job.warnings.length}
         <span class="tag text-warning" title={job.warnings.map((w) => `${w.path}: ${w.message}`).join("\n")}>
           <Icon name="alert" size={12} /> {count(job.warnings.length)} {job.warnings.length === 1 ? "file" : "files"} skipped
@@ -36,13 +36,13 @@
       {/if}
     </span>
   </div>
-  <div class="h-2 overflow-hidden rounded bg-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}>
+  <div class="h-1.5 overflow-hidden rounded-full bg-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}>
     {#if pct != null}
-      <div class="h-full rounded bg-primary motion-safe:transition-[width] motion-safe:duration-300 motion-safe:ease-out" style:width="{pct}%"></div>
+      <div class="h-full rounded-full bg-primary motion-safe:transition-[width] motion-safe:duration-300 motion-safe:ease-out" style:width="{pct}%"></div>
     {:else if job.finished}
-      <div class="h-full w-full rounded bg-success"></div>
+      <div class="h-full w-full rounded-full bg-success"></div>
     {:else}
-      <div class="h-full w-1/4 rounded bg-primary/60 motion-safe:animate-pulse"></div>
+      <div class="h-full w-1/4 rounded-full bg-primary/60 motion-safe:animate-pulse"></div>
     {/if}
   </div>
 </section>

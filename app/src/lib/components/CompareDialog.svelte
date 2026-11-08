@@ -39,7 +39,7 @@
         {@const key = k as Change["change"]}
         {@const n = key === "added" ? s.added : key === "removed" ? s.removed : key === "modified" ? s.modified : s.type_changed}
         <button
-          class="pill px-3.5 py-1.5 text-[13px] transition-colors {show[key] ? 'bg-surface-3 text-fg' : 'bg-surface-sunken text-fg-muted line-through'}"
+          class="rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors {show[key] ? 'bg-surface-3 text-fg' : 'bg-surface-3 text-fg-muted line-through'}"
           aria-pressed={show[key]}
           onclick={() => (show[key] = !show[key])}
         >
@@ -53,7 +53,7 @@
       <Icon name="search" size={15} class="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-fg-muted" />
       <input class="input pl-8" placeholder="Filter by path" bind:value={filter} />
     </label>
-    <ul class="mt-3 max-h-[50vh] space-y-px overflow-y-auto rounded-2xl bg-surface-sunken p-1.5 text-sm">
+    <ul class="mt-3 max-h-[50vh] space-y-px overflow-y-auto rounded-card bg-surface-3 p-1.5 text-sm">
       {#each visible as c (c.path)}
         {@const m = meta[c.change]}
         <li class="flex items-center gap-3 px-3 py-1.5">

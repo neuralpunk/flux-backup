@@ -98,45 +98,7 @@ pub fn restore(
         source,
     };
 
-    let wanted: Vec<Vec<u8>> = req
-        .paths
-        .iter()
-        .map(|p| {
-            let b = p.as_os_str().as_bytes();
-            let b = b.strip_prefix(b"/").unwrap_or(b);
-            b.strip_suffix(b"/").unwrap_or(b).to_vec()
-        })
-        .collect();
-
-    // (entry, destination) pairs in path order.
-    let mut items: Vec<(Entry, PathBuf)> = Vec::new();
-    let mut found = vec![false; wanted.len()];
-    // Paths a sound snapshot never contains (`..`, absolute…): never read or written.
-    let mut unsafe_paths: Vec<FileError> = Vec::new();
-    for e in source.entries().map_err(io_err)? {
-        let e = e.map_err(io_err)?;
-        if !is_clean_path(&e.path) {
-            unsafe_paths.push(FileError {
-                path: String::from_utf8_lossy(&e.path).into_owned(),
-                message: "unsafe path in the snapshot (damaged or forged); skipped".into(),
-            });
-            continue;
-        }
-        for (i, w) in wanted.iter().enumerate() {
-            if is_within(&e.path, w) {
-                found[i] = true;
-                let dest = destination(&e, w, req.to.as_deref());
-                items.push((e, dest));
-                break;
-            }
-        }
-    }
-    if let Some(i) = found.iter().position(|f| !f) {
-        return Err(RestoreError::NotInSnapshot(
-            req.paths[i].clone(),
-            req.snapshot.id.clone(),
-        ));
-    }
+    let (items, unsafe_paths) = select(source.entries().map_err(io_err)?, req)?;
 
     let total_bytes: u64 = items
         .iter()
@@ -360,6 +322,136 @@ pub fn restore(
     Ok(out)
 }
 
+/// The entries a request covers, with their destinations, in path order; and the paths a
+/// sound snapshot never contains (`..`, absolute…), which are never read or written.
+type Selected = (Vec<(Entry, PathBuf)>, Vec<FileError>);
+
+fn select(
+    entries: impl Iterator<Item = io::Result<Entry>>,
+    req: &RestoreRequest<'_>,
+) -> Result<Selected, RestoreError> {
+    let io_err = |source| RestoreError::Io {
+        path: PathBuf::from(&req.snapshot.id),
+        source,
+    };
+    let wanted: Vec<Vec<u8>> = req
+        .paths
+        .iter()
+        .map(|p| {
+            let b = p.as_os_str().as_bytes();
+            let b = b.strip_prefix(b"/").unwrap_or(b);
+            b.strip_suffix(b"/").unwrap_or(b).to_vec()
+        })
+        .collect();
+
+    // (entry, destination) pairs in path order.
+    let mut items: Vec<(Entry, PathBuf)> = Vec::new();
+    let mut found = vec![false; wanted.len()];
+    // Paths a sound snapshot never contains (`..`, absolute…): never read or written.
+    let mut unsafe_paths: Vec<FileError> = Vec::new();
+    for e in entries {
+        let e = e.map_err(io_err)?;
+        if !is_clean_path(&e.path) {
+            unsafe_paths.push(FileError {
+                path: String::from_utf8_lossy(&e.path).into_owned(),
+                message: "unsafe path in the snapshot (damaged or forged); skipped".into(),
+            });
+            continue;
+        }
+        for (i, w) in wanted.iter().enumerate() {
+            if is_within(&e.path, w) {
+                found[i] = true;
+                let dest = destination(&e, w, req.to.as_deref());
+                items.push((e, dest));
+                break;
+            }
+        }
+    }
+    if let Some(i) = found.iter().position(|f| !f) {
+        return Err(RestoreError::NotInSnapshot(
+            req.paths[i].clone(),
+            req.snapshot.id.clone(),
+        ));
+    }
+    Ok((items, unsafe_paths))
+}
+
+/// At most this many paths of each kind in a [`RestorePreview`].
+pub const PREVIEW_PATHS: usize = 100;
+
+/// What a restore would do, found without changing anything.
+#[derive(Debug, Default, Serialize)]
+pub struct RestorePreview {
+    /// Items that don't exist at their destination yet (folders not counted).
+    pub new: u64,
+    /// Items that exist and differ: replaced, or renamed to `name.flux-<snapshot>` first
+    /// when `keep_existing` is set.
+    pub differ: u64,
+    /// Files already identical (same size and modification time): left alone.
+    pub identical: u64,
+    /// Folders that would be created.
+    pub new_folders: u64,
+    /// Bytes of the files that would be written.
+    pub bytes: u64,
+    pub keep_existing: bool,
+    /// The first [`PREVIEW_PATHS`] differing and new destinations.
+    pub differ_paths: Vec<PathBuf>,
+    pub new_paths: Vec<PathBuf>,
+    /// Damaged or forged paths in the snapshot, which a restore skips.
+    pub unsafe_paths: u64,
+}
+
+/// What [`restore`] would do with `req`: compares the snapshot's entries with what is at
+/// each destination now, by the same rule restore uses (a regular file with the same size
+/// and modification time is identical). Reads nothing but metadata.
+pub fn preview(
+    entries: impl Iterator<Item = io::Result<Entry>>,
+    req: &RestoreRequest<'_>,
+) -> Result<RestorePreview, RestoreError> {
+    use std::os::unix::fs::MetadataExt;
+    let (items, unsafe_paths) = select(entries, req)?;
+    let mut out = RestorePreview {
+        keep_existing: req.keep_existing,
+        unsafe_paths: unsafe_paths.len() as u64,
+        ..Default::default()
+    };
+    for (e, dest) in items {
+        let size = if e.kind == Kind::File { e.size } else { 0 };
+        match fs::symlink_metadata(&dest) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                if e.kind == Kind::Dir {
+                    out.new_folders += 1;
+                } else {
+                    out.new += 1;
+                    out.bytes += size;
+                    if out.new_paths.len() < PREVIEW_PATHS {
+                        out.new_paths.push(dest);
+                    }
+                }
+            }
+            Ok(m) if e.kind == Kind::Dir && m.is_dir() => {}
+            Ok(m)
+                if e.kind == Kind::File
+                    && m.file_type().is_file()
+                    && m.len() == e.size
+                    && m.mtime() == e.mtime
+                    && m.mtime_nsec() as u32 == e.mtime_nsec =>
+            {
+                out.identical += 1;
+            }
+            // Different, or there but unreadable: either way restore has to deal with it.
+            _ => {
+                out.differ += 1;
+                out.bytes += size;
+                if out.differ_paths.len() < PREVIEW_PATHS {
+                    out.differ_paths.push(dest);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// What every destination operation needs.
 struct Ctx<'a> {
     tree: &'a DestTree,
@@ -443,6 +535,26 @@ mod tests {
     use super::*;
     use crate::entry::test_entry as entry;
 
+    fn test_snapshot() -> SnapshotMeta {
+        SnapshotMeta {
+            format: 1,
+            id: "s".into(),
+            profile: "p".into(),
+            host: "h".into(),
+            user: "u".into(),
+            started: jiff::Timestamp::UNIX_EPOCH,
+            finished: jiff::Timestamp::UNIX_EPOCH,
+            status: crate::snapshot::SnapshotStatus::Complete,
+            name: None,
+            pinned: false,
+            sources: Vec::new(),
+            stats: Default::default(),
+            errors: Vec::new(),
+            errors_total: 0,
+            flux_version: "0".into(),
+        }
+    }
+
     #[test]
     fn clean_paths() {
         for ok in ["home", "home/me/a.txt", "a/.hidden", "a/..b", "a/b.."] {
@@ -484,23 +596,7 @@ mod tests {
         let mut dir = entry("src", Kind::Dir);
         dir.mode = 0o755;
         let source = Forged(vec![dir, evil, good]);
-        let snap: SnapshotMeta = SnapshotMeta {
-            format: 1,
-            id: "s".into(),
-            profile: "p".into(),
-            host: "h".into(),
-            user: "u".into(),
-            started: jiff::Timestamp::UNIX_EPOCH,
-            finished: jiff::Timestamp::UNIX_EPOCH,
-            status: crate::snapshot::SnapshotStatus::Complete,
-            name: None,
-            pinned: false,
-            sources: Vec::new(),
-            stats: Default::default(),
-            errors: Vec::new(),
-            errors_total: 0,
-            flux_version: "0".into(),
-        };
+        let snap = test_snapshot();
         let to = t.path().join("a/b/dest");
         let out = restore(
             &source,
@@ -543,5 +639,58 @@ mod tests {
             destination(&top, b"etc", Some(Path::new("/r"))),
             PathBuf::from("/r/etc")
         );
+    }
+    #[test]
+    fn preview_sorts_new_differing_and_identical() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t
+            .path()
+            .strip_prefix("/")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let at = |rel: &str| t.path().join(rel);
+        std::fs::create_dir(at("d")).unwrap();
+        std::fs::write(at("d/same.txt"), b"1234").unwrap();
+        std::fs::write(at("d/changed.txt"), b"old").unwrap();
+        let st = std::fs::metadata(at("d/same.txt")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let file = |name: &str, size: u64, mtime: i64, nsec: u32| {
+            let mut e = entry(&format!("{root}/d/{name}"), Kind::File);
+            e.size = size;
+            e.mtime = mtime;
+            e.mtime_nsec = nsec;
+            e
+        };
+        let entries = vec![
+            entry(&format!("{root}/d"), Kind::Dir),
+            file("changed.txt", 5, 1, 0),
+            entry(&format!("{root}/d/new"), Kind::Dir),
+            file("new/a.txt", 7, 1, 0),
+            file("same.txt", 4, st.mtime(), st.mtime_nsec() as u32),
+        ];
+        let snap = test_snapshot();
+        let req = RestoreRequest {
+            snapshot: &snap,
+            paths: vec![at("d")],
+            to: None,
+            keep_existing: true,
+            dry_run: true,
+            xattrs: XattrPolicy {
+                acl: false,
+                other: false,
+            },
+            links: LinkPolicy::FollowAll,
+        };
+        let p = preview(entries.into_iter().map(Ok), &req).unwrap();
+        assert_eq!((p.new, p.differ, p.identical, p.new_folders), (1, 1, 1, 1));
+        assert_eq!(p.bytes, 12);
+        assert_eq!(p.differ_paths, vec![at("d/changed.txt")]);
+        assert_eq!(p.new_paths, vec![at("d/new/a.txt")]);
+        assert!(p.keep_existing);
+        // Nothing was touched.
+        assert_eq!(std::fs::read(at("d/changed.txt")).unwrap(), b"old");
+        assert!(!at("d/new").exists());
     }
 }

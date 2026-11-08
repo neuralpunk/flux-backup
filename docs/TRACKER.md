@@ -12,8 +12,22 @@ Status legend: ☐ not started · ◐ in progress · ☑ done
 | 5 | SSH transport | ☑ | see `git log` |
 | 6 | GUI I: shell & core flows | ☑ | see `git log` |
 | 7 | GUI II: configuration & polish | ☑ | see `git log` |
-| 8 | Root mode | ☐ | |
-| 9 | Release | ☐ | |
+| 8 | Root mode | ☑ | see `git log` |
+| 9 | Release | ☑ | see `git log` |
+| 10 | Compatibility mode I: rsync engine | ☑ | see `git log` |
+| 11 | Compatibility mode II: Borg engine | ☑ | see `git log` |
+| 12 | Compatibility mode III: the app | ☑ | see `git log` |
+| 13 | UX I: foundations | ☑ | see `git log` |
+| 14 | UX II: sidebar, profiles, system backups | ☑ | see `git log` |
+| 15 | UX III: settings and the rest | ☑ | see `git log` |
+| 16 | Export and import profiles | ☑ | see `git log` |
+| 17 | Quick wins | ☑ | see `git log` |
+| 18 | Finding files | ☑ | see `git log` |
+| 19 | Space | ☑ | see `git log` |
+| 20 | Control | ☑ | see `git log` |
+| 21 | Robustness | ☑ | see `git log` |
+| 22 | Release 0.2 | ☑ | see `git log` |
+| 23 | Website, guide and README for 0.2 | ☑ | see `git log` |
 
 ## Log
 
@@ -368,3 +382,729 @@ Notes / follow-ups:
 - The undecorated window, its drag region and edge resizing need a look in the real
   desktop session (WebKitGTK); not visible in headless screenshots.
 - "Pause" from the reference design isn't implemented (Stop continues next time).
+
+### Phase 10 — Compatibility mode I: rsync engine (2026-11-07)
+- [x] Plan agreed: compatibility mode = engines that store everything in a standard tool's
+      native format, plus a recovery kit next to the backups (PLAN.md, phases 10–12)
+- [x] `flux-core`: `engine = "rsync"`, `[rsync] extra_args` (options that would break the
+      layout are refused), `Engine::is_compat`/`label`
+- [x] New crate `flux-compat`: target-neutral `Store` (local folder, or SFTP + remote shell;
+      0700 folders, atomic writes, locks, symlinks, free space), tool detection with install
+      hints, gitignore → rsync filter translation (reversed for first-match-wins, anchoring
+      rules, `**/`, negation), CACHEDIR.TAG / `exclude_if_present` search written as rules,
+      snapshot listings (local scan, remote `find -printf`, cached per snapshot), generic
+      retention
+- [x] rsync engine: `rsync --archive --hard-links --numeric-ids --relative --delete
+      --delete-excluded [--acls] [--xattrs] … --link-dest=../../<prev>/data` into
+      `snapshots/.partial`, progress from `--info=progress2`, statistics from `--stats`,
+      per-file errors for exit 23/24, unchanged runs detected and discarded, rename + `latest`;
+      `rsync-command.txt` (exact command, version, exit status) and `rsync-filter.txt` in
+      every snapshot; snapshots made without Flux listed and adopted (meta.json with
+      statistics) at the next backup; name/pin, delete, prune with pins and space floors,
+      check (`--read-data` locally), mount, restore through the generic restore
+- [x] Recovery kit: `FLUX-RECOVERY.txt` written per profile and target, layered for people
+      new to rsync (in short / new to rsync / copy-paste commands) and for experts (layout,
+      exact command, filter semantics); `flux-backup.sh`, a POSIX script doing the same
+      backup with rsync only (local or over ssh, marker search with `find`, unique names,
+      continues `.partial`, `--dry-run`); rewritten after every backup
+- [x] Runner/`AnyRepo`/view/service integration; CLI `--engine rsync`, `flux recovery
+      [--script] [--save DIR]`; target test checks rsync locally and on the server
+- [x] Tests: unit (translation, rules rendering, marker search, find parsing, listing cache,
+      stats parsing, command building, kits, store, ids); CLI end to end locally (hard links
+      between and within snapshots, exclusions incl. negation and odd names, caches, ls,
+      diff, restore, check --read-data, recovery, **the generated script run with an empty
+      environment**, its snapshot listed and browsed by Flux, pin/delete/prune), over the SSH
+      stand-in (backup, unchanged, ls, restore, check, kit on the server, **the script run
+      remotely**, pin/delete), FUSE mount; clippy clean
+
+Notes / follow-ups:
+- Found while testing: the script could move `.partial` *into* an existing snapshot when run
+  in the same second as another backup; it now picks a unique name as Flux does.
+- Restores from Flux use Flux's own restore over the plain folders (identical files skipped,
+  differing ones kept aside, symlink-safe as root); the guide gives the rsync equivalents.
+- `rsync --stats` counts files skipped by `--max-size` in its totals, so statistics can be
+  slightly high for profiles with a size limit.
+
+### Phase 11 — Compatibility mode II: Borg engine (2026-11-07)
+- [x] `flux-core`: `engine = "borg"`, `[borg]` (encryption `repokey-blake2`/`repokey`/`none`,
+      compression, password source, `remote_path`, `extra_args` with reserved options
+      refused); warnings for what Borg can't do (size limit, following symlinks);
+      `Profile::password_source()` for every engine; system-scope keyring warning for Borg
+- [x] Passwords: the same sources as Vault (`FLUX_PASSWORD`, keyring, prompt, file,
+      command) with Borg wording; `flux key store/forget` work for Borg (verified with
+      `borg list` before storing)
+- [x] `flux-compat::borg`: tool detection (1.2–1.4; Borg 2 explained), repository per
+      profile next to the kit, local or `ssh://` (BORG_RSH from Flux's ssh options,
+      `BORG_REMOTE_PATH`), init with `--make-parent-dirs`; `borg create --json --progress
+      --list --filter=AME --log-json` with live progress (estimated from the previous
+      archive), per-file warnings, exit 0/1/2; gitignore → Borg patterns (`P sh`,
+      reversed, `!` for exclusions); `--exclude-caches`/`--exclude-if-present`/
+      `--one-file-system`/`--noacls`/`--noxattrs`/`--files-cache=disabled` for checksum;
+      archives listed with `borg list --json` (cached for when a backup holds the lock);
+      names and pins in the archive comment (`borg recreate --comment`, braces escaped);
+      listings from `--json-lines` (hard links, modes, local times, parent folders
+      added); restore by extracting into a staging folder, then the generic restore;
+      delete + compact (bytes freed reported), prune with Flux's policy, `borg check
+      [--verify-data]`, mount via `borg extract --stdout`; archives made without Flux
+      adopted with `borg info`
+- [x] Recovery kit for Borg: SET UP lines (`BORG_REPO`, `BORG_PASSCOMMAND` mapped from the
+      password source, `BORG_RSH`), list/mount/extract/restore everything, key export,
+      delete/compact and the closest `borg prune` line for the profile's retention, check;
+      novice and expert sections; `flux-backup.sh` with embedded patterns,
+      `{now:…}` archive names, `--dry-run`
+- [x] Runner/`AnyRepo`/view/service/CLI integration (`--engine borg`, `ssh test` checks
+      borg on the server, target test, `wrong_password`/`password_required` codes)
+- [x] Tests: unit (modes, local times, freed bytes, comments, patterns, listings with hard
+      links and parents, URLs, kit); CLI end to end with the real borg locally and over the
+      SSH stand-in (backup, names, ls incl. negated patterns and caches, diff, restore with
+      hard links and no staging left behind, check --verify-data, pin, wrong passphrase),
+      the generated script run without Flux and its archive browsed in Flux,
+      delete/compact, prune keeping the pin, kit on the server; FUSE mount for Borg;
+      every test uses its own `BORG_BASE_DIR`
+
+Notes / follow-ups:
+- Borg can't reliably say "nothing changed" (its files cache drops the most recently
+  changed files on purpose, and new chunks don't show renames), so every Borg backup makes
+  an archive; deduplication makes unchanged ones nearly free.
+- Found and fixed while testing: the borg runner logged its environment (with the
+  passphrase) at debug level; parent folders were missing from Borg listings, so mounts
+  couldn't be walked; mounts loaded the same snapshot twice under parallel lookups; the
+  script's `--dry-run` expanded to a stray argument.
+- `flux-transport`'s `lock::tests::shared_and_exclusive` failed once under full parallel
+  test load and passed 10/10 alone, with and without these changes: a pre-existing
+  timing flake to look at separately.
+
+### Phase 12 — Compatibility mode III: the app (2026-11-07)
+- [x] Service: `recovery_kit` (guide, script, location, tool status) and `tools` calls (protocol
+      version 2, so an older system helper is refused with a clear message); Borg unlock
+      (passphrase checked with `borg list`, `new_vault` for a repository that doesn't exist
+      yet); `needs_password` and key files for every engine with a password
+- [x] Tauri: `recovery_kit`, `tools`, `save_recovery_kit` (writes the two files into a folder
+      the user picked, as the user, also for system profiles)
+- [x] Editor: **Usable without Flux** row under the encryption switch, opening a chooser
+      (Flux's format / rsync / Borg) written for newcomers (what each is good for, what to
+      mind), with tool detection and install hints, and an expert disclosure with the real
+      commands; the encryption switch follows the engine (rsync explains encrypted drives,
+      Borg toggles `repokey-blake2`/`none`, fixed once created); advanced view: four engines
+      with "standard tool" tags, Borg encryption/passphrase source/compression/server
+      path/extra options, rsync extra options; empty option lists never saved
+- [x] Overview: **Usable without Flux** card → **Recovery kit** modal (guide split into its
+      sections with jump chips and per-section copy, script tab, copy all, save a copy); kit
+      reachable from the locked state; Borg wording for locked/unlock/password dialogs;
+      stored vs copied bytes for Borg; header tags (rsync / Borg) with explanations
+- [x] Modals never exceed the window (scroll inside); demo data (rsync and Borg profiles,
+      `?tools=missing`, `?open=recovery|compat`)
+- [x] Website: "Backups that never depend on Flux" section with two screenshots, nav link;
+      guide chapter in both tables of contents; engine-card bullet CSS fixed (inline code
+      broke into columns); README and user guide
+- [x] Checks: svelte-check 0/0, Vite build, clippy (workspace + flux-gui), flux-gui tests,
+      service test for the new views; headless screenshots reviewed (overview card, kit in
+      dark/light, chooser with tools installed/missing, Borg advanced settings, new profile)
+- [x] Found and fixed: `flux diff` picked "the snapshot before" by comparing start times; Borg
+      records them to the second, so two backups in one second tied and diff found none
+      (intermittent test failure). It now uses the list order.
+
+Notes / follow-ups:
+- The real desktop window wasn't driven in this session (screenshots are of the demo build in
+  headless Chrome); the Tauri commands are covered by `cargo clippy/test -p flux-gui`.
+
+### Phase 13 — UX I: foundations (2026-11-08)
+- [x] Review of the app and research (NN/g on signifiers and context menus, GNOME HIG boxed
+      lists, tag/chip/badge conventions, polkit and administrator prompts, Laws of UX):
+      docs/UX_PRINCIPLES.md with findings, sources and eight rules; DESIGN.md points to it
+- [x] `lib/menu.svelte.ts` + `MenuHost`: one menu for the app, opened by right-click
+      (`use:contextMenu`) or a ⋯ button (`MenuButton`); kept inside the window (flips up),
+      first item focused, arrows/Home/End/Enter/Escape/Tab, focus returns, closes on outside
+      click, resize and blur; the right-clicked item is outlined while its menu is open;
+      Menu key and Shift+F10 open a focused item's menu; icons, separators, danger items,
+      disabled items with a reason
+- [x] The webview's own context menu (Reload, Inspect…) is suppressed except on text that can
+      be selected or copied
+- [x] Settings building blocks: `.rows`/`Row` (title, subtitle, value, chevron for rows that
+      open something, right-hand control slot, lock icon + reason when disabled), `Toggle`
+      rebuilt (label left, switch right, whole line clickable, `row` variant), `.switch`,
+      `ConfirmDialog`, `.btn-danger-filled`
+- [x] Tags restyled as descriptors (outlined, smaller, squarer than buttons; `tag-accent`,
+      `tag-warn`)
+- [x] Snapshots: list rows get a right-click menu, the ⋯ button shares the same items (browse,
+      what changed, compare with now, name, pin, delete; delete disabled with a reason
+      when pinned)
+- [x] Checks: svelte-check 0/0, Vite build; menus driven in headless Chrome over CDP (real
+      right-click, arrow keys, Escape) and screenshots reviewed
+
+### Phase 14 — UX II: sidebar, profiles, system backups (2026-11-08)
+- [x] Sidebar "Your backups": each backup a two-line row with its destination icon (drive or
+      server) and its status in words ("Backed up 2 hours ago", "Backing up · 42%", "Failed 2
+      days ago", "Some files skipped", "Needs fixing in Settings", "Not backed up yet"); the
+      icon tile repeats the status colour; "+" in the heading and a "New backup" row
+- [x] One menu per backup (`lib/profileMenu.ts`): back up now / stop, browse snapshots,
+      activity, settings, recovery guide (compatibility mode), delete (disabled with a reason
+      while running); on right-click in the sidebar and a ⋯ button next to *Back up now*
+- [x] Backup actions moved into app state (`backupNow`, `stop`, `open`, `deleteProfile`, the
+      password prompt and app-level dialogs), so menus work on any backup, not only the
+      selected one
+- [x] Delete: a confirmation that names the profile, says the backups stay and where, with a
+      filled red "Delete profile" that never gets default focus; also a visible row at the
+      end of Settings (basic view), apart from everything else
+- [x] System backups: a compact sidebar row ("Locked · admin password", chevron) that opens an
+      explanation (what system backups are, that the desktop will ask for an administrator
+      password, when the helper stops) before the system's password dialog; unlocked: a
+      "System backups" heading with + and lock
+- [x] Header: descriptor tags with icons (destination, schedule, storage; compatibility mode
+      as an accent tag "rsync · works without Flux"; system as a warning tag)
+- [x] README, user guide and website updated for the new wording
+- [x] Checks: svelte-check 0/0, Vite build; driven in headless Chrome over CDP: right-click
+      in the sidebar, ⋯ menu, keyboard to Delete…, delete completed (list and selection
+      updated), system explanation, both themes
+
+### Phase 15 — UX III: settings and the rest (2026-11-08)
+- [x] No more "Advanced options" mode (so nothing can stay expanded for the next profile; the
+      editor always opens on its main page): the main page asks what / where / when / what
+      to keep, and every other group is a row with an icon, its current value and ›, opening
+      just that group as a sub-page ("‹ All settings"; Save and Cancel stay in place):
+      *Leave some things out*, *Connection details* (SSH), *How backups are stored*, *More
+      schedule options*, *Keep and remove snapshots*, *Hooks*, *Performance and behaviour*
+- [x] Problems show where they are: a row whose group has errors says "1 problem" in red, and
+      "To finish… / things to fix" opens that sub-page (or scrolls to the main-page question)
+- [x] Settings built from rows: switches on the right with the whole row clickable, selects,
+      sliders and inputs at the right of their row, groups of related rows; navigation rows
+      carry icons (switches beside them too, so text lines up), control rows on sub-pages
+      don't; disabled controls say why ("Fixed when the Borg repository was created",
+      "rsync can't encrypt…", "Only for backups at set times")
+- [x] *How backups are stored*: four options in two labelled groups, "Flux's own formats"
+      (Plain folders, Encrypted) and "Works without Flux" (rsync, Borg), each with what it's
+      good for, what to mind and the tool's status; per-format settings below; the separate
+      compatibility-mode dialog is gone (its content lives here)
+- [x] Fixed: the main-page encryption switch now changes the format (it only flipped
+      itself); encryption is choosable again when an existing profile changes format (a new
+      repository); missing `exclude_if_present` / `ssh_options` lists normalised on load; the
+      profile id is shown under the name ("Saved as home", "Change" for new profiles)
+- [x] New settings exposed in the UI: skip folders containing a marker file, extra ssh
+      options
+- [x] Right-click menus on files (open, restore this, restore the selection, select, copy
+      path) and on backup runs (show details, copy the error, back up again); a shared
+      clipboard helper
+- [x] Screenshots regenerated (README, website); README, user guide, website guide, DESIGN.md
+      and UX_PRINCIPLES.md updated
+- [x] Checks: svelte-check 0/0, Vite build; driven in headless Chrome: rows open their pages
+      and come back, the encryption switch changes the summary to "Encrypted (Vault)", the
+      lock lifts after a format change, file right-click, new-profile "To finish"
+
+### Phase 16 — Export and import profiles (2026-11-08)
+- [x] `flux_compat::export`: Flux profile (TOML with its id, importable), borgmatic
+      (`config.yaml`: sources, repository with label, exclusions as Borg patterns with their
+      style spelled out, caches/markers/one-file-system, compression, passphrase command from
+      the password source, ssh command, remote path, extra create options for ACLs, xattrs and
+      checksums, archive names, retention, checks, hooks), restic (a script: repository, local
+      or sftp, password command, exclude file with gitignore → restic translation, caches,
+      markers, size limit, `restic forget --prune` with the retention), rsync and Borg scripts
+      (the recovery-kit generators); every export lists what it can't carry over (pins and
+      names, max age, space floors, the schedule, battery, tool limits) and how to create a
+      repository that doesn't exist yet
+- [x] Import: `parse_flux` (the exported id is remembered); the service picks the id (given,
+      exported, or from the name) and never replaces a profile (`-2`, `-3`…); problems don't
+      stop the import, the app opens the profile's settings
+- [x] CLI: `flux profile export ID [-f flux|borgmatic|restic|rsync|borg] [-o FILE|DIR]` (notes
+      on stderr), `flux profile import FILE [--id ID]`
+- [x] App: *Export…* in each backup's menu and *Settings › More › Export this profile*; an
+      export dialog (formats with what they're for and what they work with, the notes, a live
+      preview of the file, Copy, Save… into a folder you pick); *Import a profile…* behind the
+      sidebar's + and on the welcome screen. Files are read and written by the app as you,
+      also for system profiles; imported system ids are qualified like the others
+- [x] borgmatic keys checked against borgmatic's published schema (all current; the hook keys
+      are deprecated in 2.0 but accepted, and the only form 1.8/1.9 understand; the file
+      shows the 2.0 `commands:` equivalent; "P sh" avoided since borgmatic doesn't document it)
+- [x] Tests: unit (round trip, borgmatic essentials, restic translation and script, formats);
+      CLI (all formats, unknown format refused, import refuses a taken id, `--id`, identical
+      round trip, the exported rsync script backs up without Flux); by hand: borgmatic YAML
+      parsed (PyYAML), scripts `sh -n`, the exported borg script made a real archive with
+      the exclusions applied; GUI screenshots of the dialog and the + menu
+
+Notes / follow-ups:
+- borgmatic and restic weren't installed here (installing them from PyPI/GitHub wasn't
+  allowed in this session), so the borgmatic config wasn't run through `borgmatic config
+  validate` and the restic script wasn't run. Worth doing once on a machine that has them.
+- Found while testing: the export's note about creating a Borg repository missed
+  `--make-parent-dirs`; the import error printed a debug id. Both fixed.
+
+### Phase 17 — Quick wins (2026-11-08)
+- [x] Open a file from a snapshot: `Call::OpenFile` restores one file (≤ 4 GiB, not for
+      system profiles) into `~/.cache/flux/opened/<snapshot>-<n>`, read-only; the app opens it
+      with `xdg-open`. Double-click a file or *Open a copy* in its menu; copies older than a
+      day are removed
+- [x] Duplicate a profile: "X (copy)" with a free id (`-copy`, `-copy-2`…), its timer set up
+      like a saved profile (`edit::apply_timer`, shared with Save); in the backup's menu and
+      `flux profile duplicate ID`
+- [x] Health warnings on the Overview, in words with what to do: drive not connected for a
+      while (with how long), two or more failed runs in a row, overdue for its schedule
+      (manual 30 days, hourly 1, daily 3, weekdays 4, weekly 14, intervals 3×), never
+      succeeded, under 5 GiB free (red under 1 GiB). An unplugged drive doesn't also show
+      "overdue"
+- [x] First-backup card after the first snapshot: how to get a file back, "Try it: browse
+      files"; dismissed once per profile
+- [x] Activity: All / Problems filter; *Copy diagnostics* (`Call::Diagnostics`,
+      `flux diagnostics ID`): versions of Flux, the OS, rsync, borg and ssh, the profile with
+      the password command and hooks redacted, validation problems, the last 10 runs and the
+      last run's messages
+- [x] Tests: health rules with a fixed clock, redaction, GUI command qualification; by hand:
+      CLI duplicate/diagnostics, GUI screenshots (health cards, first-backup card, Activity
+      filter), double-click opening a file in the demo
+
+### Phase 18 — Finding files (2026-11-08)
+- [x] Search every snapshot from the Snapshots tab (*Find in all snapshots*): plain text is
+      a case-insensitive part of the name (of the path with a `/`), `*?[` make a pattern;
+      results still in the newest snapshot first, at most 500 (the total is shown); files
+      no longer in the newest snapshot are tagged *Deleted* with the last snapshot that had
+      them. Click shows the item in its snapshot (folder opened, item selected),
+      double-click opens a copy; Versions, Restore and a context menu on each row.
+      `Call::Find` on the existing `flux_fs::history::find` (now also reports the newest
+      modification time)
+- [x] Versions of a file (`Call::Versions` on `history::history`): each distinct version
+      with its modification time, size and snapshots, newest first; *Current* when it's
+      the newest snapshot's, a note when the file was deleted; Open and Restore… per
+      version. From a file's menu, the Versions button when one file is selected, and
+      search results
+- [x] Restore preview (`flux_fs::restore::preview`, `Call::RestorePreview`): the same
+      selection and identical-file rule as restore, metadata only: new items (and folders),
+      items that differ (kept aside or replaced), identical ones, bytes to write, the first
+      100 paths. Shown in the restore dialog for both destinations as soon as one is
+      chosen; when files would be replaced the button reads "Restore and replace N files"
+      in red; with nothing to do, Restore is disabled
+- [x] Restore selection factored out of `restore()` (shared by restore and preview)
+- [x] Tests: preview (new/differing/identical/new folders, nothing touched), search-box
+      matching (case, names vs paths, patterns, non-ASCII), service end to end on a Mirror
+      with two snapshots (find, versions, preview in place); GUI: screenshots of search
+      results, the versions dialog, the preview with replacing; show-in-snapshot checked
+      (folder and selection)
+
+Notes / follow-ups:
+- Search and versions read every snapshot's listing (in parallel); Phase 21's path index
+  is meant to make that cheap for Vault and Borg.
+- Found while testing: restoring a version from the Versions dialog passed no path
+  (the dialog's path was read after it was cleared). Fixed.
+
+### Phase 19 — Space (2026-11-08)
+- [x] Size estimate (`Call::Estimate`, `space::estimate_impl`): scans the profile being
+      edited with its exclusions (no hashing, no xattrs; a local target inside the sources
+      left out) and returns files, folders, bytes, unreadable items, missing sources and
+      the free space at the destination. Only the newest estimate runs: starting another
+      cancels the older one (a generation counter cancels its `Progress`). System profiles
+      are counted by the helper
+- [x] New-backup page: "About 32 GiB in 51,900 files, after the exclusions", recounted
+      0.7 s after the folders, exclusions or destination change (not on other edits);
+      warns when it's more than the free space; compression note for Vault and Borg
+- [x] Free space recorded after each run (`RunRecord::free_after`, local targets;
+      `flux_runner::free_space`/`disk_size`)
+- [x] Forecast (`space::forecast`): least squares over the last 90 days of measurements
+      plus now; needs 3 points over 3 days; days until full when filling (under ten
+      years). In the Overview (`Overview::space`), and a health warning under 30 days
+      (not alongside the low-space one)
+- [x] Overview *Space on BackupDisk* card: free of size, the forecast in words, a chart of
+      used space (2px line, 10% wash, solid hairlines for full and the baseline, end dot
+      with a surface ring), the projection dashed to "Full around …", crosshair tooltip
+      snapping to measurements, arrow keys (a slider for assistive tech), and a table
+      view. Chart colour `--c-chart` per theme, checked with the dataviz validator
+      (lightness band, ≥ 3:1 on the card)
+- [x] Tests: forecast (filling, steady, too little history, old/missing points), the
+      30-day warning, estimate end to end with and without an exclusion, free space
+      recorded by a real run; GUI screenshots: chart dark/light and hovered, the estimate
+
+Notes / follow-ups:
+- SSH targets get no forecast yet (free space would need the server's statvfs during the
+  run).
+- Found while testing: the tooltip covered the headline and "Full around…" sat on the
+  projection line; both moved.
+
+### Phase 20 — Control (2026-11-08)
+- [x] Pause scheduled backups (`flux_runner::prefs`: `paused.json` in the state folder,
+      until a time or until resumed; expired pauses are removed). Checked first among the
+      quick skips of scheduled runs ("scheduled backups are paused until …"); manual
+      backups unaffected. `flux pause [--for 2h | --tomorrow]`, `flux resume`, a line in
+      `flux status`; `Call::SetPause` (`hour`, `tomorrow` = 7:00, `resumed`, `off`); in the
+      app: a pause dialog from any backup's menu (Resume when paused), Preferences, the
+      tray (three items; the window is told with `flux://pause`), a sidebar banner with
+      Resume, and "Next backup: Paused" on the Overview
+- [x] Skip on metered connections (`schedule.skip_on_metered`, SSH targets only):
+      NetworkManager's `Metered` property via `busctl` (yes / guessed yes); unknown counts
+      as not metered
+- [x] Upkeep after scheduled backups (`[maintenance]`, `flux_runner::maintenance`): a full
+      verification about monthly (opt-in), and for Vault deleting unused data about weekly
+      (on by default: backups only forget old snapshots). The first time starts the clock;
+      times kept in `state/maintenance/<id>.json`; results in the run's log; problems and
+      failures notified; never fails the backup
+- [x] App preferences (`settings.toml` in the config folder; `Call::Preferences`,
+      `SavePreferences`): notify on successful scheduled backups, the exclusions new
+      profiles start with (Flux's list until changed, with "Back to Flux's list"). In the
+      app also: start in the tray at login (an XDG autostart entry running the app with
+      `--hidden`; the window starts hidden and is shown unless `--hidden` and a tray
+      exist; uses `$APPIMAGE` when set), and the theme. A Preferences page at the bottom of
+      the sidebar
+- [x] Fixed a race found by the new tests: a job lock just released could look taken while
+      a process forked by another thread still shared the descriptor (until its exec);
+      `try_lock` now looks again for up to 0.2 s before calling the job busy
+- [x] Tests: metered parsing, settings and pause round trip (expiry), tomorrow 7:00,
+      upkeep schedule, paused scheduled runs skipped (manual runs not), weekly Vault upkeep
+      after a real scheduled backup (logged, clock restarted), preferences and default
+      exclusions through the service; CLI pause/resume by hand; GUI screenshots
+      (Preferences while paused, pause dialog, schedule page)
+
+Notes / follow-ups:
+- Pause applies to your own backups; system backups (root's timers) have their own pause
+  (`sudo flux --system pause`).
+- Start at login inside Flatpak would need the background portal; the autostart entry
+  covers native packages and AppImage.
+
+### Phase 21 — Robustness (2026-11-08)
+- [x] Sparse files stay sparse: after the reflink attempt, a file with fewer blocks than
+      its size is copied region by region (`SEEK_DATA`/`SEEK_HOLE`, `copy_file_range` with
+      offsets or `pread`/`pwrite`), then its length set so a trailing hole stays a hole.
+      Covers Mirror backups and restores (both go through `Copier`); progress still counts
+      the whole size. Falls back to the plain copy when the filesystem can't say where the
+      data is. Tested on tmpfs and Btrfs (64 MiB image with 8 KiB of data: copy uses
+      < 4 MiB, identical contents)
+- [x] Snapshot index (`flux_runner::index`): one file per snapshot (Mirror manifest format,
+      0600 in a 0700 folder under the cache) written on first use and reused by search and
+      Versions for Vault, Borg, rsync and remote Mirror; keyed by snapshot id and start time;
+      files of vanished snapshots dropped on each search; removed with the profile. Local
+      Mirror reads its manifest directly
+- [x] Flaky tests fixed. `flux-transport` `lock::tests::shared_and_exclusive` (and any test
+      using the fake ssh): "Text file busy" when another test thread forked while the
+      script was open for writing; the script is now created by `install` in a process of
+      its own. Same fix for the CLI tests' fake `systemctl`. (Phase 20 fixed the job-lock
+      race.) Full suite run three times in a row: all 26 test binaries pass each time
+- [x] `flux find`: plain text matches part of a name in any case, like the app's search
+      box (`flux find home notes` found nothing before: it was an exact glob)
+- [x] Real desktop app: built with the bundled frontend and run on a private GTK Broadway
+      display and a private D-Bus session (nothing on the desktop, no tray icon in the
+      real session), against a separate `FLUX_HOME` with real backups. It starts, the tray
+      code runs, and every view loaded real data through the backend (runs, snapshots,
+      free space, the forecast once there was history). Found and fixed: the Space card
+      showed (empty) after two backups minutes apart; it now waits for a forecast
+- [ ] Visual check of the real WebKitGTK window: not possible here. Under Broadway,
+      WebKitGTK 2.54 computes lengths wrongly even for a bare test page (an inline 16px
+      font renders tiny, a 244px width computes to 0; also in MiniBrowser, and with
+      GDK_SCALE and a 96 DPI settings.ini), so the layout it draws says nothing about a
+      normal Wayland/X11 session. Needs a look on a real desktop
+
+Notes / follow-ups:
+- Vault restores still write zero runs as data (Vault stores no holes); only Mirror copies
+  are sparse.
+- The index is built lazily at the first search; building it after each backup would make
+  the first search fast too.
+
+### Phase 22 — Release 0.2 (2026-11-08)
+- [x] Version 0.2.0: Cargo workspace (all crates, `flux --version`), `app/package.json` and
+      its lock file, `tauri.conf.json`, the AppStream metainfo (a 0.2.0 release entry;
+      `appstreamcli validate` passes), README status, the website's version tags, the demo
+      diagnostics, the release workflow's example tag
+- [x] `CHANGELOG.md` (Keep a Changelog): everything since 0.1.0 — compatibility mode,
+      export/import, the UX rework, finding files, space, control, health and diagnostics,
+      robustness, the fixes, and known limitations
+- [ ] Tag `v0.2.0`: left for the maintainer (pushing the tag starts the release workflow)
+
+### Phase 23 — Website, guide and README for 0.2 (2026-11-08)
+- [x] New screenshots (demo build, 1200×780, `docs/screenshots/` and
+      `site/assets/screenshots/`): the eight existing ones retaken (now with Preferences in
+      the sidebar), and eight new: search, versions, restore preview, space forecast,
+      health warnings, preferences (paused), export, new backup with its size estimate
+- [x] Website: feature cards rewritten for 0.2 (search, versions, restore preview; pause and
+      metered; warnings in words and the forecast), six new gallery figures, export to other
+      tools in "Without Flux", the CLI sample and checklist; alt text matched to the new
+      hero shot
+- [x] HTML guide synced with the Markdown guide: "New backup", the size estimate, the
+      sidebar menu, metered/pause/upkeep/Preferences, restore preview, open a copy, search,
+      versions and the index, health warnings, space, duplicate, diagnostics, and the new
+      profile keys; four screenshots in the text (`.guide-shot`)
+- [x] README: twelve-picture gallery, app features for 0.2, CLI examples; AppStream gets two
+      more screenshots (validates)
+- [x] Fixed on the way: search results squeezed file names to nothing at the default window
+      size (the size/date and versions columns now show only on wide windows, as a second
+      line otherwise); the guide scrolled sideways on phones (a bare code block; now every
+      code block in the guide scrolls on its own). Checked: no horizontal overflow at
+      500/820/1100/1440 px on both pages, no broken images
+- [x] Profile reference (Markdown and HTML) lists `skip_on_metered` and `[maintenance]`
+
+### Phase 24 — GUI overhaul 1: foundation, shell, All backups (2026-11-08)
+The app's look is replaced (it read as one grey blob: every item the same rounded box,
+blue meaning selected, primary and active at once, setup like a web form, and no answer to
+"am I protected?"). New direction, chosen on the Impeccable decision page: **"At home on the
+desktop"**, the GNOME/Adwaita screen tradition in graphite and calm blue
+(`PRODUCT.md`, `.impeccable/surfaces/app-src-app-svelte.md`). Plan: phase 24 foundation and
+shell, 25 a backup's pages, 26 new backup and settings, 27 dialogs, preferences, review and
+DESIGN.md.
+- [x] Tokens and components (`app/src/app.css`): a blue-graphite shell around a flatter view;
+      grouped lists with hairline separators; colour with one job each (blue = act,
+      green/amber/red = state, selection = a neutral lift: `bg-selected` replaces the blue
+      `bg-primary-container` everywhere); 8px-radius buttons, Adwaita switch, state glyphs;
+      AA contrast checked in both themes
+- [x] Type: Inter (the face Adwaita Sans is built on) and JetBrains Mono, bundled; IBM Plex
+      removed
+- [x] Shell: the brand moves into the titlebar; GNOME-style round window buttons; the view
+      fills the window edge with one rounded corner
+- [x] Sidebar: **All backups** first, then each backup with a state glyph and its state in
+      words ("Protected · 59 minutes ago", "Failed 2 days ago"); a failure stays marked with
+      a dot until its backup is opened (remembered on this computer); the theme switch moves
+      to Preferences only
+- [x] **All backups** (new start page): one sentence ("4 of 5 backups are protected."), what
+      needs you and why in plain words, Pause/Resume schedules and Back up all now; each
+      backup as a row with its destination, state, next backup and a 30-day history strip
+      (one mark per day on a fixed size ramp: bigger marks copied more; red = failed)
+- [x] `lib/protection.ts`: one answer to "is this backup protecting you?" shared by the
+      sidebar and All backups
+- [x] Backend: `status` call (next run as a timestamp, last good copy, health in words, 30
+      days of history) read from the run log and timer only: cheap for every backup at once
+      and never asks for a password; demo data for it; unit test for the day buckets
+- [x] Shortcuts: Ctrl+0 opens All backups
+- [ ] DESIGN.md still describes Graphite Tonal; it is rewritten from the finished build in
+      phase 27
+
+### Phase 25 — GUI overhaul 2: a backup's pages (2026-11-08)
+- [x] Header: name, descriptor tags, and Settings · ⋯ · **Back up now** (the one blue
+      button; Stop while running). Overview, Snapshots and Activity are a segmented view
+      switcher with icons; **Settings is no longer a tab** but its own page with
+      "‹ Home folder" to go back (Ctrl+4 still opens it)
+- [x] Overview leads with the same answer as All backups, for this backup ("Home folder is
+      protected." / "Photo library isn't protecting you.") with last backup, next backup and
+      snapshot count in one line, what's wrong in words, then the 30-day strip spread across
+      the page (first day and today named). The four stat boxes are gone
+- [x] Recent backups, health notes, "Usable without Flux" and Maintenance are grouped lists;
+      maintenance is three rows (what each does, and its button)
+- [x] Snapshots: month headings, and a mark per snapshot on the history strip's size ramp
+      (how much it copied or stored; amber when it finished with problems)
+- [x] Activity: All / Problems as a segmented control; list rows match the snapshot list
+- [x] A running backup's panel and the "settings have problems" notice restyled
+
+### Phase 26 — GUI overhaul 3: new backup and settings (2026-11-08)
+- [x] The editor is a GNOME preferences page: a group title over one grouped list per
+      question, every setting a row. No more boxes holding headings holding another list
+- [x] What to back up: each folder a row (remove on the right), a last row to type or
+      Browse… for another, and "Leave some things out" in the same group; the size estimate
+      under it
+- [x] Where to keep it: drive or server as a segmented control; drives are radio rows (name,
+      free space, mount point, a check on the chosen one), then "Another folder…"; a server
+      is entry rows with Test connection in the group; then encryption and storage
+- [x] When: a segmented control (every hour / day / week / only when I click), a Time row,
+      plug-in and more options as rows
+- [x] A new backup is named after what it backs up ("Home folder", "Documents and 1 more")
+      until you type a name; the name comes after the three questions when creating and
+      first when editing
+- [x] Settings pages: How backups are stored is radio rows in two groups; exclusions and
+      marker files are grouped lists; suggestion chips and other leftovers restyled
+- [x] Missing details on a new backup (no drive, no server yet) read as the next step,
+      not in red
+- [x] Footer bar: a hairline above, Cancel and the one blue Create backup / Save
+
+### Phase 27 — GUI overhaul 4: dialogs, menus, preferences (2026-11-08)
+- [x] Dialogs: 17px semibold titles, a soft shadow and edge, 8/12px shapes; the close button
+      is last in the DOM, so a dialog opens with focus on its first real control (Cancel
+      on a destructive one, never Close or Delete)
+- [x] Icon tiles in dialogs are neutral (blue only acts); code blocks and boxes on the
+      control tone; the recovery kit's Guide/Script switch and Compare's filters restyled
+- [x] Menus and toasts: tighter, squarer items; an edge in the light theme
+- [x] Preferences: the same centred preferences column as Settings; theme as a segmented
+      control; default exclusions as a grouped list; the paused state with a state glyph
+- [x] Welcome page heading and buttons in the new type scale
+
+### Phase 28 — GUI overhaul 5: finish review, DESIGN.md (2026-11-08)
+- [x] Independent finish review (Impeccable finish reviewer) of the whole overhaul against
+      the direction contract, at 1440, 1200 (the default window) and 900 (the minimum), both
+      themes. Verdict: fix; two fix rounds, every scored fix and regression resolved
+- [x] History strip: a continuous log size ramp, 4px (≤1 MiB) to 11px (≥10 GiB) in 13px
+      cells, so days differ visibly and never touch; empty days ≥3:1; the snapshot list uses
+      the same ramp. The strip stays at the minimum window size (on its own line)
+- [x] All backups rows: name / state (and "last good copy …" when narrow) / mono
+      "source → destination"; a "Last good copy · Next" column; the backend profile summary
+      now sends `sources` (home as `~`)
+- [x] One answer everywhere: `nextRun()` words the next backup the same on every page; a
+      failure outranks a running backup in the sidebar; one hue per fact; no blue checks
+- [x] Drawn help icon in the titlebar; snapshot times, sizes and dates in tabular mono
+- [x] Demo data: day volumes spread from MiB to GiB, read from the same stats as the lists
+- [x] `docs/DESIGN.md` rewritten for "At home on the desktop" (merged: the icon, tray,
+      packaging and window sections kept and corrected), with `.impeccable/design.json`;
+      `docs/UX_PRINCIPLES.md` gains rules 9–11 (using vs configuring, one colour one job,
+      answer first) and the new building blocks
+- [x] Found while documenting: light-theme `primary` (now `#2759a4`) and `fg-muted` (now
+      `#555c66`) were just under AA on the shell and the selected lift; the window's
+      background colour still had the old shell value; unused `--c-tag`, `pill` and
+      `.btn-tonal` removed
+- [ ] Not done: the README/website screenshots (`docs/screenshots/`) still show the old look;
+      the overhaul has only been checked in the demo build, not yet in the Tauri app on
+      real profiles
+
+### Phase 29 — The password is chosen during setup, not at the first backup (2026-11-08)
+Asking for a new password at the first backup was confusing ("did I set one?") and broke
+scheduled backups: the first run of an encrypted backup needed someone at the screen.
+- [x] Backend `set_password` (and `flux key init <profile>`): creates the encrypted Vault or
+      Borg repository right away with the chosen password (or checks that it opens the one
+      already there), then keeps it where the profile's password comes from: the desktop
+      keyring, or a key file that doesn't exist yet (written mode 0600). File and command
+      sources need nothing typed. The app also remembers it for the session
+- [x] New backup: turning on *Encrypt with a password* shows Password and Repeat it right
+      under the switch, with what happens to it in words (keyring, asked every time, key
+      file); *Create backup* waits until they're set and match, then creates the encrypted
+      repository. If that can't happen yet (drive not connected, server unreachable), the
+      backup is saved and says so; the first backup asks as before
+- [x] Settings: the same fields, optional, for an encrypted backup that hasn't run yet
+      (e.g. one created before this change) or whose encryption was just turned on
+- [x] Tests: the service creates the Vault and the key file at setup and refuses a wrong
+      password for an existing Vault; end to end, `flux key init` sets up a Borg repository
+      and the first backup then runs with no terminal, no FLUX_PASSWORD and no keyring
+- [x] README, user guide (Markdown and HTML): set the password at setup; `flux key init`
+
+### Phase 30 — New backup as a step-by-step wizard (2026-11-08)
+- [x] A new backup is a guided setup, one question per step, with a stepper along the top
+      (blue only on the current step; done steps get a check and can be revisited):
+      **What** (folders, exclusions, size estimate) → **Where** (drives, a folder or a
+      server) → **Protection** (plain folders, encrypted Vault, rsync or Borg, and the
+      password right there when it's encrypted) → **When** (how often, time, plug-in, what
+      to keep) → **Review** (name, every answer with a link back to change it, optional
+      hooks and performance)
+- [x] Each step asks a question in words and explains the choice in one sentence; Continue
+      stays off until the step is complete and the footer says what's missing ("To
+      continue: choose a drive or folder", "type the server's name", "choose a password");
+      Back, Cancel; a short slide in the direction of travel (off under reduced motion);
+      the step heading takes focus for screen readers
+- [x] Ends on its own screen: "“Home folder” is set up.", when it runs, what and where,
+      whether encryption is ready, and **Back up now** / **Later**
+- [x] The questions are shared snippets, so a backup's Settings keep the one-page editor
+- [x] Guide (Markdown and HTML), website, README and UX principles (rule 12) describe it
+
+### Phase 31 — Settings groups open in a dialog, not a page (2026-11-08)
+A row like *Leave some things out* used to swap the whole editor for that group, with
+"‹ All settings" to go back. The swapped page looked like the one it replaced, so people
+lost track of where they were.
+- [x] Each group (exclusions, how backups are stored, connection, more schedule options,
+      keep and remove snapshots, hooks, performance) opens in a dialog over the editor: its
+      title, one line on what it's for, its settings, and a footer pinned to the bottom
+      ("Saved when you click Save." / "Applies to this new backup.", **Done**). Escape or ×
+      also close it; the editor and the wizard step stay exactly where they were
+- [x] Docs: UX principles rule 7, user guide (Markdown and HTML)
+
+### Phase 32 — "Where it's kept" in place (2026-11-08)
+- [x] In the new-backup wizard's Protection step, "Where it's kept" is a dropdown in its own
+      row (desktop keyring, ask every time, a file, a command) instead of opening the whole
+      "How backups are stored" dialog again; choosing a file or a command adds the key-file
+      path or the command as a row right under it, with a line on what Flux does with it
+- [x] The group stays when the password comes from a command (only the password fields
+      hide), and Continue waits for the key file or the command ("To continue: choose the
+      key file" / "type the command that prints the password")
+
+### Phase 33 — Performance 1: the app's own calls (2026-11-08)
+From the performance review (issues 1, 2 and 9).
+- [x] Run history read from its end: `recent_runs(n)` reads `runs.jsonl` backwards in 64 KiB
+      blocks and stops after `n` records (the sidebar asks for 1 per backup on every
+      refresh; it used to parse up to 1,200 records, hook output included). The Overview
+      reads it once instead of twice. Test: lines across block boundaries
+- [x] Opening an encrypted Vault again in the same process skips Argon2id (0.2–0.5 s of CPU
+      per key slot tried): unlocked master keys are kept in memory, found by a keyed hash
+      of the password (never the password), and only while their key slot still exists.
+      Test: right passwords reopen, a wrong one is refused, a removed one stops working
+- [x] Borg: the app's service reuses its archive listing of a local repository while
+      borg's transaction (`index.N`) is unchanged, for the same passphrase, in memory only
+      (a wrong passphrase is never answered from it; the command line always asks borg).
+      Checking a passphrase (unlock, `set_password`, `flux key store`) always runs borg
+      (`verify`). Tests: cache hits only for the same repository, transaction and
+      passphrase; archives written by borg directly show up; a wrong passphrase fails
+- [x] The Overview merges the reloads a finished backup triggers (the revision bump and the
+      refreshed backup list) into one, and never loads twice at once (`lib/coalesce.ts`)
+- [x] Timer status in one `systemctl show` per backup instead of four (unix timestamps,
+      formatted by Flux for people). Test: parsing `systemctl show`
+- [x] Correction to the review: `runs.jsonl` was already capped (1,000–1,200 records); the
+      cost was parsing all of it for every call
+
+### Phase 34 — Performance 2: disk writes (2026-11-08)
+From the performance review (issues 4 and 5).
+- [x] Vault packs on a local disk are no longer synced one by one (two fsyncs per 16 MiB
+      pack, roughly 128,000 for a 1 TB first backup): `Backend::write_pack` writes via a
+      temporary file and a rename without syncing, and one `syncfs` (`flush_packs`) runs
+      before the index that names the packs is written, in backups and in prune. The index
+      stays the commit point: a crash before it leaves packs no index names, which prune
+      already removes. Remote (SFTP) packs keep the server-side fsync
+- [x] Spinning disks (`flux_fs::disk`): `queue/rotational` from sysfs, for the path's
+      device, or (Btrfs and others report a virtual one) the device its mount comes from
+      in `/proc/self/mountinfo`. When a source or the target is on one, Mirror copies and
+      Vault reads large files (4 MiB and up) two at a time; small files, links and metadata
+      stay fully parallel. The run's log says so. Tests: mountinfo (longest mount point,
+      escaped spaces), sysfs (a device, or a partition's disk), the gate (at most two large
+      files at once; small ones never wait)
+
+### Phase 35 — Performance 3: Vault on many cores (2026-11-08)
+From the performance review (issue 3, and the dedup lock from issue 13).
+- [x] Files larger than one chunk (8 MiB) are read in 16 MiB batches: while the pool hashes,
+      compresses and encrypts one batch in parallel, the reading thread fetches the next
+      (`rayon::join`). Chunk order is kept; memory per large file stays about two batches.
+      Measured on 16 cores, 1 GiB file to an encrypted Vault: 3.26 s → 2.08 s
+      (incompressible), 3.25 s → 1.81 s (compressible); peak memory 95 → 220 MB
+- [x] The run's "already stored" set is split into 64 shards by blob id, so threads claiming
+      chunks rarely wait on one lock
+- [x] Test: a 70 MiB file spanning several batches, plus an identical copy, restores byte for
+      byte, is stored once, and backing up the same content again stores almost nothing
+
+### Phase 36 — Performance 4: Vault memory and unchanged runs (2026-11-08)
+From the performance review (issues 6 and 10).
+- [x] A Vault backup counts its changes with `flux_fs::diff::summarize` over borrowed
+      entries: no copy of every entry on both sides, and no list of every change (a first
+      backup used to build one for every file just to count them). Same rules as `diff`
+      (test: equal summaries)
+- [x] The latest snapshot's file list is kept in Flux's cache (`~/.cache/flux-backup/vault`),
+      compressed and encrypted with the Vault's own key, and used by the next backup instead
+      of rebuilding it from the repository's trees, only when it belongs to exactly that
+      snapshot (its root tree id); anything else is ignored and rebuilt. 100,000 files,
+      nothing changed: 0.30 s → 0.26 s. Test: the cached list equals `flatten`, unchanged
+      and changed runs are right, a damaged cache is ignored
+- [x] Found on the way: `deleting_snapshots_frees_their_data` compared two snapshots that
+      record `/tmp`'s metadata (a source's parent folders are part of a snapshot), which
+      parallel tests change. It now runs under a parent folder of its own
+
+### Phase 37 — Performance 5: Mirror and per-file work (2026-11-08)
+From the performance review (issues 7, 11, 12 and the rest of 13).
+- [x] Mirror creates directories one depth level at a time (parents first) and sets their
+      metadata deepest level first, each level in parallel (both were one sequential loop)
+- [x] A copied file's owner, permissions, extended attributes and mtime are set through the
+      file Mirror just wrote (`apply_metadata_fd`): no path lookups per call
+- [x] Progress counters: the scan adds per directory, Mirror per 256 entries, instead of
+      sixteen threads bumping one counter per file
+- [x] The job watcher sleeps on inotify (wakes as a job file appears, re-checks every 5 s)
+      instead of reading the jobs folder every 0.7 s; without inotify, as before. Test:
+      wakes on a new job file. Fixed on the way: its poll timeout dropped sub-second parts
+- [x] The new-backup size estimate scans counting only (`count_profile`: no list of every
+      file in memory), and picking a destination recounts only when that destination lies
+      inside a source (a `$derived` key). Test: counts equal a full scan's
+- [x] The copier reads a file's metadata once instead of twice
+- [ ] Not changed: the scan still lists extended attributes by path. An fd-relative call
+      (`listxattrat`) needs Linux 6.13 and isn't in rustix; opening every file to use its
+      descriptor would cost more than the path lookup it saves
+
+### Phase 38 — Performance 6: browsing snapshots (2026-11-08)
+From the performance review (issue 8). With this, all 13 issues are done (one part of 11
+left as it was, see phase 37).
+- [x] The Snapshots browser builds a folder index once, when a snapshot's entries are first
+      loaded (each folder → its children); opening a folder is a lookup. It used to count
+      every entry's parent and filter every entry again on each click
+- [x] The cache of browsed snapshots is now really most-recently-used first (a reused
+      snapshot moves to the front)
+- [x] Test: for every folder, the index lists exactly what a full pass finds; files and
+      entries under a non-folder are no folders
+- [x] CHANGELOG: an Unreleased section for the GUI overhaul, the setup wizard, the setup-time
+      password and the performance work
+
+### Benchmarks re-run after the performance work (2026-11-08)
+- [x] `bench/bench.sh` also compares Vault with Borg (repokey-blake2, zstd,3) when borg 1.x
+      is installed, so every number on the site comes from one script; it now touches
+      nothing outside its work folder (no systemd timers, keyring entries or notifications)
+- [x] Median of three runs on tmpfs, 16 cores (rsync 3.5.2, Borg 1.4.5). Mirror: initial
+      0.46 s (was 0.6), no changes with a new snapshot 0.26 s (was 0.37), 1% changed
+      0.26 s (was 0.37). Vault: initial 1.73 s (was 1.8), no changes 0.51 s, 1% changed
+      0.51 s (was 0.6–1.0); repository 864 MiB. rsync and Borg were re-measured too
+      (rsync 7.7 s where 0.2 measured 9.1 s), so the comparisons use today's numbers for both
+- [x] Website, README and PRODUCT.md updated to match
+
+### Release 0.2.0 (2026-11-08)
+- [x] CHANGELOG: the Unreleased section folded into 0.2.0 (the new look, the setup guide,
+      the password at setup, settings in dialogs, the performance work)
+- [x] All 16 screenshots retaken in the new look (demo data, 1200 × 780), in
+      `docs/screenshots/` and `site/assets/screenshots/`; alt text and captions on the site
+      and README updated to what they now show
+- [x] AppStream 0.2.0 release notes cover the new look, setup and speed; validated
+- [x] Published from `../FluxBackup-public` as tag `v0.2.0`, release built by the Release
+      workflow

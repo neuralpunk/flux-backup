@@ -93,6 +93,11 @@ pub enum KeyCmd {
     Remove { profile: String, key: String },
     /// Change the password: add the new one, then remove the one used to open.
     Passwd { profile: String },
+    /// Set up encryption before the first backup: choose the password, create the
+    /// encrypted Vault or Borg repository now, and keep the password where the profile
+    /// says it comes from (keyring, or a key file that doesn't exist yet), so the first
+    /// scheduled backup needs nobody to type it.
+    Init { profile: String },
     /// Save the profile's password in the desktop keyring (needed for scheduled backups).
     Store { profile: String },
     /// Remove the profile's password from the desktop keyring.
@@ -101,7 +106,10 @@ pub enum KeyCmd {
 
 fn vault_of<'a>(repo: &'a AnyRepo, profile: &str) -> anyhow::Result<&'a flux_vault::VaultRepo> {
     repo.vault().with_context(|| {
-        format!("profile {profile} uses the Mirror engine, which has no passwords")
+        format!(
+            "profile {profile} uses the {} engine, which has no Vault passwords",
+            repo.engine().label()
+        )
     })
 }
 
@@ -170,17 +178,78 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
                 );
             }
         }
+        KeyCmd::Init { profile } => {
+            use flux_core::profile::PasswordSource;
+            let (id, p) = load_profile(ctx, &profile)?;
+            let Some(source) = p.password_source() else {
+                bail!(
+                    "profile {id} uses the {} engine without encryption, so it has no password",
+                    p.engine.label()
+                );
+            };
+            let what = if p.engine == Engine::Borg {
+                "Borg passphrase"
+            } else {
+                "Vault password"
+            };
+            // FLUX_PASSWORD (scripts), else a command or an existing key file supplies it,
+            // else it's typed (twice).
+            let from_env = std::env::var("FLUX_PASSWORD")
+                .ok()
+                .filter(|v| !v.is_empty());
+            let pw = match &source {
+                _ if from_env.is_some() => password::Secret::new(from_env.unwrap_or_default()),
+                PasswordSource::Command { .. } => password::Secret::default(),
+                PasswordSource::File { path } if path.exists() => password::Secret::default(),
+                _ => ask_new(&format!("{what} for “{}”: ", p.name))?,
+            };
+            let service = flux_service::Service::new(ctx.paths.clone());
+            flux_service::views::set_password_impl(&service, id.to_string(), pw.to_string())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if source == PasswordSource::Prompt {
+                println!(
+                    "Encryption is set up for {id}. Its password comes from “prompt”, so every backup asks for it; use the keyring or a key file to let scheduled backups run on their own."
+                );
+            } else {
+                println!(
+                    "Encryption is set up for {id}; its first backup, scheduled or not, won't need to ask."
+                );
+            }
+        }
         KeyCmd::Store { profile } => {
             let (id, p) = load_profile(ctx, &profile)?;
-            if p.engine != Engine::Vault {
-                bail!("profile {id} uses the Mirror engine, which has no passwords");
+            if p.password_source().is_none() {
+                bail!(
+                    "profile {id} uses the {} engine without encryption, so it has no password",
+                    p.engine.label()
+                );
             }
-            let pw = password::terminal_ask(&format!("Vault password for “{}”: ", p.name), false)
+            let (what, repo) = if p.engine == Engine::Borg {
+                ("Borg passphrase", "repository")
+            } else {
+                ("Vault password", "Vault")
+            };
+            let pw = password::terminal_ask(&format!("{what} for “{}”: ", p.name), false)
                 .context("type the password on a terminal")?;
             // Make sure it's the right one before storing it.
-            verify_password(ctx, &id, &p, &pw)?;
+            if p.engine == Engine::Borg {
+                let r = flux_compat::borg::BorgRepo::for_profile(
+                    &ctx.paths,
+                    &id,
+                    &p,
+                    Some(pw.clone()),
+                    false,
+                )?;
+                if r.exists() {
+                    r.verify().with_context(|| {
+                        format!("that passphrase doesn't open the repository of {id}")
+                    })?;
+                }
+            } else {
+                verify_password(ctx, &id, &p, &pw)?;
+            }
             password::keyring_store(&id, &p.name, &pw)?;
-            println!("Saved in the keyring; scheduled backups of {id} can now open the Vault.");
+            println!("Saved in the keyring; scheduled backups of {id} can now open the {repo}.");
         }
         KeyCmd::Forget { profile } => {
             let (id, _) = load_profile(ctx, &profile)?;

@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use flux_compat::CompatError;
+use flux_compat::borg::{BorgRepo, BorgSource};
+use flux_compat::rsync::{RsyncRepo, RsyncSource};
 use flux_core::profile::{Engine, Profile, Retention, Target};
 use flux_core::progress::{Progress, Reporter};
 use flux_core::retention::Decision;
@@ -30,6 +33,8 @@ pub enum RepoError {
     #[error(transparent)]
     Vault(#[from] VaultError),
     #[error(transparent)]
+    Compat(#[from] CompatError),
+    #[error(transparent)]
     Password(#[from] PasswordError),
     #[error(transparent)]
     Target(#[from] target_check::TargetError),
@@ -48,6 +53,7 @@ impl RepoError {
             RepoError::Mirror(MirrorError::Cancelled)
                 | RepoError::Vault(VaultError::Cancelled)
                 | RepoError::Restore(RestoreError::Cancelled)
+                | RepoError::Compat(CompatError::Cancelled)
         )
     }
 }
@@ -66,6 +72,10 @@ pub enum AnyRepo {
         repo: Box<VaultRepo>,
         owner: Owner,
     },
+    /// Compatibility mode: plain folders written by rsync (local or SSH).
+    Rsync(Box<RsyncRepo>),
+    /// Compatibility mode: a Borg repository (local or SSH).
+    Borg(Box<BorgRepo>),
 }
 
 /// SFTP sessions kept per remote repository.
@@ -154,6 +164,40 @@ pub fn open_vault(
     }
 }
 
+/// A profile's Borg repository, with its passphrase when it's encrypted. `create`: a
+/// backup is about to create the repository if there is none (asks for a new
+/// passphrase); otherwise a missing repository is [`RepoError::Empty`].
+pub fn open_borg(
+    paths: &Paths,
+    id: &ProfileId,
+    profile: &Profile,
+    create: bool,
+    ask: Option<Ask<'_>>,
+) -> Result<BorgRepo, RepoError> {
+    let batch = ask.is_none();
+    let bare = BorgRepo::for_profile(paths, id, profile, None, batch)?;
+    let exists = bare.exists();
+    if !exists && !create {
+        return Err(RepoError::Empty(id.to_string()));
+    }
+    let passphrase = match profile.password_source() {
+        Some(_) => Some(password::obtain(
+            id,
+            profile,
+            if exists {
+                Purpose::Open
+            } else {
+                Purpose::Create
+            },
+            ask,
+        )?),
+        None => None,
+    };
+    Ok(BorgRepo::for_profile(
+        paths, id, profile, passphrase, batch,
+    )?)
+}
+
 /// What prune did, in engine-neutral terms.
 #[derive(Debug, Serialize)]
 pub struct PruneSummary {
@@ -166,7 +210,7 @@ pub struct PruneSummary {
     pub dry_run: bool,
 }
 
-type Entries<'a> = Box<dyn Iterator<Item = Result<Entry, RepoError>> + Send + 'a>;
+pub type Entries<'a> = Box<dyn Iterator<Item = Result<Entry, RepoError>> + Send + 'a>;
 
 impl AnyRepo {
     /// Open the existing backups of a profile. `ask: None` means nobody can be prompted
@@ -197,6 +241,16 @@ impl AnyRepo {
                 repo: Box::new(open_vault(paths, id, profile, false, ask)?),
                 owner: owner_for(id),
             }),
+            (Engine::Rsync, _) => {
+                match RsyncRepo::open_profile(paths, id, profile, ask.is_none()) {
+                    Ok(r) => Ok(AnyRepo::Rsync(Box::new(r))),
+                    Err(CompatError::NoRepository(_)) => Err(RepoError::Empty(id.to_string())),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            (Engine::Borg, _) => Ok(AnyRepo::Borg(Box::new(open_borg(
+                paths, id, profile, false, ask,
+            )?))),
         }
     }
 
@@ -204,6 +258,8 @@ impl AnyRepo {
         match self {
             AnyRepo::Mirror(_) | AnyRepo::MirrorRemote(_) => Engine::Mirror,
             AnyRepo::Vault { .. } => Engine::Vault,
+            AnyRepo::Rsync(_) => Engine::Rsync,
+            AnyRepo::Borg(_) => Engine::Borg,
         }
     }
 
@@ -212,6 +268,8 @@ impl AnyRepo {
             AnyRepo::Mirror(r) => r.snapshots()?,
             AnyRepo::MirrorRemote(r) => r.snapshots()?,
             AnyRepo::Vault { repo, owner } => repo.snapshots(owner)?,
+            AnyRepo::Rsync(r) => r.snapshots()?,
+            AnyRepo::Borg(r) => r.snapshots()?,
         })
     }
 
@@ -220,6 +278,8 @@ impl AnyRepo {
             AnyRepo::Mirror(r) => r.find(spec)?,
             AnyRepo::MirrorRemote(r) => r.find(spec)?,
             AnyRepo::Vault { repo, owner } => repo.find(owner, spec)?,
+            AnyRepo::Rsync(r) => r.find(spec)?,
+            AnyRepo::Borg(r) => r.find(spec)?,
         })
     }
 
@@ -240,6 +300,8 @@ impl AnyRepo {
                 let v = flux_vault::entries_of(repo, &snap.id)?;
                 Ok(Box::new(v.into_iter().map(Ok)))
             }
+            AnyRepo::Rsync(r) => Ok(Box::new(r.entries(snap)?.into_iter().map(Ok))),
+            AnyRepo::Borg(r) => Ok(Box::new(r.entries(snap)?.into_iter().map(Ok))),
         }
     }
 
@@ -266,6 +328,25 @@ impl AnyRepo {
                 let _lock = repo.lock(false)?;
                 let source = flux_vault::VaultSource::new(repo, &req.snapshot.id)?;
                 flux_fs::restore::restore(&source, req, progress, report).map_err(map)
+            }
+            AnyRepo::Rsync(r) => {
+                let source = RsyncSource::new(r, req.snapshot);
+                flux_fs::restore::restore(&source, req, progress, report).map_err(map)
+            }
+            AnyRepo::Borg(r) => {
+                let staging = req.to.clone().unwrap_or_else(|| r.staging_dir().to_owned());
+                let source = BorgSource::prepare(
+                    r,
+                    req.snapshot,
+                    &req.paths,
+                    &staging,
+                    req.dry_run,
+                    progress,
+                    report,
+                )?;
+                let out = flux_fs::restore::restore(&source, req, progress, report).map_err(map);
+                drop(source);
+                out
             }
         }
     }
@@ -301,6 +382,11 @@ impl AnyRepo {
                 repo.write_record(&rec)?;
                 Ok(rec.meta)
             }
+            AnyRepo::Rsync(r) => {
+                let _l = r.lock()?;
+                Ok(r.update_meta(id, apply)?)
+            }
+            AnyRepo::Borg(r) => Ok(r.update_meta(id, apply)?),
         }
     }
 
@@ -326,6 +412,14 @@ impl AnyRepo {
             AnyRepo::Vault { repo, .. } => {
                 Ok(Some(flux_vault::gc::delete(repo, ids, report)?.bytes_freed))
             }
+            AnyRepo::Rsync(r) => {
+                let _l = r.lock()?;
+                for id in ids {
+                    r.delete_snapshot(id)?;
+                }
+                Ok(None)
+            }
+            AnyRepo::Borg(r) => Ok(r.delete(ids, report)?),
         }
     }
 
@@ -372,6 +466,29 @@ impl AnyRepo {
                     dry_run,
                 })
             }
+            AnyRepo::Borg(r) => {
+                let p = flux_compat::borg::prune_repo(r, policy, dry_run, report)?;
+                Ok(PruneSummary {
+                    decisions: p.decisions,
+                    removed: p.removed,
+                    removed_for_space: p.removed_for_space,
+                    space_floor_unmet: p.space_floor_unmet,
+                    bytes_freed: None,
+                    dry_run,
+                })
+            }
+            AnyRepo::Rsync(r) => {
+                let _l = r.lock()?;
+                let p = flux_compat::rsync::prune_locked(r, policy, dry_run, report)?;
+                Ok(PruneSummary {
+                    decisions: p.decisions,
+                    removed: p.removed,
+                    removed_for_space: p.removed_for_space,
+                    space_floor_unmet: p.space_floor_unmet,
+                    bytes_freed: None,
+                    dry_run,
+                })
+            }
         }
     }
 
@@ -394,6 +511,8 @@ impl AnyRepo {
                     warnings: c.warnings,
                 })
             }
+            AnyRepo::Rsync(r) => Ok(flux_compat::rsync::check(r, read_data, progress)?),
+            AnyRepo::Borg(r) => Ok(flux_compat::borg::check(r, read_data, progress)?),
         }
     }
 
@@ -405,6 +524,8 @@ impl AnyRepo {
             AnyRepo::Vault { repo, .. } => {
                 format!("{} (snapshot {})", repo.backend().describe(), snap.id)
             }
+            AnyRepo::Rsync(r) => r.snapshot_location(&snap.id),
+            AnyRepo::Borg(r) => format!("{}::{}", r.describe(), snap.id),
         }
     }
 
@@ -433,6 +554,8 @@ pub fn scan_live(
                     let root = vault_root(profile);
                     vec![root.clone(), root.with_file_name("flux-backup")]
                 }
+                (Engine::Rsync, _) => flux_compat::rsync::never_paths(profile),
+                (Engine::Borg, _) => flux_compat::borg::never_paths(profile),
                 _ => Vec::new(),
             };
             let pool = flux_fs::scan::thread_pool(profile)?;

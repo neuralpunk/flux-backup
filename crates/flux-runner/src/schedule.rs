@@ -99,11 +99,39 @@ impl Systemd {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     }
 
-    fn property(&self, unit: &str, prop: &str) -> Option<String> {
-        self.run(&["show", unit, "-p", prop, "--value"])
-            .ok()
-            .filter(|v| !v.is_empty() && v != "n/a")
+    /// Several properties of a unit in one `systemctl show` (one process, not one per
+    /// property). Timestamps come as seconds since the epoch (`--timestamp=unix`, systemd
+    /// 251+): readable everywhere, and [`display_time`] formats them for people. Empty and
+    /// `n/a` values are left out.
+    fn properties(&self, unit: &str, props: &[&str]) -> std::collections::HashMap<String, String> {
+        let mut args = vec!["show", unit, "--timestamp=unix"];
+        for p in props {
+            args.extend(["-p", p]);
+        }
+        parse_properties(&self.run(&args).unwrap_or_default())
     }
+}
+
+/// `Key=Value` lines of `systemctl show`, without empty or `n/a` values.
+fn parse_properties(out: &str) -> std::collections::HashMap<String, String> {
+    out.lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(_, v)| !v.is_empty() && *v != "n/a")
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// An instant as systemd shows it to people: "Mon 2026-11-09 00:00:00 CST".
+fn display_time(t: jiff::Timestamp) -> String {
+    t.to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%a %Y-%m-%d %H:%M:%S %Z")
+        .to_string()
+}
+
+/// `@1794204000` (systemctl's `--timestamp=unix` format) as an instant.
+fn parse_unix_timestamp(v: &str) -> Option<jiff::Timestamp> {
+    let secs: i64 = v.trim().strip_prefix('@')?.parse().ok()?;
+    jiff::Timestamp::from_second(secs).ok()
 }
 
 pub fn service_name(id: &ProfileId) -> String {
@@ -482,7 +510,10 @@ pub struct ScheduleStatus {
     /// Installed units differ from what the profile asks for.
     pub out_of_date: bool,
     pub timer_active: bool,
+    /// When the timer fires next, as systemd shows it (for people).
     pub next_run: Option<String>,
+    /// The same instant, machine-readable (for the app).
+    pub next_run_at: Option<jiff::Timestamp>,
     pub last_trigger: Option<String>,
 }
 
@@ -509,22 +540,29 @@ pub fn status(sd: &Systemd, id: &ProfileId, p: &Profile, env: &UnitEnv) -> Sched
     }) || (wanted.is_empty() && installed_any);
     let timer = timer_name(id);
     let has_timer = sd.unit_dir.join(&timer).exists();
+    let props = if has_timer {
+        sd.properties(
+            &timer,
+            &["ActiveState", "NextElapseUSecRealtime", "LastTriggerUSec"],
+        )
+    } else {
+        Default::default()
+    };
+    let next = props
+        .get("NextElapseUSecRealtime")
+        .and_then(|v| parse_unix_timestamp(v));
     ScheduleStatus {
         profile: id.to_string(),
         schedule: summary(p),
         installed: installed_any,
         out_of_date,
-        timer_active: has_timer && sd.property(&timer, "ActiveState").as_deref() == Some("active"),
-        next_run: if has_timer {
-            sd.property(&timer, "NextElapseUSecRealtime")
-        } else {
-            None
-        },
-        last_trigger: if has_timer {
-            sd.property(&timer, "LastTriggerUSec")
-        } else {
-            None
-        },
+        timer_active: props.get("ActiveState").is_some_and(|v| v == "active"),
+        next_run: next.map(display_time),
+        next_run_at: next,
+        last_trigger: props
+            .get("LastTriggerUSec")
+            .and_then(|v| parse_unix_timestamp(v))
+            .map(display_time),
     }
 }
 
@@ -544,6 +582,31 @@ pub fn linger_enabled() -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_systemctl_show() {
+        let p = parse_properties(
+            "ActiveState=active\nNextElapseUSecRealtime=@1794204000\nLastTriggerUSec=n/a\nEmpty=\n",
+        );
+        assert_eq!(p.get("ActiveState").map(String::as_str), Some("active"));
+        assert_eq!(
+            p.get("NextElapseUSecRealtime")
+                .and_then(|v| parse_unix_timestamp(v))
+                .map(|t| t.as_second()),
+            Some(1_794_204_000)
+        );
+        assert!(!p.contains_key("LastTriggerUSec") && !p.contains_key("Empty"));
+    }
+
+    #[test]
+    fn parses_unix_timestamps() {
+        assert_eq!(
+            parse_unix_timestamp("@1794204000\n").map(|t| t.as_second()),
+            Some(1_794_204_000)
+        );
+        assert_eq!(parse_unix_timestamp("Mon 2026-11-09 00:00:00 CST"), None);
+        assert_eq!(parse_unix_timestamp(""), None);
+    }
     use flux_core::HumanDuration;
 
     fn env() -> UnitEnv {

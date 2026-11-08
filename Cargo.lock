@@ -1351,18 +1351,20 @@ dependencies = [
 
 [[package]]
 name = "flux-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
  "clap_mangen",
  "ctrlc",
+ "flux-compat",
  "flux-core",
  "flux-fs",
  "flux-mirror",
  "flux-mount",
  "flux-runner",
+ "flux-service",
  "flux-transport",
  "flux-vault",
  "globset",
@@ -1377,8 +1379,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-compat"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "flux-core",
+ "flux-fs",
+ "flux-mirror",
+ "flux-transport",
+ "getrandom 0.4.3",
+ "ignore",
+ "jiff",
+ "rayon",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.2.0+spec-1.1.0",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "flux-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "humantime",
  "ignore",
@@ -1394,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1410,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1426,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "flux-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1439,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mirror"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1461,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mount"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flux-core",
  "flux-fs",
@@ -1475,8 +1500,9 @@ dependencies = [
 
 [[package]]
 name = "flux-runner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "flux-compat",
  "flux-core",
  "flux-fs",
  "flux-mirror",
@@ -1490,6 +1516,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "toml 1.2.0+spec-1.1.0",
  "tracing",
  "zbus",
  "zeroize",
@@ -1497,13 +1524,15 @@ dependencies = [
 
 [[package]]
 name = "flux-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "flux-compat",
  "flux-core",
  "flux-fs",
  "flux-runner",
  "flux-transport",
  "flux-vault",
+ "globset",
  "jiff",
  "rustix",
  "serde",
@@ -1515,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "flux-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flux-core",
  "getrandom 0.4.3",
@@ -1529,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",

@@ -82,6 +82,10 @@ pub struct RunRecord {
     pub warnings: u64,
     #[serde(default)]
     pub hooks: Vec<HookRun>,
+    /// Free space where the backups go, after the run (local targets): the history the
+    /// space forecast is made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_after: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,19 +212,83 @@ fn rotate_event_files(dir: &Path) {
 }
 
 /// The last `n` runs of a profile, newest first.
+///
+/// Reads the history backwards from its end and stops after `n` records, so asking for the
+/// latest run (the sidebar does, for every backup) costs one small read, not a parse of the
+/// whole file.
 pub fn recent_runs(paths: &Paths, id: &ProfileId, n: usize) -> Vec<RunRecord> {
     let path = profile_log_dir(paths, id).join("runs.jsonl");
     let Ok(f) = File::open(path) else {
         return Vec::new();
     };
-    let mut v: Vec<RunRecord> = BufReader::new(f)
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|l| serde_json::from_str(&l).ok())
-        .collect();
-    v.reverse();
-    v.truncate(n);
-    v
+    let mut out = Vec::new();
+    for line in TailLines::new(f) {
+        if out.len() >= n {
+            break;
+        }
+        if let Ok(r) = serde_json::from_slice(&line) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The lines of a file, last first, read in blocks from the end.
+struct TailLines {
+    file: File,
+    /// Bytes not read yet: `0..pos`.
+    pos: u64,
+    /// A partial line carried over from the block read before (it continues the next one).
+    carry: Vec<u8>,
+    ready: Vec<Vec<u8>>,
+}
+
+impl TailLines {
+    const BLOCK: u64 = 64 * 1024;
+
+    fn new(file: File) -> Self {
+        let pos = file.metadata().map_or(0, |m| m.len());
+        Self {
+            file,
+            pos,
+            carry: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+}
+
+impl Iterator for TailLines {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        loop {
+            if let Some(l) = self.ready.pop() {
+                return Some(l);
+            }
+            if self.pos == 0 {
+                let last = std::mem::take(&mut self.carry);
+                return (!last.is_empty()).then_some(last);
+            }
+            let len = Self::BLOCK.min(self.pos);
+            self.pos -= len;
+            let mut block = vec![0u8; len as usize];
+            if self.file.read_exact_at(&mut block, self.pos).is_err() {
+                self.pos = 0;
+                self.carry.clear();
+                return None;
+            }
+            block.extend_from_slice(&std::mem::take(&mut self.carry));
+            let mut parts = block.split(|&b| b == b'\n');
+            // The first part may continue in the block before this one.
+            self.carry = parts.next().unwrap_or_default().to_vec();
+            // Oldest first here; `ready` pops the newest.
+            self.ready = parts
+                .filter(|l| !l.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect();
+        }
+    }
 }
 
 /// The events of one run (empty if its file was rotated away).
@@ -237,6 +305,29 @@ pub fn run_events(paths: &Paths, id: &ProfileId, run_id: &str) -> Vec<LoggedEven
         .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str(&l).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_cross_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        // Lines longer than a block, and a file without a final newline.
+        let long = "x".repeat(150_000);
+        std::fs::write(&p, format!("one\n{long}\n\nthree\nfour")).unwrap();
+        let lines: Vec<String> = TailLines::new(File::open(&p).unwrap())
+            .map(|l| String::from_utf8(l).unwrap())
+            .collect();
+        assert_eq!(
+            lines,
+            vec!["four".to_owned(), "three".into(), long, "one".into()]
+        );
+        std::fs::write(&p, "").unwrap();
+        assert_eq!(TailLines::new(File::open(&p).unwrap()).count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +348,7 @@ mod tests {
             stats: None,
             warnings: 0,
             hooks: vec![],
+            free_after: None,
         }
     }
 

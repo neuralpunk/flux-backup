@@ -24,16 +24,43 @@ pub struct ScanConfig<'a> {
     pub xattrs: XattrPolicy,
     /// Hash every regular file (checksum change detection).
     pub hash: bool,
+    /// Only count (`ScanResult::counts`): keep no entries (a size estimate needn't hold a
+    /// list of every file in memory).
+    pub count_only: bool,
     pub progress: &'a Progress,
     pub report: Reporter<'a>,
 }
 
 pub struct ScanResult {
-    /// Sorted by path, no duplicates.
+    /// Sorted by path, no duplicates. Empty with [`ScanConfig::count_only`].
     pub entries: Vec<Entry>,
+    /// What was found: files (and other non-folders), folders, and the files' bytes.
+    pub counts: ScanCounts,
     pub errors: Vec<FileError>,
     /// Sources that did not exist.
     pub missing_sources: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounts {
+    /// Regular files, links and other non-folders.
+    pub files: u64,
+    pub folders: u64,
+    /// Bytes in regular files.
+    pub bytes: u64,
+}
+
+impl ScanCounts {
+    fn add(&mut self, e: &Entry) {
+        match e.kind {
+            Kind::File => {
+                self.files += 1;
+                self.bytes += e.size;
+            }
+            Kind::Dir => self.folders += 1,
+            _ => self.files += 1,
+        }
+    }
 }
 
 /// Drop sources that lie inside other sources, and sort.
@@ -67,6 +94,8 @@ fn lexical_normalize(p: &Path) -> PathBuf {
 struct Ctx<'a> {
     cfg: &'a ScanConfig<'a>,
     out: Mutex<Vec<Entry>>,
+    /// With `count_only`: what was found, instead of `out`.
+    counts: Mutex<ScanCounts>,
     errors: Mutex<Vec<FileError>>,
     /// (dev, ino) of walked directories; only tracked when links may be followed, to stop
     /// a link to an ancestor from looping forever.
@@ -74,6 +103,21 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Keep `entries` (or, counting only, just count them).
+    fn keep(&self, entries: &mut Vec<Entry>) {
+        if self.cfg.count_only {
+            let mut c = ScanCounts::default();
+            entries.iter().for_each(|e| c.add(e));
+            entries.clear();
+            let mut total = self.counts.lock().unwrap();
+            total.files += c.files;
+            total.folders += c.folders;
+            total.bytes += c.bytes;
+        } else {
+            self.out.lock().unwrap().append(entries);
+        }
+    }
+
     /// Record a directory as walked. Returns false if it was already walked.
     fn visit(&self, m: &fs::Metadata) -> bool {
         self.cfg.symlinks == SymlinkMode::Preserve
@@ -98,6 +142,7 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
     let ctx = Ctx {
         cfg,
         out: Mutex::new(Vec::new()),
+        counts: Mutex::new(ScanCounts::default()),
         errors: Mutex::new(Vec::new()),
         visited: Mutex::new(HashSet::new()),
     };
@@ -123,7 +168,7 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
         if let Ok(m) = fs::metadata(a)
             && let Some(e) = make_entry(&ctx, a, &m)
         {
-            ctx.out.lock().unwrap().push(e);
+            ctx.keep(&mut vec![e]);
         }
     }
 
@@ -152,7 +197,7 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
                 continue;
             };
             let is_dir = entry.kind == Kind::Dir;
-            ctx.out.lock().unwrap().push(entry);
+            ctx.keep(&mut vec![entry]);
             if is_dir && ctx.visit(&meta) {
                 let ctx = &ctx;
                 let root_dev = meta.dev();
@@ -164,8 +209,16 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
     let mut entries = ctx.out.into_inner().unwrap();
     entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     entries.dedup_by(|a, b| a.path == b.path);
+    let counts = if cfg.count_only {
+        ctx.counts.into_inner().unwrap()
+    } else {
+        let mut c = ScanCounts::default();
+        entries.iter().for_each(|e| c.add(e));
+        c
+    };
     ScanResult {
         entries,
+        counts,
         errors: ctx.errors.into_inner().unwrap(),
         missing_sources: missing,
     }
@@ -231,7 +284,6 @@ fn walk_dir<'s>(
             continue;
         };
         local.push(entry);
-        cfg.progress.scanned.fetch_add(1, Relaxed);
         // Don't descend into other filesystems (the mount point itself is kept). A directory
         // reached through a followed link is walked only if not walked before (no loops).
         let same_fs = !cfg.one_file_system || meta.dev() == root_dev;
@@ -239,7 +291,9 @@ fn walk_dir<'s>(
             scope.spawn(move |s| walk_dir(s, ctx, path, root, root_dev));
         }
     }
-    ctx.out.lock().unwrap().append(&mut local);
+    // One update per directory, not per entry (many threads, one counter).
+    cfg.progress.scanned.fetch_add(local.len() as u64, Relaxed);
+    ctx.keep(&mut local);
 }
 
 /// Apply the symlink policy. Returns the metadata to record and whether a link was followed.
@@ -360,6 +414,26 @@ pub fn scan_profile(
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<ScanResult, ProfileScanError> {
+    scan_profile_with(profile, never, false, progress, report)
+}
+
+/// [`scan_profile`] that only counts (`ScanResult::counts`), keeping no entries.
+pub fn count_profile(
+    profile: &flux_core::Profile,
+    never: &[PathBuf],
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<ScanResult, ProfileScanError> {
+    scan_profile_with(profile, never, true, progress, report)
+}
+
+fn scan_profile_with(
+    profile: &flux_core::Profile,
+    never: &[PathBuf],
+    count_only: bool,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<ScanResult, ProfileScanError> {
     let mut filter = Filter::new(&profile.sources, flux_core::sys::home_dir().as_deref())?;
     for n in never {
         filter.add_hard_exclude(n);
@@ -371,7 +445,8 @@ pub fn scan_profile(
         one_file_system: profile.sources.one_file_system,
         symlinks: opts.symlinks,
         xattrs: xattr_policy(profile),
-        hash: opts.change_detection == flux_core::profile::ChangeDetection::Checksum,
+        hash: !count_only && opts.change_detection == flux_core::profile::ChangeDetection::Checksum,
+        count_only,
         progress,
         report,
     });
@@ -386,6 +461,30 @@ pub fn scan_profile(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn counting_only_matches_a_full_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("a/one.txt"), "12345").unwrap();
+        fs::write(src.join("a/b/two.txt"), "123").unwrap();
+        std::os::unix::fs::symlink("one.txt", src.join("a/link")).unwrap();
+        let profile = flux_core::Profile::new(
+            "t",
+            flux_core::profile::Target::Local {
+                path: dir.path().join("tgt"),
+                fs_uuid: None,
+            },
+            vec![src.clone()],
+        );
+        let p = Progress::new();
+        let full = scan_profile(&profile, &[], &p, &flux_core::progress::silent).unwrap();
+        let counted = count_profile(&profile, &[], &p, &flux_core::progress::silent).unwrap();
+        assert!(counted.entries.is_empty());
+        assert_eq!(counted.counts, full.counts);
+        assert_eq!((full.counts.files, full.counts.bytes), (3, 8));
+    }
     use super::*;
 
     #[test]

@@ -1,0 +1,894 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-08T12:04:18+00:00",
+  "title": "Design System: Flux Backup",
+  "extensions": {
+    "colorMeta": {
+      "shell": {
+        "role": "neutral",
+        "displayName": "Shell Graphite",
+        "canonical": "#15181d",
+        "tonalRamp": [
+          "oklch(15% 0.005 261)",
+          "oklch(26% 0.007 261)",
+          "oklch(38% 0.009 261)",
+          "oklch(49% 0.010 261)",
+          "oklch(61% 0.010 261)",
+          "oklch(72% 0.009 261)",
+          "oklch(84% 0.007 261)",
+          "oklch(95% 0.005 261)"
+        ]
+      },
+      "view": {
+        "role": "neutral",
+        "displayName": "View Graphite",
+        "canonical": "#1c1e22",
+        "tonalRamp": [
+          "oklch(15% 0.004 264)",
+          "oklch(26% 0.005 264)",
+          "oklch(38% 0.006 264)",
+          "oklch(49% 0.008 264)",
+          "oklch(61% 0.008 264)",
+          "oklch(72% 0.006 264)",
+          "oklch(84% 0.005 264)",
+          "oklch(95% 0.004 264)"
+        ]
+      },
+      "group": {
+        "role": "neutral",
+        "displayName": "Group Graphite",
+        "canonical": "#25272c",
+        "tonalRamp": [
+          "oklch(15% 0.005 268)",
+          "oklch(26% 0.006 268)",
+          "oklch(38% 0.008 268)",
+          "oklch(49% 0.009 268)",
+          "oklch(61% 0.009 268)",
+          "oklch(72% 0.008 268)",
+          "oklch(84% 0.006 268)",
+          "oklch(95% 0.005 268)"
+        ]
+      },
+      "control": {
+        "role": "neutral",
+        "displayName": "Control Graphite",
+        "canonical": "#2f3238",
+        "tonalRamp": [
+          "oklch(15% 0.006 264)",
+          "oklch(26% 0.007 264)",
+          "oklch(38% 0.009 264)",
+          "oklch(49% 0.011 264)",
+          "oklch(61% 0.011 264)",
+          "oklch(72% 0.009 264)",
+          "oklch(84% 0.007 264)",
+          "oklch(95% 0.006 264)"
+        ]
+      },
+      "shell-hover": {
+        "role": "neutral",
+        "displayName": "Shell Hover",
+        "canonical": "#1f232a",
+        "tonalRamp": [
+          "oklch(15% 0.007 262)",
+          "oklch(26% 0.009 262)",
+          "oklch(38% 0.011 262)",
+          "oklch(49% 0.013 262)",
+          "oklch(61% 0.013 262)",
+          "oklch(72% 0.011 262)",
+          "oklch(84% 0.009 262)",
+          "oklch(95% 0.007 262)"
+        ]
+      },
+      "track": {
+        "role": "neutral",
+        "displayName": "Track",
+        "canonical": "#3a3d44",
+        "tonalRamp": [
+          "oklch(15% 0.006 267)",
+          "oklch(26% 0.008 267)",
+          "oklch(38% 0.010 267)",
+          "oklch(49% 0.012 267)",
+          "oklch(61% 0.012 267)",
+          "oklch(72% 0.010 267)",
+          "oklch(84% 0.008 267)",
+          "oklch(95% 0.006 267)"
+        ]
+      },
+      "sep": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#34373d",
+        "tonalRamp": [
+          "oklch(15% 0.006 264)",
+          "oklch(26% 0.007 264)",
+          "oklch(38% 0.009 264)",
+          "oklch(49% 0.010 264)",
+          "oklch(61% 0.010 264)",
+          "oklch(72% 0.009 264)",
+          "oklch(84% 0.007 264)",
+          "oklch(95% 0.006 264)"
+        ]
+      },
+      "selected": {
+        "role": "neutral",
+        "displayName": "Selected Lift",
+        "canonical": "#2b3038",
+        "tonalRamp": [
+          "oklch(15% 0.008 260)",
+          "oklch(26% 0.010 260)",
+          "oklch(38% 0.013 260)",
+          "oklch(49% 0.015 260)",
+          "oklch(61% 0.015 260)",
+          "oklch(72% 0.013 260)",
+          "oklch(84% 0.010 260)",
+          "oklch(95% 0.008 260)"
+        ]
+      },
+      "on-selected": {
+        "role": "neutral",
+        "displayName": "On Selected",
+        "canonical": "#eceef1",
+        "tonalRamp": [
+          "oklch(15% 0.002 258)",
+          "oklch(26% 0.003 258)",
+          "oklch(38% 0.004 258)",
+          "oklch(49% 0.004 258)",
+          "oklch(61% 0.004 258)",
+          "oklch(72% 0.004 258)",
+          "oklch(84% 0.003 258)",
+          "oklch(95% 0.002 258)"
+        ]
+      },
+      "fg": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#eceef1",
+        "tonalRamp": [
+          "oklch(15% 0.002 258)",
+          "oklch(26% 0.003 258)",
+          "oklch(38% 0.004 258)",
+          "oklch(49% 0.004 258)",
+          "oklch(61% 0.004 258)",
+          "oklch(72% 0.004 258)",
+          "oklch(84% 0.003 258)",
+          "oklch(95% 0.002 258)"
+        ]
+      },
+      "fg-2": {
+        "role": "neutral",
+        "displayName": "Secondary Ink",
+        "canonical": "#b8bcc3",
+        "tonalRamp": [
+          "oklch(15% 0.005 262)",
+          "oklch(26% 0.007 262)",
+          "oklch(38% 0.008 262)",
+          "oklch(49% 0.010 262)",
+          "oklch(61% 0.010 262)",
+          "oklch(72% 0.008 262)",
+          "oklch(84% 0.007 262)",
+          "oklch(95% 0.005 262)"
+        ]
+      },
+      "fg-muted": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#949aa4",
+        "tonalRamp": [
+          "oklch(15% 0.008 261)",
+          "oklch(26% 0.010 261)",
+          "oklch(38% 0.013 261)",
+          "oklch(49% 0.015 261)",
+          "oklch(61% 0.015 261)",
+          "oklch(72% 0.013 261)",
+          "oklch(84% 0.010 261)",
+          "oklch(95% 0.008 261)"
+        ]
+      },
+      "primary": {
+        "role": "primary",
+        "displayName": "Calm Adwaita Blue",
+        "canonical": "#78b0f0",
+        "tonalRamp": [
+          "oklch(15% 0.054 253)",
+          "oklch(26% 0.070 253)",
+          "oklch(38% 0.086 253)",
+          "oklch(49% 0.102 253)",
+          "oklch(61% 0.102 253)",
+          "oklch(72% 0.086 253)",
+          "oklch(84% 0.070 253)",
+          "oklch(95% 0.054 253)"
+        ]
+      },
+      "on-primary": {
+        "role": "primary",
+        "displayName": "On Blue",
+        "canonical": "#0b1626",
+        "tonalRamp": [
+          "oklch(15% 0.018 258)",
+          "oklch(26% 0.023 258)",
+          "oklch(38% 0.028 258)",
+          "oklch(49% 0.034 258)",
+          "oklch(61% 0.034 258)",
+          "oklch(72% 0.028 258)",
+          "oklch(84% 0.023 258)",
+          "oklch(95% 0.018 258)"
+        ]
+      },
+      "brand": {
+        "role": "primary",
+        "displayName": "Brand Blue",
+        "canonical": "#7abdff",
+        "tonalRamp": [
+          "oklch(15% 0.057 249)",
+          "oklch(26% 0.074 249)",
+          "oklch(38% 0.091 249)",
+          "oklch(49% 0.108 249)",
+          "oklch(61% 0.108 249)",
+          "oklch(72% 0.091 249)",
+          "oklch(84% 0.074 249)",
+          "oklch(95% 0.057 249)"
+        ]
+      },
+      "chart": {
+        "role": "primary",
+        "displayName": "Chart Blue",
+        "canonical": "#6aa6ea",
+        "tonalRamp": [
+          "oklch(15% 0.058 253)",
+          "oklch(26% 0.075 253)",
+          "oklch(38% 0.092 253)",
+          "oklch(49% 0.110 253)",
+          "oklch(61% 0.110 253)",
+          "oklch(72% 0.092 253)",
+          "oklch(84% 0.075 253)",
+          "oklch(95% 0.058 253)"
+        ]
+      },
+      "success": {
+        "role": "secondary",
+        "displayName": "Protected Green",
+        "canonical": "#72c79a",
+        "tonalRamp": [
+          "oklch(15% 0.052 159)",
+          "oklch(26% 0.068 159)",
+          "oklch(38% 0.083 159)",
+          "oklch(49% 0.098 159)",
+          "oklch(61% 0.098 159)",
+          "oklch(72% 0.083 159)",
+          "oklch(84% 0.068 159)",
+          "oklch(95% 0.052 159)"
+        ]
+      },
+      "warning": {
+        "role": "secondary",
+        "displayName": "Attention Amber",
+        "canonical": "#e7b65a",
+        "tonalRamp": [
+          "oklch(15% 0.061 81)",
+          "oklch(26% 0.078 81)",
+          "oklch(38% 0.096 81)",
+          "oklch(49% 0.114 81)",
+          "oklch(61% 0.114 81)",
+          "oklch(72% 0.096 81)",
+          "oklch(84% 0.078 81)",
+          "oklch(95% 0.061 81)"
+        ]
+      },
+      "danger": {
+        "role": "secondary",
+        "displayName": "Failure Red",
+        "canonical": "#ef8576",
+        "tonalRamp": [
+          "oklch(15% 0.065 29)",
+          "oklch(26% 0.084 29)",
+          "oklch(38% 0.104 29)",
+          "oklch(49% 0.123 29)",
+          "oklch(61% 0.123 29)",
+          "oklch(72% 0.104 29)",
+          "oklch(84% 0.084 29)",
+          "oklch(95% 0.065 29)"
+        ]
+      },
+      "seg-on": {
+        "role": "neutral",
+        "displayName": "Segment Lift",
+        "canonical": "#4a4e56",
+        "tonalRamp": [
+          "oklch(15% 0.007 264)",
+          "oklch(26% 0.009 264)",
+          "oklch(38% 0.011 264)",
+          "oklch(49% 0.013 264)",
+          "oklch(61% 0.013 264)",
+          "oklch(72% 0.011 264)",
+          "oklch(84% 0.009 264)",
+          "oklch(95% 0.007 264)"
+        ]
+      },
+      "shell-light": {
+        "role": "neutral",
+        "displayName": "Shell Graphite (light)",
+        "canonical": "#e4e8ee",
+        "tonalRamp": [
+          "oklch(15% 0.005 258)",
+          "oklch(26% 0.006 258)",
+          "oklch(38% 0.007 258)",
+          "oklch(49% 0.009 258)",
+          "oklch(61% 0.009 258)",
+          "oklch(72% 0.007 258)",
+          "oklch(84% 0.006 258)",
+          "oklch(95% 0.005 258)"
+        ]
+      },
+      "view-light": {
+        "role": "neutral",
+        "displayName": "View Graphite (light)",
+        "canonical": "#f6f7f9",
+        "tonalRamp": [
+          "oklch(15% 0.001 265)",
+          "oklch(26% 0.002 265)",
+          "oklch(38% 0.002 265)",
+          "oklch(49% 0.003 265)",
+          "oklch(61% 0.003 265)",
+          "oklch(72% 0.002 265)",
+          "oklch(84% 0.002 265)",
+          "oklch(95% 0.001 265)"
+        ]
+      },
+      "group-light": {
+        "role": "neutral",
+        "displayName": "Group Graphite (light)",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(26% 0.000 90)",
+          "oklch(38% 0.000 90)",
+          "oklch(49% 0.000 90)",
+          "oklch(61% 0.000 90)",
+          "oklch(72% 0.000 90)",
+          "oklch(84% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "control-light": {
+        "role": "neutral",
+        "displayName": "Control Graphite (light)",
+        "canonical": "#e9ecf0",
+        "tonalRamp": [
+          "oklch(15% 0.003 255)",
+          "oklch(26% 0.004 255)",
+          "oklch(38% 0.005 255)",
+          "oklch(49% 0.006 255)",
+          "oklch(61% 0.006 255)",
+          "oklch(72% 0.005 255)",
+          "oklch(84% 0.004 255)",
+          "oklch(95% 0.003 255)"
+        ]
+      },
+      "shell-hover-light": {
+        "role": "neutral",
+        "displayName": "Shell Hover (light)",
+        "canonical": "#d9dee6",
+        "tonalRamp": [
+          "oklch(15% 0.006 260)",
+          "oklch(26% 0.008 260)",
+          "oklch(38% 0.010 260)",
+          "oklch(49% 0.011 260)",
+          "oklch(61% 0.011 260)",
+          "oklch(72% 0.010 260)",
+          "oklch(84% 0.008 260)",
+          "oklch(95% 0.006 260)"
+        ]
+      },
+      "track-light": {
+        "role": "neutral",
+        "displayName": "Track (light)",
+        "canonical": "#dde1e7",
+        "tonalRamp": [
+          "oklch(15% 0.005 258)",
+          "oklch(26% 0.006 258)",
+          "oklch(38% 0.007 258)",
+          "oklch(49% 0.009 258)",
+          "oklch(61% 0.009 258)",
+          "oklch(72% 0.007 258)",
+          "oklch(84% 0.006 258)",
+          "oklch(95% 0.005 258)"
+        ]
+      },
+      "sep-light": {
+        "role": "neutral",
+        "displayName": "Hairline (light)",
+        "canonical": "#e2e5ea",
+        "tonalRamp": [
+          "oklch(15% 0.004 261)",
+          "oklch(26% 0.005 261)",
+          "oklch(38% 0.006 261)",
+          "oklch(49% 0.007 261)",
+          "oklch(61% 0.007 261)",
+          "oklch(72% 0.006 261)",
+          "oklch(84% 0.005 261)",
+          "oklch(95% 0.004 261)"
+        ]
+      },
+      "selected-light": {
+        "role": "neutral",
+        "displayName": "Selected Lift (light)",
+        "canonical": "#d3dae4",
+        "tonalRamp": [
+          "oklch(15% 0.008 257)",
+          "oklch(26% 0.010 257)",
+          "oklch(38% 0.012 257)",
+          "oklch(49% 0.015 257)",
+          "oklch(61% 0.015 257)",
+          "oklch(72% 0.012 257)",
+          "oklch(84% 0.010 257)",
+          "oklch(95% 0.008 257)"
+        ]
+      },
+      "on-selected-light": {
+        "role": "neutral",
+        "displayName": "On Selected (light)",
+        "canonical": "#17191d",
+        "tonalRamp": [
+          "oklch(15% 0.004 264)",
+          "oklch(26% 0.005 264)",
+          "oklch(38% 0.007 264)",
+          "oklch(49% 0.008 264)",
+          "oklch(61% 0.008 264)",
+          "oklch(72% 0.007 264)",
+          "oklch(84% 0.005 264)",
+          "oklch(95% 0.004 264)"
+        ]
+      },
+      "fg-light": {
+        "role": "neutral",
+        "displayName": "Ink (light)",
+        "canonical": "#17191d",
+        "tonalRamp": [
+          "oklch(15% 0.004 264)",
+          "oklch(26% 0.005 264)",
+          "oklch(38% 0.007 264)",
+          "oklch(49% 0.008 264)",
+          "oklch(61% 0.008 264)",
+          "oklch(72% 0.007 264)",
+          "oklch(84% 0.005 264)",
+          "oklch(95% 0.004 264)"
+        ]
+      },
+      "fg-2-light": {
+        "role": "neutral",
+        "displayName": "Secondary Ink (light)",
+        "canonical": "#3f444c",
+        "tonalRamp": [
+          "oklch(15% 0.007 260)",
+          "oklch(26% 0.010 260)",
+          "oklch(38% 0.012 260)",
+          "oklch(49% 0.014 260)",
+          "oklch(61% 0.014 260)",
+          "oklch(72% 0.012 260)",
+          "oklch(84% 0.010 260)",
+          "oklch(95% 0.007 260)"
+        ]
+      },
+      "fg-muted-light": {
+        "role": "neutral",
+        "displayName": "Muted Ink (light)",
+        "canonical": "#555c66",
+        "tonalRamp": [
+          "oklch(15% 0.009 257)",
+          "oklch(26% 0.012 257)",
+          "oklch(38% 0.014 257)",
+          "oklch(49% 0.017 257)",
+          "oklch(61% 0.017 257)",
+          "oklch(72% 0.014 257)",
+          "oklch(84% 0.012 257)",
+          "oklch(95% 0.009 257)"
+        ]
+      },
+      "primary-light": {
+        "role": "primary",
+        "displayName": "Calm Adwaita Blue (light)",
+        "canonical": "#2759a4",
+        "tonalRamp": [
+          "oklch(15% 0.065 259)",
+          "oklch(26% 0.084 259)",
+          "oklch(38% 0.104 259)",
+          "oklch(49% 0.123 259)",
+          "oklch(61% 0.123 259)",
+          "oklch(72% 0.104 259)",
+          "oklch(84% 0.084 259)",
+          "oklch(95% 0.065 259)"
+        ]
+      },
+      "on-primary-light": {
+        "role": "primary",
+        "displayName": "On Blue (light)",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(26% 0.000 90)",
+          "oklch(38% 0.000 90)",
+          "oklch(49% 0.000 90)",
+          "oklch(61% 0.000 90)",
+          "oklch(72% 0.000 90)",
+          "oklch(84% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "brand-light": {
+        "role": "primary",
+        "displayName": "Brand Blue (light)",
+        "canonical": "#2759a4",
+        "tonalRamp": [
+          "oklch(15% 0.065 259)",
+          "oklch(26% 0.084 259)",
+          "oklch(38% 0.104 259)",
+          "oklch(49% 0.123 259)",
+          "oklch(61% 0.123 259)",
+          "oklch(72% 0.104 259)",
+          "oklch(84% 0.084 259)",
+          "oklch(95% 0.065 259)"
+        ]
+      },
+      "chart-light": {
+        "role": "primary",
+        "displayName": "Chart Blue (light)",
+        "canonical": "#2759a4",
+        "tonalRamp": [
+          "oklch(15% 0.065 259)",
+          "oklch(26% 0.084 259)",
+          "oklch(38% 0.104 259)",
+          "oklch(49% 0.123 259)",
+          "oklch(61% 0.123 259)",
+          "oklch(72% 0.104 259)",
+          "oklch(84% 0.084 259)",
+          "oklch(95% 0.065 259)"
+        ]
+      },
+      "success-light": {
+        "role": "secondary",
+        "displayName": "Protected Green (light)",
+        "canonical": "#1b6e45",
+        "tonalRamp": [
+          "oklch(15% 0.050 157)",
+          "oklch(26% 0.065 157)",
+          "oklch(38% 0.080 157)",
+          "oklch(49% 0.095 157)",
+          "oklch(61% 0.095 157)",
+          "oklch(72% 0.080 157)",
+          "oklch(84% 0.065 157)",
+          "oklch(95% 0.050 157)"
+        ]
+      },
+      "warning-light": {
+        "role": "secondary",
+        "displayName": "Attention Amber (light)",
+        "canonical": "#7d5200",
+        "tonalRamp": [
+          "oklch(15% 0.049 74)",
+          "oklch(26% 0.064 74)",
+          "oklch(38% 0.079 74)",
+          "oklch(49% 0.093 74)",
+          "oklch(61% 0.093 74)",
+          "oklch(72% 0.079 74)",
+          "oklch(84% 0.064 74)",
+          "oklch(95% 0.049 74)"
+        ]
+      },
+      "danger-light": {
+        "role": "secondary",
+        "displayName": "Failure Red (light)",
+        "canonical": "#b3321f",
+        "tonalRamp": [
+          "oklch(15% 0.083 31)",
+          "oklch(26% 0.107 31)",
+          "oklch(38% 0.132 31)",
+          "oklch(49% 0.156 31)",
+          "oklch(61% 0.156 31)",
+          "oklch(72% 0.132 31)",
+          "oklch(84% 0.107 31)",
+          "oklch(95% 0.083 31)"
+        ]
+      },
+      "seg-on-light": {
+        "role": "neutral",
+        "displayName": "Segment Lift (light)",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(26% 0.000 90)",
+          "oklch(38% 0.000 90)",
+          "oklch(49% 0.000 90)",
+          "oklch(61% 0.000 90)",
+          "oklch(72% 0.000 90)",
+          "oklch(84% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "group-edge": {
+        "role": "neutral",
+        "displayName": "Group Edge",
+        "canonical": "transparent"
+      },
+      "group-edge-light": {
+        "role": "neutral",
+        "displayName": "Group Edge (light)",
+        "canonical": "rgb(0 0 6 / 0.09)"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The protection sentence on All backups."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page titles (.page-title); a backup's own sentence at 600."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Heading inside a group (.title)."
+      },
+      "dialog-title": {
+        "displayName": "Dialog title",
+        "purpose": "Title of a native dialog."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default text; sentences capped at 68ch."
+      },
+      "button": {
+        "displayName": "Button",
+        "purpose": "Buttons and segments; 650 on primary and danger-filled."
+      },
+      "group-title": {
+        "displayName": "Group title",
+        "purpose": "Heading above a grouped list (.group-title), fg-2."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Captions, row subtitles, tags; fg-muted."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Machine data: paths, sizes, counts, shortcuts; tabular."
+      }
+    },
+    "shadows": [
+      {
+        "name": "group-edge",
+        "value": "0 0 0 1px var(--c-group-edge)",
+        "purpose": "Edge of groups, lone rows, the view's top-left, dialogs and toasts; transparent in dark."
+      },
+      {
+        "name": "dialog",
+        "value": "0 24px 64px -16px rgb(0 0 0 / 0.55), 0 0 0 1px var(--c-group-edge)",
+        "purpose": "Native dialogs over a 55% black backdrop."
+      },
+      {
+        "name": "menu",
+        "value": "0 18px 48px -12px rgb(0 0 0 / 0.6)",
+        "purpose": "Context and button menus, with a 1px fg ring at 8%."
+      },
+      {
+        "name": "toast",
+        "value": "0 12px 32px -12px rgb(0 0 0 / 0.5), 0 0 0 1px var(--c-group-edge)",
+        "purpose": "Toasts, bottom right."
+      },
+      {
+        "name": "segment-on",
+        "value": "0 1px 2px rgb(0 0 0 / 0.22), 0 0 0 1px rgb(0 0 0 / 0.04)",
+        "purpose": "The chosen segment of a segmented control."
+      },
+      {
+        "name": "switch-knob",
+        "value": "0 1px 2px rgb(0 0 0 / 0.3)",
+        "purpose": "The switch knob."
+      },
+      {
+        "name": "menu-target",
+        "value": "inset 0 0 0 1.5px color-mix(in oklab, var(--c-primary) 60%, transparent)",
+        "purpose": "The item whose context menu is open."
+      }
+    ],
+    "motion": [
+      {
+        "name": "color",
+        "value": "120ms",
+        "purpose": "Background, colour and filter transitions on buttons, rows, segments, inputs."
+      },
+      {
+        "name": "switch",
+        "value": "150ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Switch track colour and knob slide."
+      },
+      {
+        "name": "progress",
+        "value": "width 300ms ease-out",
+        "purpose": "Progress bar fill (motion-safe only)."
+      },
+      {
+        "name": "running-spin",
+        "value": "spin 2.4s linear infinite",
+        "purpose": "The running state glyph."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation: none; transition: none",
+        "purpose": "Everything off under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "all-backups-row-md",
+        "value": "760px (container)",
+        "purpose": "Last good copy and Next join as a 200px column."
+      },
+      {
+        "name": "all-backups-row-lg",
+        "value": "1020px (container)",
+        "purpose": "History strip moves onto the first line; path gets its own line."
+      },
+      {
+        "name": "window-min",
+        "value": "900px",
+        "purpose": "Minimum window width (900x600)."
+      }
+    ],
+    "layout": {
+      "titlebar": "48px",
+      "sidebar": "264px",
+      "viewMaxWidth": {
+        "all-backups": "1080px",
+        "backup": "1180px",
+        "preferences": "680px",
+        "form-header": "760px"
+      },
+      "historyCell": "13px",
+      "historyRamp": "4px (<=1 MiB) to 11px (>=10 GiB), log10, whole pixels"
+    }
+  },
+  "components": [
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "The neutral default button; every action except the view's one primary.",
+      "html": "<button class=\"ds-btn\">Pause schedules</button>",
+      "css": ".ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border:0;border-radius:8px;font:550 13.5px/1 'Inter Variable',Inter,'Adwaita Sans',Cantarell,system-ui,sans-serif;white-space:nowrap;transition:background-color 120ms,color 120ms,filter 120ms;background:var(--c-surface-3, #2f3238);color:var(--c-fg, #eceef1);} .ds-btn:hover{background:var(--c-track, #3a3d44);} .ds-btn:active{filter:brightness(.94);} .ds-btn:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one blue button of a view.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 3.5v9l7-4.5z\"/></svg> Back up all now</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border:0;border-radius:8px;font:550 13.5px/1 'Inter Variable',Inter,'Adwaita Sans',Cantarell,system-ui,sans-serif;white-space:nowrap;transition:background-color 120ms,color 120ms,filter 120ms;font-weight:650;background:var(--c-primary, #78b0f0);color:var(--c-on-primary, #0b1626);} .ds-btn-primary:hover{filter:brightness(1.08);} .ds-btn-primary:active{filter:brightness(.94);} .ds-btn-primary:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "A quieter secondary action beside a default button.",
+      "html": "<button class=\"ds-btn-ghost\">Fix its settings</button>",
+      "css": ".ds-btn-ghost{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border:0;border-radius:8px;font:550 13.5px/1 'Inter Variable',Inter,'Adwaita Sans',Cantarell,system-ui,sans-serif;white-space:nowrap;transition:background-color 120ms,color 120ms,filter 120ms;background:transparent;color:var(--c-fg-2, #b8bcc3);} .ds-btn-ghost:hover{background:var(--c-surface-3, #2f3238);color:var(--c-fg, #eceef1);} .ds-btn-ghost:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger-filled",
+      "description": "Confirm button of a destructive dialog only.",
+      "html": "<button class=\"ds-btn-danger\">Delete backup</button>",
+      "css": ".ds-btn-danger{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border:0;border-radius:8px;font:550 13.5px/1 'Inter Variable',Inter,'Adwaita Sans',Cantarell,system-ui,sans-serif;white-space:nowrap;transition:background-color 120ms,color 120ms,filter 120ms;font-weight:650;background:var(--c-danger, #ef8576);color:var(--c-surface-1, #1c1e22);} .ds-btn-danger:hover{filter:brightness(1.08);} .ds-btn-danger:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Filled control, no stroke; blue outline on focus.",
+      "html": "<input class=\"ds-input\" placeholder=\"Name this backup\" />",
+      "css": ".ds-input{height:36px;width:260px;border:0;border-radius:8px;background:var(--c-surface-3, #2f3238);padding:0 12px;font:400 14px 'Inter Variable',Inter,system-ui,sans-serif;color:var(--c-fg, #eceef1);caret-color:var(--c-primary, #78b0f0);transition:background-color 120ms;} .ds-input::placeholder{color:var(--c-fg-muted, #949aa4);} .ds-input:focus{outline:2px solid var(--c-primary, #78b0f0);outline-offset:-1px;}"
+    },
+    {
+      "name": "Tag",
+      "kind": "chip",
+      "refersTo": "tag",
+      "description": "Outlined descriptor (where, when, how): information, never a control.",
+      "html": "<span class=\"ds-tag\">Every hour</span> <span class=\"ds-tag ds-tag-warn\">Runs as root</span>",
+      "css": ".ds-tag{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:6px;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--c-fg, #eceef1) 16%,transparent);color:var(--c-fg-2, #b8bcc3);font:400 12.5px/1 'Inter Variable',Inter,system-ui,sans-serif;white-space:nowrap;} .ds-tag-warn{box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--c-warning, #e7b65a) 45%,transparent);color:var(--c-warning, #e7b65a);}"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "nav",
+      "refersTo": "segmented",
+      "description": "Adwaita toggle group; the chosen segment is a neutral lift, never blue.",
+      "html": "<div class=\"ds-seg\" role=\"tablist\"><button role=\"tab\" aria-selected=\"true\">Overview</button><button role=\"tab\" aria-selected=\"false\">Snapshots</button><button role=\"tab\" aria-selected=\"false\">Activity</button></div>",
+      "css": ".ds-seg{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--c-surface-3, #2f3238);} .ds-seg>button{height:30px;padding:0 14px;border:0;border-radius:7px;background:transparent;font:550 13.5px 'Inter Variable',Inter,system-ui,sans-serif;color:var(--c-fg-2, #b8bcc3);transition:background-color 120ms,color 120ms;} .ds-seg>button:hover:not([aria-selected=true]){color:var(--c-fg, #eceef1);background:color-mix(in oklab,var(--c-fg, #eceef1) 6%,transparent);} .ds-seg>button[aria-selected=true]{background:var(--c-seg-on, #4a4e56);color:var(--c-fg, #eceef1);box-shadow:0 1px 2px rgb(0 0 0/.22),0 0 0 1px rgb(0 0 0/.04);} .ds-seg>button:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Grouped List",
+      "kind": "card",
+      "refersTo": "group",
+      "description": "One rounded group, rows split by hairlines; interactive rows lift and end in a chevron.",
+      "html": "<div class=\"ds-rows\"><button class=\"ds-row\"><span class=\"ds-glyph ds-ok\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m3.5 8.5 3 3 6-7\"/></svg></span><span class=\"ds-txt\"><b>Home folder</b><small>Protected · 59 minutes ago</small></span><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 3.5 10.5 8 6 12.5\"/></svg></button><button class=\"ds-row\"><span class=\"ds-glyph ds-bad\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M8 2.5 14 13H2z\"/><path d=\"M8 6.5v3M8 11.3v.2\"/></svg></span><span class=\"ds-txt\"><b>Photo library</b><small class=\"ds-red\">Failed 2 days ago</small></span><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 3.5 10.5 8 6 12.5\"/></svg></button></div>",
+      "css": ".ds-rows{display:flex;flex-direction:column;width:420px;border-radius:12px;background:var(--c-surface-2, #25272c);box-shadow:0 0 0 1px var(--c-group-edge, transparent);overflow:hidden;font-family:'Inter Variable',Inter,system-ui,sans-serif;} .ds-row{display:flex;align-items:center;gap:14px;min-height:52px;padding:10px 16px;border:0;background:transparent;color:var(--c-fg, #eceef1);text-align:left;transition:background-color 120ms;} .ds-row+.ds-row{box-shadow:inset 0 1px 0 var(--c-sep, #34373d);} .ds-row:hover{background:color-mix(in oklab,var(--c-fg, #eceef1) 5%,var(--c-surface-2, #25272c));} .ds-row:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;outline-offset:-2px;} .ds-row>svg{color:var(--c-fg-muted, #949aa4);flex:none;} .ds-txt{flex:1;display:flex;flex-direction:column;gap:2px;} .ds-txt b{font-weight:600;font-size:14px;} .ds-txt small{font-size:12.5px;color:var(--c-fg-muted, #949aa4);} .ds-txt small.ds-red{color:var(--c-danger, #ef8576);} .ds-glyph{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:9999px;flex:none;} .ds-ok{color:var(--c-success, #72c79a);background:color-mix(in oklab,var(--c-success, #72c79a) 16%,transparent);} .ds-bad{color:var(--c-danger, #ef8576);background:color-mix(in oklab,var(--c-danger, #ef8576) 17%,transparent);}"
+    },
+    {
+      "name": "History Strip",
+      "kind": "custom",
+      "refersTo": "history-strip",
+      "description": "Signature: 30 days as dots on a fixed 4 to 11px log magnitude ramp in 13px cells; red for failure-only days, hollow for none.",
+      "html": "<div class=\"ds-strip\" role=\"img\" aria-label=\"Last 15 days: backed up on 12, failed on 1, nothing on 2\"><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:4px;height:4px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:6px;height:6px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:9px;height:9px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:11px;height:11px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:7px;height:7px\"></span></span><span class=\"ds-cell\"><span class=\"ds-none\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:5px;height:5px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:4px;height:4px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:8px;height:8px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:10px;height:10px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot ds-bad\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:11px;height:11px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:6px;height:6px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:4px;height:4px\"></span></span><span class=\"ds-cell\"><span class=\"ds-dot\" style=\"width:5px;height:5px\"></span></span></div>",
+      "css": ".ds-strip{display:flex;align-items:center;height:16px;} .ds-cell{display:grid;place-items:center;width:13px;height:16px;flex:none;} .ds-dot{display:block;border-radius:9999px;background:var(--c-success, #72c79a);} .ds-dot.ds-bad{width:8px;height:8px;background:var(--c-danger, #ef8576);} .ds-none{display:block;width:4px;height:4px;border-radius:9999px;box-shadow:0 0 0 1px var(--c-fg-muted, #949aa4);}"
+    },
+    {
+      "name": "Switch",
+      "kind": "custom",
+      "refersTo": "switch",
+      "description": "Adwaita-proportioned on/off switch; blue when on.",
+      "html": "<button class=\"ds-switch\" role=\"switch\" aria-checked=\"true\" aria-label=\"Encrypt\"><span></span></button> <button class=\"ds-switch\" role=\"switch\" aria-checked=\"false\" aria-label=\"Notify\"><span></span></button>",
+      "css": ".ds-switch{position:relative;width:44px;height:24px;border:0;border-radius:9999px;background:var(--c-track, #3a3d44);transition:background-color 150ms;} .ds-switch[aria-checked=true]{background:var(--c-primary, #78b0f0);} .ds-switch>span{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:9999px;background:#f4f5f7;box-shadow:0 1px 2px rgb(0 0 0/.3);transition:transform 150ms cubic-bezier(.22,1,.36,1);} .ds-switch[aria-checked=true]>span{transform:translateX(20px);} .ds-switch:focus-visible{outline:2px solid var(--c-primary, #78b0f0);outline-offset:2px;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "At home on the desktop",
+    "overview": "**Creative North Star: \"At home on the desktop\"**\n\nFlux looks like it shipped with the user's Linux desktop. It follows the GNOME/Adwaita screen tradition in graphite and calm blue: a blue-graphite shell (titlebar and sidebar) around a flatter graphite view, and content set in grouped lists, one rounded group with rows split by hairlines, instead of a box per item. The app answers \"am I protected?\" in one sentence before anything else, and type carries the hierarchy; there are no stat boxes.\n\nColour has one job each. Blue means act: the one primary button of a view, progress, focus, an on switch. Green, amber and red mean state, and always sit next to words that say the same thing. Where you are (the sidebar item, the chosen segment) is a neutral lift, never blue. Machine data (paths, sizes, counts, times, shortcuts) is JetBrains Mono with tabular figures; everything else is Inter, the face Adwaita Sans is built on.\n\nThe signature is the protection sentence over a 30-day history strip of dots on a fixed magnitude ramp. The same grammar answers for all backups on the start page and for one backup on its own page, and the same ramp marks each snapshot.",
+    "keyCharacteristics": [
+      "Two-tone frame: blue-graphite shell, flatter graphite view with a 14px top-left corner.",
+      "Grouped lists with hairline separators; interactive rows end in a chevron or a control.",
+      "One blue primary button per view; state colours never stand alone without words.",
+      "Selection is a neutral lift, in the sidebar and in segmented controls.",
+      "Inter for UI, JetBrains Mono for machine data, tabular numbers on everything that changes.",
+      "A fixed log-scale magnitude ramp (4 to 11px dots) for history and snapshots."
+    ],
+    "rules": [
+      {
+        "name": "The One Job Rule",
+        "body": "Blue acts, green/amber/red report state, a neutral lift says where you are. No colour does two of these jobs.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Blue Button Rule",
+        "body": "A view has at most one `.btn-primary`. Its siblings are neutral `.btn` or `.btn-ghost`.",
+        "section": "colors"
+      },
+      {
+        "name": "The Words-With-Colour Rule",
+        "body": "A status colour always accompanies words that say the same (\"Failed 2 days ago\", \"1 needs attention\"). A glyph repeats the state; it never replaces the sentence. The failed row on All backups is tinted (`danger` at 7%) and its status line is red text.",
+        "section": "colors"
+      },
+      {
+        "name": "The Machine Data Rule",
+        "body": "Paths, sizes, counts and times are JetBrains Mono; every number that changes while you watch carries tabular figures (`.num` / `.tabular`, automatic on `.font-mono`) so it doesn't jitter.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence Case Rule",
+        "body": "Headings are sentence case and plain words; no uppercase labels, no letter-spaced captions.",
+        "section": "typography"
+      },
+      {
+        "name": "The Float-Only Shadow Rule",
+        "body": "Only what floats above the window (dialogs, menus, toasts) casts a shadow. Groups and rows sit on the view with tone and, in light, a hairline.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do set content as a grouped list: one 12px group, rows split by 1px `sep` hairlines.",
+      "Do give each view at most one `primary` button; everything else is neutral.",
+      "Do say the state in words next to every green, amber or red mark.",
+      "Do show where you are with the neutral `selected` or `seg-on` lift.",
+      "Do set machine data in JetBrains Mono with tabular figures.",
+      "Do mark history and snapshots on the fixed 4 to 11px log ramp in 13px cells.",
+      "Do put a dialog's close button last in the DOM.",
+      "Do keep the logo on its dark tile, in the light theme too."
+    ],
+    "donts": [
+      "Don't use blue for selection, tabs or state; blue is for acting.",
+      "Don't wrap each item in its own box, nest groups inside groups, or build stat boxes.",
+      "Don't fill a tag; filled means button.",
+      "Don't scale the history ramp to each backup; marks must compare across backups.",
+      "Don't add shadows to groups or rows; only floating layers cast them.",
+      "Don't round the window; only the view's top-left corner carries the panel radius."
+    ]
+  }
+}

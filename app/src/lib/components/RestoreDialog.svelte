@@ -2,7 +2,7 @@
   import { api, listen, pickFolder } from "../api";
   import { app } from "../state.svelte";
   import { bytes, count, dateTime } from "../format";
-  import type { ProgressSnapshot, RestoreOutcome, SnapshotMeta } from "../types";
+  import type { ProgressSnapshot, RestoreOutcome, RestorePreview, SnapshotMeta } from "../types";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -23,6 +23,30 @@
     }).then((f) => (off = f));
     return () => off?.();
   });
+
+  // What restoring would change at the chosen destination, checked before anything is written.
+  let preview = $state<RestorePreview | null>(null);
+  let previewError = $state<string | null>(null);
+  $effect(() => {
+    const to = where === "elsewhere" ? folder : null;
+    const ow = where === "original" && overwrite;
+    preview = null;
+    previewError = null;
+    if (where === "elsewhere" && !folder) return;
+    let current = true;
+    const t = setTimeout(() => {
+      api.restorePreview(profile, snapshot.id, paths, to, ow).then(
+        (p) => current && (preview = p),
+        (e) => current && (previewError = (e as Error).message),
+      );
+    }, 150);
+    return () => {
+      current = false;
+      clearTimeout(t);
+    };
+  });
+  const nothingToDo = $derived(preview != null && preview.new === 0 && preview.differ === 0 && preview.new_folders === 0);
+  const replaces = $derived(where === "original" && overwrite && (preview?.differ ?? 0) > 0);
 
   async function choose() {
     const f = await pickFolder("Restore into…");
@@ -47,7 +71,7 @@
   {#if result}
     <div class="space-y-4">
       <div class="flex items-center gap-3">
-        <div class="grid size-10 place-items-center rounded-xl {result.errors.length ? 'bg-warning/15 text-warning' : 'bg-success/15 text-success'}">
+        <div class="grid size-10 place-items-center rounded-lg {result.errors.length ? 'bg-warning/15 text-warning' : 'bg-success/15 text-success'}">
           <Icon name={result.errors.length ? "alert" : "check"} />
         </div>
         <div>
@@ -56,7 +80,7 @@
         </div>
       </div>
       {#if result.moved_aside.length}
-        <div class="rounded-xl bg-surface-3 p-3 text-sm">
+        <div class="rounded-lg bg-surface-3 p-3 text-sm">
           <div class="font-medium">Your existing versions were kept:</div>
           <ul class="mt-1 max-h-28 overflow-y-auto font-mono text-xs text-fg-2">
             {#each result.moved_aside as p (p)}<li class="truncate">{p}</li>{/each}
@@ -64,7 +88,7 @@
         </div>
       {/if}
       {#if result.errors.length}
-        <ul class="max-h-36 overflow-y-auto rounded-xl bg-danger/8 p-3 text-xs text-danger">
+        <ul class="max-h-36 overflow-y-auto rounded-lg bg-danger/8 p-3 text-xs text-danger">
           {#each result.errors as e (e.path)}<li class="truncate">{e.path}: {e.message}</li>{/each}
         </ul>
       {/if}
@@ -74,14 +98,14 @@
     <div class="space-y-5">
       <div>
         <div class="label mb-2">Restoring</div>
-        <ul class="max-h-28 overflow-y-auto rounded-xl bg-surface-3 p-3 font-mono text-xs text-fg-2">
+        <ul class="max-h-28 overflow-y-auto rounded-lg bg-surface-3 p-3 font-mono text-xs text-fg-2">
           {#each paths as p (p)}<li class="truncate">{p}</li>{/each}
         </ul>
       </div>
 
       <fieldset class="space-y-2">
         <legend class="label mb-2">Where to</legend>
-        <label class="flex cursor-pointer gap-3 rounded-2xl p-4 transition-colors {where === 'elsewhere' ? 'bg-primary-container text-on-primary-container' : 'bg-surface-3 hover:bg-track'}">
+        <label class="flex cursor-pointer gap-3 rounded-card p-4 transition-colors {where === 'elsewhere' ? 'bg-selected text-on-selected' : 'bg-surface-3 hover:bg-track'}">
           <input type="radio" class="mt-1 accent-[var(--c-primary)]" bind:group={where} value="elsewhere" />
           <span class="min-w-0 flex-1">
             <span class="block font-medium">Into another folder</span>
@@ -94,7 +118,7 @@
             {/if}
           </span>
         </label>
-        <label class="flex cursor-pointer gap-3 rounded-2xl p-4 transition-colors {where === 'original' ? 'bg-primary-container text-on-primary-container' : 'bg-surface-3 hover:bg-track'}">
+        <label class="flex cursor-pointer gap-3 rounded-card p-4 transition-colors {where === 'original' ? 'bg-selected text-on-selected' : 'bg-surface-3 hover:bg-track'}">
           <input type="radio" class="mt-1 accent-[var(--c-primary)]" bind:group={where} value="original" />
           <span class="min-w-0 flex-1">
             <span class="block font-medium">Back to where it was</span>
@@ -112,7 +136,43 @@
         </label>
       </fieldset>
 
-      {#if error}<div class="rounded-xl bg-danger/10 p-3 text-sm text-danger">{error}</div>{/if}
+      {#if (where === "original" || folder) && !busy}
+        <div class="rounded-card bg-surface-3 px-4 py-3 text-sm" aria-live="polite">
+          {#if previewError}
+            <span class="text-fg-muted">Couldn't check what would change: {previewError}</span>
+          {:else if !preview}
+            <span class="text-fg-muted motion-safe:animate-pulse">Checking what would change…</span>
+          {:else if nothingToDo}
+            <span class="flex items-center gap-2"><Icon name="check" size={14} class="text-success" /> Everything is already identical: nothing would change.</span>
+          {:else}
+            <div class="label mb-2">What will happen</div>
+            <ul class="num space-y-1 text-fg-2">
+              {#if preview.new}<li class="flex items-center gap-2"><Icon name="plus" size={13} class="text-success" /> {count(preview.new)} {preview.new === 1 ? "item" : "items"} added ({bytes(preview.bytes)} in all){preview.new_folders ? `, ${count(preview.new_folders)} new folders` : ""}</li>{/if}
+              {#if preview.differ}
+                <li class="flex items-start gap-2 {replaces ? 'text-danger' : ''}">
+                  <Icon name={replaces ? "alert" : "copy"} size={13} class="mt-1 shrink-0 {replaces ? '' : 'text-warning'}" />
+                  <span>
+                    {count(preview.differ)} {preview.differ === 1 ? "file differs" : "files differ"} from what's there now:
+                    {preview.keep_existing ? "your current versions are kept, renamed to “name.flux-…”." : "your current versions are replaced."}
+                  </span>
+                </li>
+              {/if}
+              {#if preview.identical}<li class="flex items-center gap-2"><Icon name="check" size={13} class="text-fg-muted" /> {count(preview.identical)} already identical, left alone</li>{/if}
+            </ul>
+            {#if preview.differ_paths.length}
+              <details class="mt-2">
+                <summary class="cursor-pointer text-[13px] text-fg-muted select-none">Show the {preview.differ === 1 ? "file" : `${count(preview.differ)} files`} that differ</summary>
+                <ul class="mt-1.5 max-h-32 overflow-y-auto font-mono text-xs text-fg-2">
+                  {#each preview.differ_paths as p (p)}<li class="truncate" title={p}>{p}</li>{/each}
+                  {#if preview.differ > preview.differ_paths.length}<li class="text-fg-muted">…and {count(preview.differ - preview.differ_paths.length)} more</li>{/if}
+                </ul>
+              </details>
+            {/if}
+          {/if}
+        </div>
+      {/if}
+
+      {#if error}<div class="rounded-lg bg-danger/10 p-3 text-sm text-danger">{error}</div>{/if}
 
       {#if busy && progress && progress.bytes_total > 0}
         <div class="space-y-1.5">
@@ -125,9 +185,9 @@
 
       <div class="flex justify-end gap-2">
         <button class="btn" onclick={onclose} disabled={busy}>Cancel</button>
-        <button class="btn btn-primary" onclick={run} disabled={busy || (where === "elsewhere" && !folder)}>
+        <button class="btn {replaces ? 'btn-danger-filled' : 'btn-primary'}" onclick={run} disabled={busy || (where === "elsewhere" && !folder) || nothingToDo}>
           <Icon name={busy ? "refresh" : "restore"} size={15} class={busy ? "animate-spin" : ""} />
-          {busy ? "Restoring…" : "Restore"}
+          {busy ? "Restoring…" : replaces ? `Restore and replace ${count(preview!.differ)} ${preview!.differ === 1 ? "file" : "files"}` : "Restore"}
         </button>
       </div>
     </div>

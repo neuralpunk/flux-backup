@@ -3,6 +3,7 @@
 //! engine-agnostic diff, search and restore.
 
 pub mod diff;
+pub mod disk;
 pub mod entry;
 pub mod fsops;
 pub mod history;

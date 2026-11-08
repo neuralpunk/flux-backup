@@ -1,13 +1,16 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
-  import { api, pickFile, pickFolder } from "../api";
+  import { api, inTauri, pickFile, pickFolder } from "../api";
+  import StorageChoice from "./StorageChoice.svelte";
+  import Modal from "./Modal.svelte";
   import { app } from "../state.svelte";
-  import { bytes, dateTime } from "../format";
-  import { SYSTEM_PREFIX, isSystem, type Drive, type Issue, type PreviewRow, type Profile, type Suggestion, type TargetTest } from "../types";
+  import { bytes, count, dateTime } from "../format";
+  import { ApiError, SYSTEM_PREFIX, engineLabel, isCompat, isSystem, type Drive, type Engine, type Estimate, type Issue, type PasswordSource, type PreviewRow, type Profile, type Suggestion, type TargetTest } from "../types";
   import Field from "./form/Field.svelte";
   import ListEditor from "./form/ListEditor.svelte";
   import NumberInput from "./form/NumberInput.svelte";
   import Toggle from "./form/Toggle.svelte";
+  import Row from "./form/Row.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
 
   let {
@@ -25,14 +28,16 @@
   let initial = $state("");
   let profileId = $state(untrack(() => (id ?? "").replace(SYSTEM_PREFIX, "")));
   let idTouched = $state(false);
+  /** The id field is shown (new profiles: after "Change"). */
+  let editingId = $state(false);
   let issues = $state<Issue[]>([]);
   let saving = $state(false);
   let loadError = $state<string | null>(null);
-  let confirmDelete = $state(false);
 
   $effect(() => {
     (creating ? api.newProfile(sys) : api.getProfile(id!)).then(
       (e) => {
+        normalize(e.profile);
         draft = e.profile;
         initial = JSON.stringify(e.profile);
         issues = e.issues;
@@ -41,16 +46,48 @@
     );
   });
 
+  /** Lists the form edits in place exist even when the file leaves them out. */
+  function normalize(p: Profile) {
+    if (p.borg) p.borg.extra_args ??= [];
+    p.sources.exclude_if_present ??= [];
+    p.maintenance ??= { verify_monthly: false, free_space_weekly: true };
+    p.schedule.skip_on_metered ??= false;
+    if (p.target.kind === "ssh") p.target.ssh_options ??= [];
+    if (p.engine === "rsync") p.rsync = { extra_args: p.rsync?.extra_args ?? [] };
+  }
+  /** The profile as saved: no empty option lists. */
+  function forSaving(p: Profile): Profile {
+    const out = structuredClone(p);
+    if (out.rsync && !out.rsync.extra_args?.length) out.rsync = null;
+    return out;
+  }
+
   // ---- validation (debounced, on every change) ----
   let validateTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     if (!draft) return;
-    const snap = $state.snapshot(draft) as Profile;
+    const snap = forSaving($state.snapshot(draft) as Profile);
     clearTimeout(validateTimer);
     validateTimer = setTimeout(() => api.validateProfile(snap, sys).then((i) => (issues = i)), 250);
   });
 
   const dirty = $derived(draft ? JSON.stringify(draft) !== initial || creating : false);
+
+  // A new backup is named after what it backs up ("Documents", "Home folder") until the
+  // user types a name.
+  let nameTouched = $state(false);
+  function nameFor(paths: string[]): string | null {
+    const first = paths[0]?.replace(/\/+$/, "");
+    if (first == null) return null;
+    const base = first === "" ? "Whole computer" : first === "~" || /^\/home\/[^/]+$/.test(first) || first === "/root" ? "Home folder" : first.split("/").at(-1)!;
+    const name = base[0]!.toUpperCase() + base.slice(1);
+    return paths.length > 1 ? `${name} and ${paths.length - 1} more` : name;
+  }
+  $effect(() => {
+    if (!creating || nameTouched || !draft) return;
+    const n = nameFor(draft.sources.paths);
+    if (n && n !== draft.name) draft.name = n;
+  });
 
   // A new profile gets an id from its name until the user edits the id.
   let idTimer: ReturnType<typeof setTimeout> | undefined;
@@ -61,34 +98,62 @@
     idTimer = setTimeout(() => api.suggestId(name, sys).then((s) => (profileId = s)), 200);
   });
 
-  // ---- simple / advanced ----
-  let advanced = $state(untrack(() => app.editorAdvanced));
-  $effect(() => {
-    app.editorAdvanced = advanced;
-  });
-  /** Fields that only the advanced view shows. */
-  const advancedField = (f: string) =>
-    /^(options|hooks|retention|vault|schedule\.(catch_up|skip_on_battery|every)|sources\.(exclude|exclude_larger_than|exclude_caches|exclude_if_present|one_file_system)|target\.(port|identity_file|ssh_options|bandwidth_limit))/.test(f);
+  // ---- pages ----
+  // The main page asks the three questions; every further group of settings is a row
+  // that opens just that group (docs/UX_PRINCIPLES.md, rule 7). Nothing stays "expanded":
+  // the editor always opens on the main page.
+  type Page = "exclusions" | "storage" | "connection" | "schedule" | "retention" | "hooks" | "options";
+  const demoPage = untrack(() => (!inTauri && typeof location !== "undefined" ? new URLSearchParams(location.search).get("page") : null));
+  let page = $state<Page | null>((demoPage as Page | null) ?? null);
+  const pageTitle: Record<Page, { title: string; text: string }> = {
+    exclusions: { title: "Leave some things out", text: "Files and folders that aren't worth backing up: caches, downloads, build output." },
+    storage: { title: "How backups are stored", text: "Flux's own formats, or a standard tool's so the backups work without Flux." },
+    connection: { title: "Connection details", text: "How Flux reaches the server. Empty fields use your ssh settings." },
+    schedule: { title: "More schedule options", text: "Other timings, when to wait, and upkeep after scheduled backups." },
+    retention: { title: "Keep and remove snapshots", text: "Which snapshots stay. Pinned and named ones always do." },
+    hooks: { title: "Hooks", text: "Shell commands run around each backup, one per line. A failing “before” command cancels the backup." },
+    options: { title: "Performance and behaviour", text: "What's copied along with files, how hard Flux works, and what it tells you." },
+  };
+  /** The page a setting lives on (`null`: the main page). */
+  function pageOf(field: string): Page | null {
+    if (/^target\.(port|identity_file|ssh_options|bandwidth_limit)/.test(field)) return "connection";
+    if (/^(vault|borg|rsync)/.test(field)) return "storage";
+    if (/^sources\.(exclude|exclude_larger_than|exclude_caches|exclude_if_present|one_file_system)/.test(field)) return "exclusions";
+    if (/^schedule\.(catch_up|skip_on_battery|every)/.test(field)) return "schedule";
+    if (field.startsWith("retention")) return "retention";
+    if (field.startsWith("hooks")) return "hooks";
+    if (field.startsWith("options")) return "options";
+    return null;
+  }
   const totalErrors = $derived(issues.filter((i) => i.severity === "error").length);
   const at = (prefix: string) => issues.filter((i) => i.field === prefix || i.field.startsWith(prefix + "[") || i.field.startsWith(prefix + "."));
   const general = $derived(issues.filter((i) => i.field === "" || i.field === "name"));
+  /** "1 problem" for a page's row, if it has any. */
+  function problems(p: Page): string {
+    const n = issues.filter((i) => i.severity === "error" && pageOf(i.field) === p).length;
+    return n ? (n === 1 ? "1 problem" : `${n} problems`) : "";
+  }
 
   let scroller: HTMLElement | undefined = $state();
-  type SectionId = "general" | "sources" | "destination" | "schedule" | "retention" | "hooks" | "advanced";
-  function sectionOf(field: string): SectionId {
-    if (field.startsWith("target") || field.startsWith("vault")) return "destination";
+  function sectionOf(field: string): string {
+    if (field.startsWith("target")) return "destination";
     if (field.startsWith("sources")) return "sources";
     if (field.startsWith("schedule")) return "schedule";
-    if (field.startsWith("retention")) return "retention";
-    if (field.startsWith("hooks")) return "hooks";
-    if (field.startsWith("options")) return "advanced";
     return "general";
   }
-  /** Show the first problem: open the advanced options if that's where it is. */
+  /** Show a problem: open its page, or scroll to its section on the main page. */
   async function jumpTo(field: string) {
-    if (advancedField(field)) advanced = true;
+    if (creating) {
+      const s = stepOf(field);
+      dir = -1;
+      step = s;
+    }
+    page = pageOf(field);
     await tick();
-    scroller?.querySelector(`#sec-${sectionOf(field)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!page) scroller?.querySelector(`#sec-${sectionOf(field)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  function openPage(p: Page | null) {
+    page = p;
   }
 
   // ---- destination ----
@@ -124,25 +189,84 @@
       testing = false;
     }
   }
-  function setEngine(engine: "mirror" | "vault") {
+  function setEngine(engine: Engine) {
     if (!draft) return;
     draft.engine = engine;
-    // Root has no desktop keyring: system Vaults get their password once, then keep it in
-    // a root-only key file (see PasswordDialog).
-    if (engine === "vault" && !draft.vault) draft.vault = { compression_level: 3, encryption: true, password_source: { from: sys ? "prompt" : "keyring" } };
+    // Root has no desktop keyring: system Vaults and Borg repositories get their password
+    // once, then keep it in a root-only key file (see PasswordDialog).
+    const source: PasswordSource = { from: sys ? "prompt" : "keyring" };
+    if (engine === "vault" && !draft.vault) draft.vault = { compression_level: 3, encryption: true, password_source: source };
+    if (engine === "borg" && !draft.borg) draft.borg = { encryption: "repokey-blake2", compression: "zstd,3", password_source: source, remote_path: null, extra_args: [] };
+    // Settings of other engines would only produce "ignored" warnings.
+    if (engine !== "vault") draft.vault = null;
+    if (engine !== "borg") draft.borg = null;
+    if (engine !== "rsync") draft.rsync = null;
+    else draft.rsync ??= { extra_args: [] };
+  }
+  /** Set the key file path or the command of the current password source. */
+  function setSourceField(key: "path" | "command", value: string) {
+    const src = draft?.borg?.password_source ?? draft?.vault?.password_source;
+    if (src && key in src) (src as Record<string, string>)[key] = value;
   }
   function setPasswordSource(from: string) {
-    if (!draft?.vault) return;
-    draft.vault.password_source =
+    const src: PasswordSource =
       from === "file" ? { from: "file", path: "" } : from === "command" ? { from: "command", command: "" } : from === "prompt" ? { from: "prompt" } : { from: "keyring" };
+    if (draft?.borg) draft.borg.password_source = src;
+    else if (draft?.vault) draft.vault.password_source = src;
   }
-
   // ---- sources ----
   let suggestions = $state<Suggestion[]>([]);
   $effect(() => {
     if (!draft) return;
     const paths = [...draft.sources.paths];
     api.excludeSuggestions(paths).then((s) => (suggestions = s), () => {});
+  });
+
+  // How much that is, for a new backup: counted again shortly after the folders or
+  // exclusions change (a newer count stops the older one in the backend).
+  let estimate = $state<Estimate | null>(null);
+  let estimating = $state(false);
+  let estimateError = $state<string | null>(null);
+  /** What the estimate depends on: the folders and exclusions, and the destination only
+   * when it lies inside a source (it's left out then). A `$derived` string, so picking a
+   * drive elsewhere, or typing a name, doesn't recount the whole tree. */
+  const estimateKey = $derived.by(() => {
+    if (!creating || !draft) return null;
+    const src = draft.sources;
+    const dest = draft.target.kind === "local" ? draft.target.path.replace(/\/+$/, "") : "";
+    const inside =
+      !!dest &&
+      src.paths.some((p) => {
+        const s = p.replace(/\/+$/, "");
+        return s === "" || dest === s || dest.startsWith(`${s}/`);
+      });
+    return JSON.stringify([src, inside ? dest : null]);
+  });
+  $effect(() => {
+    if (estimateKey == null) return;
+    const snap = untrack(() => JSON.parse(JSON.stringify(draft)) as Profile);
+    if (!snap.sources.paths.length) {
+      estimate = null;
+      estimating = false;
+      return;
+    }
+    estimating = true;
+    estimateError = null;
+    let current = true;
+    const timer = setTimeout(() => {
+      api.estimate(snap, sys).then(
+        (e) => current && ((estimate = e), (estimating = false)),
+        (e) => {
+          if (!current || (e instanceof ApiError && e.code === "cancelled")) return;
+          estimating = false;
+          estimateError = (e as Error).message;
+        },
+      );
+    }, 700);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
   });
 
   // ---- schedule ----
@@ -208,11 +332,104 @@
     draft.schedule.trigger = "calendar";
     applyCalendar();
   }
-  const encrypted = $derived(draft?.engine === "vault" && (draft.vault?.encryption ?? true));
+  const encrypted = $derived(
+    draft?.engine === "vault" ? (draft.vault?.encryption ?? true) : draft?.engine === "borg" ? (draft.borg?.encryption ?? "repokey-blake2") !== "none" : false,
+  );
+  // ---- the password, set while setting up (not at the first backup) ----
+  let pw = $state("");
+  let pw2 = $state("");
+  const pwSource = $derived<PasswordSource | null>(draft?.engine === "vault" ? (draft.vault?.password_source ?? { from: "keyring" }) : draft?.engine === "borg" ? (draft.borg?.password_source ?? null) : null);
+  const pwWord = $derived(draft?.engine === "borg" ? "passphrase" : "password");
+  const wasEncrypted = $derived.by(() => {
+    if (creating || !initial) return false;
+    const before = JSON.parse(initial) as Profile;
+    return before.engine === draft?.engine && (before.engine === "vault" ? before.vault?.encryption !== false : before.engine === "borg" ? before.borg?.encryption !== "none" : false);
+  });
+  /** It has never made a backup, so its encrypted repository may not exist yet. */
+  const neverRan = $derived(!creating && !!id && app.profiles.find((x) => x.id === id)?.last_run == null);
+  /** Ask for the password here: a new encrypted backup, encryption just turned on, or one
+   * that hasn't run yet. A command supplies its own. */
+  const askPassword = $derived(encrypted && pwSource != null && pwSource.from !== "command" && (!wasEncrypted || neverRan));
+  /** Must be typed before saving (for a file, it may already hold one). */
+  const pwRequired = $derived(askPassword && !wasEncrypted && (pwSource?.from === "keyring" || pwSource?.from === "prompt"));
+  const pwIssue = $derived.by(() => {
+    if (!askPassword) return null;
+    if (!pw && !pw2) return pwRequired ? `choose a ${pwWord}` : null;
+    if (pw !== pw2) return `the two ${pwWord}s don't match`;
+    return null;
+  });
+
   function setEncrypted(on: boolean) {
+    if (draft?.engine === "rsync") return;
+    if (draft?.engine === "borg") {
+      if (draft.borg) draft.borg.encryption = on ? "repokey-blake2" : "none";
+      return;
+    }
     setEngine(on ? "vault" : "mirror");
     if (on && draft?.vault) draft.vault.encryption = true;
   }
+  const encryptText = $derived.by(() => {
+    if (!draft) return "";
+    if (draft.engine === "rsync") return "rsync writes plain folders and can't encrypt them. For private files, back up to an encrypted drive (LUKS).";
+    if (draft.engine === "borg")
+      return encrypted
+        ? "Borg encrypts the backups with your passphrase; they're also compressed and deduplicated."
+        : "Borg compresses and deduplicates the backups, without encryption.";
+    return encrypted ? `Nobody can read the backups without the password; they're also compressed and deduplicated.` : "Backups are plain folders you can open in any file manager.";
+  });
+  /** The storage format differs from the saved one (a new backup history). */
+  const engineChanged = $derived(!creating && !!initial && (JSON.parse(initial) as Profile).engine !== draft?.engine);
+  /** Encryption is fixed once a Borg repository exists; rsync can't encrypt. */
+  const encryptLocked = $derived(draft?.engine === "rsync" || (!creating && draft?.engine === "borg" && !engineChanged));
+  const encryptReason = $derived(
+    draft?.engine === "rsync" ? "rsync can't encrypt; back up to an encrypted drive instead" : "Fixed when the Borg repository was created",
+  );
+
+  // ---- one-line summaries for the rows ----
+  const listSummary = (xs: string[], none: string) => (xs.length === 0 ? none : xs.length <= 2 ? xs.join(", ") : `${xs.slice(0, 2).join(", ")} and ${xs.length - 2} more`);
+  const exclusionsSummary = $derived.by(() => {
+    if (!draft) return "";
+    const s = draft.sources;
+    const parts = [s.exclude.length ? listSummary(s.exclude, "") : "", s.exclude_caches ? "caches" : "", s.exclude_larger_than ? `files over ${s.exclude_larger_than}` : ""].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "Nothing left out";
+  });
+  const storageSummary = $derived.by(() => {
+    if (!draft) return "";
+    switch (draft.engine) {
+      case "mirror":
+        return "Plain folders";
+      case "vault":
+        return draft.vault?.encryption === false ? "Compressed (Vault)" : "Encrypted (Vault)";
+      case "rsync":
+        return "rsync · works without Flux";
+      case "borg":
+        return "Borg · works without Flux";
+    }
+  });
+  const connectionSummary = $derived.by(() => {
+    if (draft?.target.kind !== "ssh") return "";
+    const t = draft.target;
+    const parts = [t.port ? `port ${t.port}` : "", t.identity_file ? "own key file" : "", t.bandwidth_limit ? `up to ${t.bandwidth_limit}/s` : ""].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "Your ssh settings";
+  });
+  const scheduleSummary = $derived.by(() => {
+    if (!draft) return "";
+    const sc = draft.schedule;
+    if (sc.trigger === "manual") return "Only when you click";
+    const parts = [sc.trigger === "interval" ? `every ${sc.every}` : preset === "custom" ? "custom times" : preset === "weekdays" ? "weekdays" : "", sc.trigger === "calendar" && sc.catch_up ? "catches up" : "", sc.skip_on_battery ? "waits for power" : "", sc.skip_on_metered && draft.target.kind === "ssh" ? "not on metered" : "", draft.maintenance?.verify_monthly ? "verifies monthly" : ""].filter(Boolean);
+    return parts.join(" · ") || "Standard";
+  });
+  const hooksSummary = $derived.by(() => {
+    const n = (draft?.hooks?.pre_backup?.length ?? 0) + (draft?.hooks?.post_backup?.length ?? 0) + (draft?.hooks?.on_error?.length ?? 0);
+    return n === 0 ? "None" : n === 1 ? "1 command" : `${n} commands`;
+  });
+  const optionsSummary = $derived.by(() => {
+    if (!draft) return "";
+    const o = draft.options;
+    const pri = o.io_priority === "idle" ? "idle disk" : o.io_priority === "normal" ? "normal priority" : "low priority";
+    const extra = o.change_detection === "checksum" ? "checksums" : o.preserve_acl && o.preserve_xattr ? "keeps all attributes" : "some attributes off";
+    return `${pri} · ${extra}`;
+  });
   /** "Keeps 7 daily, 4 weekly and 12 monthly snapshots." */
   const keepSummary = $derived.by(() => {
     const r = draft?.retention;
@@ -245,18 +462,134 @@
   const opt = (v: string) => (v.trim() === "" ? null : v.trim());
   const lines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 
+  // ---- the setup wizard (new backups): one question per step ----
+  type Step = "what" | "where" | "protect" | "when" | "review";
+  const steps: { id: Step; label: string; title: string; text: string }[] = [
+    { id: "what", label: "What", title: "What should Flux back up?", text: "Pick the folders that matter. Everything inside them is included, except what you leave out." },
+    { id: "where", label: "Where", title: "Where should the backups go?", text: "A drive you plug in, a folder, or a server on your network. Best on a different disk than the files themselves." },
+    { id: "protect", label: "Protection", title: "How should they be stored?", text: "Plain folders are the simplest. Encryption keeps them private if the drive is lost. Or let a standard tool write them, so they never depend on Flux." },
+    { id: "when", label: "When", title: "When should it back up?", text: "Flux backs up in the background, even with the app closed, and only copies what changed." },
+    { id: "review", label: "Review", title: "", text: "Check the details. Everything can be changed later in Settings." },
+  ];
+  let step = $state<Step>("what");
+  /** The furthest step reached (earlier ones can be revisited from the stepper). */
+  let reached = $state(0);
+  /** 1 forward, -1 back: which way the next step slides in. */
+  let dir = $state(1);
+  const stepIndex = $derived(steps.findIndex((s) => s.id === step));
+  /** Set once the backup is created: the closing screen. */
+  let done = $state<string | null>(null);
+  let encReady = $state(false);
+
+  function stepOf(field: string): Step {
+    if (field.startsWith("sources")) return "what";
+    if (field.startsWith("target")) return "where";
+    if (/^(vault|borg|rsync|engine)/.test(field)) return "protect";
+    if (field.startsWith("schedule") || field.startsWith("retention")) return "when";
+    return "review";
+  }
+  /** What still stops this step, in words (null: ready). */
+  function stepIssue(s: Step): string | null {
+    if (!draft) return null;
+    if (s === "what" && !draft.sources.paths.length) return "add a folder";
+    if (s === "where" && draft.target.kind === "ssh" && !draft.target.host.trim()) return "type the server's name";
+    const e = issues.find((i) => i.severity === "error" && stepOf(i.field) === s);
+    if (e) return e.message;
+    if (s === "protect" && encrypted && pwSource?.from === "file" && !pwSource.path.trim()) return "choose the key file";
+    if (s === "protect" && encrypted && pwSource?.from === "command" && !pwSource.command.trim()) return "type the command that prints the " + pwWord;
+    if (s === "protect" && pwIssue) return pwIssue;
+    if (s === "review") {
+      for (const other of steps.slice(0, -1)) {
+        const x = stepIssue(other.id);
+        if (x) return x;
+      }
+      if (!profileId) return "give it a name";
+    }
+    return null;
+  }
+  async function go(to: Step) {
+    const i = steps.findIndex((s) => s.id === to);
+    dir = i >= stepIndex ? 1 : -1;
+    step = to;
+    page = null;
+    reached = Math.max(reached, i);
+    await tick();
+    scroller?.scrollTo({ top: 0 });
+    scroller?.querySelector<HTMLElement>("#step-title")?.focus({ preventScroll: true });
+  }
+  const next = () => stepIndex < steps.length - 1 && !stepIssue(step) && void go(steps[stepIndex + 1]!.id);
+  const back = () => stepIndex > 0 && void go(steps[stepIndex - 1]!.id);
+
+  // The review's one-line answers.
+  const whatSummary = $derived.by(() => {
+    if (!draft) return "";
+    const s = listSummary(draft.sources.paths, "Nothing yet");
+    return estimate && !estimateError ? `${s} · about ${bytes(estimate.bytes)}` : s;
+  });
+  const whereSummary = $derived.by(() => {
+    if (!draft) return "";
+    const t = draft.target;
+    if (t.kind === "ssh") return t.host ? `${t.user ? `${t.user}@` : ""}${t.host}:${t.path}` : "Not chosen yet";
+    const d = drives.find((x) => x.mount_point === t.path);
+    return d ? `${d.label} · ${bytes(d.free)} free` : t.path || "Not chosen yet";
+  });
+  const sourceWords: Record<string, string> = { keyring: "kept in your desktop keyring", prompt: "asked every time", file: "kept in a key file", command: "from your command" };
+  const protectSummary = $derived.by(() => {
+    if (!draft) return "";
+    const how = storageSummary;
+    if (!encrypted) return how;
+    return `${how} · ${pwWord} ${pw ? "set, " : ""}${sourceWords[pwSource?.from ?? "keyring"]}`;
+  });
+  const whenSummary = $derived.by(() => {
+    if (!draft) return "";
+    const base =
+      when === "manual" ? "Only when you click Back up now" : when === "hourly" ? "Every hour" : when === "daily" ? `Every day at ${timeOfDay}` : when === "weekly" ? `Every ${weekday} at ${timeOfDay}` : scheduleSummary;
+    return draft.schedule.on_connect ? `${base}, and when the drive is plugged in` : base;
+  });
+
+  /** The closing screen's "Back up now": open the new backup and start its first run. */
+  function startFirst() {
+    if (!done) return;
+    const created = done;
+    onsaved(created);
+    void app.backupNow(created);
+  }
+
   async function save() {
     if (!draft) return;
     saving = true;
     try {
-      const r = await api.saveProfile(creating ? (sys ? SYSTEM_PREFIX : "") + profileId : id!, $state.snapshot(draft) as Profile, creating);
+      const r = await api.saveProfile(creating ? (sys ? SYSTEM_PREFIX : "") + profileId : id!, forSaving($state.snapshot(draft) as Profile), creating);
       issues = r.issues;
       if (r.saved) {
-        app.toast("ok", creating ? `Created “${draft.name}”.` : `Saved “${draft.name}”.`);
-        if (r.schedule) app.toast("info", r.schedule);
+        if (!creating) app.toast("ok", `Saved “${draft.name}”.`);
+        // Set up encryption now, so the first backup (even a scheduled one) asks nobody.
+        if (askPassword && (pw || (creating && pwSource?.from === "file"))) {
+          try {
+            await api.setPassword(r.id, pw);
+            if (creating) encReady = true;
+            else app.toast("ok", draft.engine === "borg" ? "The Borg repository is ready, protected by your passphrase." : "The encrypted Vault is ready, protected by your password.");
+          } catch (e) {
+            app.toast("bad", `Saved, but encryption couldn't be set up yet: ${(e as Error).message} Flux will ask for the ${pwWord} at the first backup.`);
+          }
+          pw = pw2 = "";
+        } else if (encrypted && creating && pwSource?.from === "command") {
+          try {
+            await api.setPassword(r.id, "");
+          } catch (e) {
+            app.toast("info", `Saved. Encryption will be set up at the first backup: ${(e as Error).message}`);
+          }
+        }
+        if (r.schedule && !creating) app.toast("info", r.schedule);
         initial = JSON.stringify(draft);
         await app.refresh();
-        onsaved(r.id);
+        if (creating) {
+          // The wizard ends on its own screen: what happens next, and the first backup.
+          done = r.id;
+          dir = 1;
+          await tick();
+          scroller?.scrollTo({ top: 0 });
+        } else onsaved(r.id);
       } else {
         const first = r.issues.find((i) => i.severity === "error");
         if (first) void jumpTo(first.field);
@@ -268,17 +601,6 @@
     }
   }
 
-  async function remove() {
-    if (!id) return;
-    try {
-      await api.deleteProfile(id);
-      app.toast("ok", "Profile deleted. Its backups were left in place.");
-      await app.refresh();
-      oncancel();
-    } catch (e) {
-      app.toast("bad", (e as Error).message);
-    }
-  }
 
   const presetLabel: Record<Preset, string> = { hourly: "Every hour", daily: "Every day", weekdays: "Weekdays", weekly: "Once a week", custom: "Custom" };
 </script>
@@ -286,7 +608,7 @@
 {#if loadError}
   <div class="card m-8 flex items-center gap-3 p-5 text-danger"><Icon name="alert" /> {loadError}</div>
 {:else if !draft}
-  <div class="card m-8 h-64 animate-pulse"></div>
+  <div class="mx-auto mt-4 h-64 w-full max-w-[680px] rounded-card bg-surface-2 motion-safe:animate-pulse"></div>
 {:else}
   {#snippet heading(title: string, sub = "")}
     <div>
@@ -295,298 +617,674 @@
     </div>
   {/snippet}
   {#snippet choice(selected: boolean, label: string, onpick: () => void)}
-    <button
-      role="radio"
-      aria-checked={selected}
-      class="pill px-[18px] py-2 text-[13.5px] transition-colors {selected ? 'bg-primary-container font-medium text-on-primary-container' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
-      onclick={onpick}>{label}</button
-    >
+    <button role="radio" aria-checked={selected} onclick={onpick}>{label}</button>
+  {/snippet}
+  <!-- A row that opens a page: its current value, or its problems in red. -->
+  {#snippet pageRow(p: Page, icon: IconName, value: string, subtitle = "")}
+    {@const bad = problems(p)}
+    <Row title={pageTitle[p].title} {subtitle} {icon} value={bad || value} tone={bad ? "danger" : "normal"} onclick={() => openPage(p)} />
   {/snippet}
 
   <div class="flex h-full min-h-0 flex-col">
-    <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-8 pb-10">
-      <div class="mx-auto flex max-w-2xl flex-col gap-3 pt-2">
-        {#each general.filter((i) => i.field === "") as i (i.message)}
-          <div class="card bg-danger/10 px-5 py-3 text-sm text-danger">{i.message}</div>
-        {/each}
+    <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-10 pb-12">
+      <div class="mx-auto flex max-w-[680px] flex-col gap-7 pt-2">
+          <!-- ===================== The questions (shared by Settings and the wizard) ===================== -->
+          {#each general.filter((i) => i.field === "") as i (i.message)}
+            <div class="rounded-card bg-danger/10 px-4 py-3 text-sm text-danger">{i.message}</div>
+          {/each}
 
-        <!-- Name -->
-        <section id="sec-general" class="card flex flex-col gap-4 px-6 py-5">
-          <Field label="Name" id="f-name" issues={at("name")}>
-            <input id="f-name" class="input" bind:value={draft.name} placeholder="Home folder" />
-          </Field>
-          {#if advanced}
-            <Field label="Profile id" id="f-id" hint={creating ? "Used for files and timers; can't be changed later." : "Can't be changed."}>
-              <input id="f-id" class="input font-mono text-[13px]" bind:value={profileId} disabled={!creating} oninput={() => (idTouched = true)} />
-            </Field>
-          {/if}
-        </section>
+          {#snippet nameGroup()}
+            <section id="sec-general">
+              <div class="rows">
+                <label class="row gap-3">
+                  <span class="w-20 shrink-0 font-medium">Name</span>
+                  <input id="f-name" class="input flex-1" bind:value={draft!.name} oninput={() => (nameTouched = true)} placeholder="Home folder" />
+                </label>
+                {#if editingId}
+                  <label class="row gap-3">
+                    <span class="w-20 shrink-0 font-medium">Id</span>
+                    <input id="f-id" class="input flex-1 font-mono text-[13px]" bind:value={profileId} oninput={() => (idTouched = true)} />
+                  </label>
+                {/if}
+              </div>
+              {#each at("name") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+              <p class="mt-1.5 flex items-center gap-1.5 px-0.5 text-[12.5px] text-fg-muted">
+                {#if editingId}
+                  The id names its files and timers; it can't be changed later.
+                {:else}
+                  Saved as <span class="font-mono text-fg-2">{profileId || "…"}</span>
+                  {#if creating}<button class="font-medium text-primary hover:underline" onclick={() => (editingId = true)}>Change</button>{/if}
+                {/if}
+              </p>
+            </section>
+          {/snippet}
 
-        <!-- What -->
-        <section id="sec-sources" class="card flex flex-col gap-4 px-6 py-5">
-          {@render heading("What to back up")}
-          <Field label="" issues={at("sources.paths")}>
-            <ListEditor bind:items={draft.sources.paths} placeholder="/home/you" pick={() => pickFolder("Add a folder to back up")} />
-          </Field>
-          {#if advanced}
-            <Field label="Leave out" hint="*.iso or node_modules/ match anywhere; /path or ~/path one place; ! keeps something back in." issues={at("sources.exclude")}>
-              <ListEditor bind:items={draft.sources.exclude} placeholder="~/Videos/  or  *.iso" />
-            </Field>
-            {#if suggestions.length}
-              {@const exclude = draft.sources.exclude}
-              <div class="flex flex-wrap gap-2" aria-label="Commonly left out">
-                {#each suggestions as sg (sg.pattern)}
-                  {@const added = exclude.includes(sg.pattern)}
-                  <button
-                    class="pill flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] transition-colors {added ? 'bg-primary-container text-on-primary-container' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
-                    title="{sg.why}{sg.size ? ` · ${bytes(sg.size)}` : ''}"
-                    aria-pressed={added}
-                    onclick={() => draft && (draft.sources.exclude = added ? exclude.filter((x) => x !== sg.pattern) : [...exclude, sg.pattern])}
-                  >
-                    <Icon name={added ? "check" : "plus"} size={13} />
-                    {sg.label}{#if sg.size}<span class="num font-mono text-[12px] opacity-70">{bytes(sg.size)}</span>{/if}
-                  </button>
-                {/each}
+
+          {#snippet sourcesAfter()}
+            {@render pageRow("exclusions", "filter", exclusionsSummary)}
+          {/snippet}
+
+          {#snippet whatBody()}
+            {#if draft}
+            <ListEditor bind:items={draft.sources.paths} placeholder="/home/you" icon="folder" label="Folders to back up" pick={() => pickFolder("Add a folder to back up")} after={sourcesAfter} />
+            {#each at("sources.paths") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+            {#if creating && draft.sources.paths.length}
+              <div class="mt-2 flex items-start gap-2 px-0.5 text-[13px] text-fg-2" aria-live="polite">
+                <Icon name="gauge" size={15} class="mt-0.5 shrink-0 text-fg-muted" />
+                {#if estimateError}
+                  <span class="text-fg-muted">Couldn't count the files: {estimateError}</span>
+                {:else if !estimate}
+                  <span class="text-fg-muted motion-safe:animate-pulse">Counting what that adds up to…</span>
+                {:else}
+                  {@const big = estimate.free != null && estimate.bytes > estimate.free}
+                  <span class={estimating ? "opacity-60" : ""}>
+                    About <span class="num font-semibold text-fg">{bytes(estimate.bytes)}</span> in {count(estimate.files)} files, after the exclusions.
+                    {#if draft.engine === "vault" || draft.engine === "borg"}Compression usually makes the first backup smaller.{:else}The first backup copies all of it; later ones only what changed.{/if}
+                    {#if big}<span class="block text-warning">That's more than the {bytes(estimate.free)} free where it would go.</span>{/if}
+                    {#if estimate.unreadable}<span class="block text-fg-muted">{count(estimate.unreadable)} items can't be read as {sys ? "root" : "you"} and would be skipped.</span>{/if}
+                    {#if estimate.missing.length}<span class="block text-warning">Not found: {estimate.missing.join(", ")}</span>{/if}
+                    {#if estimating}<span class="text-fg-muted"> Counting again…</span>{/if}
+                  </span>
+                {/if}
               </div>
             {/if}
-            <div class="grid grid-cols-2 gap-5">
-              <Field label="Skip files larger than" id="f-big" hint="e.g. 4 GiB" issues={at("sources.exclude_larger_than")}>
-                <input id="f-big" class="input" value={draft.sources.exclude_larger_than ?? ""} oninput={(e) => draft && (draft.sources.exclude_larger_than = opt(e.currentTarget.value))} placeholder="no limit" />
-              </Field>
-              <div class="space-y-3 pt-6">
-                <Toggle bind:checked={draft.sources.exclude_caches} label="Skip cache folders" />
-                <Toggle bind:checked={draft.sources.one_file_system} label="Stay on one disk" />
+            {/if}
+          {/snippet}
+
+          {#snippet whereKind()}
+            {#if draft}
+              <div class="segmented" role="radiogroup" aria-label="Destination type">
+                {@render choice(draft.target.kind === "local", "A drive or folder", () => setKind("local"))}
+                {@render choice(draft.target.kind === "ssh", "A server (SSH)", () => setKind("ssh"))}
               </div>
-            </div>
-          {/if}
-        </section>
+            {/if}
+          {/snippet}
 
-        <!-- Where -->
-        <section id="sec-destination" class="card flex flex-col gap-4 px-6 py-5">
-          {@render heading("Where to keep it")}
-          <div class="pill flex gap-1 self-start bg-surface-sunken p-1" role="radiogroup" aria-label="Destination type">
-            {@render choice(draft.target.kind === "local", "A drive or folder", () => setKind("local"))}
-            {@render choice(draft.target.kind === "ssh", "A server (SSH)", () => setKind("ssh"))}
-          </div>
-
-          {#if draft.target.kind === "local"}
-            {@const target = draft.target}
-            {#if drives.length}
-              <div class="grid grid-cols-2 gap-2">
+          {#snippet whereList()}
+            {#if draft}
+            {#if draft.target.kind === "local"}
+              {@const target = draft.target}
+              {@const custom = target.path && !drives.some((d) => d.mount_point === target.path)}
+              <div class="rows" role="radiogroup" aria-label="Where to keep it">
                 {#each drives as d (d.mount_point)}
                   {@const chosen = target.path === d.mount_point}
-                  <button class="flex items-center gap-3 rounded-2xl px-4 py-3 text-left transition-colors {chosen ? 'bg-primary-container text-on-primary-container' : 'bg-surface-3 hover:bg-track'}" onclick={() => useDrive(d)}>
-                    <Icon name="drive" />
+                  <button role="radio" aria-checked={chosen} class="row row-link" onclick={() => useDrive(d)}>
+                    <Icon name="drive" size={17} class="shrink-0 text-fg-2" />
                     <span class="min-w-0 flex-1">
-                      <span class="block truncate text-sm font-medium">{d.label}</span>
-                      <span class="num block truncate text-[12.5px] opacity-75">{bytes(d.free)} free</span>
+                      <span class="block truncate font-medium">{d.label}</span>
+                      <span class="num block truncate text-[12.5px] text-fg-muted">{bytes(d.free)} free · <span class="font-mono">{d.mount_point}</span></span>
                     </span>
-                    {#if chosen}<Icon name="check" />{/if}
+                    {#if chosen}<Icon name="check" size={18} class="shrink-0 text-fg" />{/if}
                   </button>
                 {/each}
-              </div>
-            {/if}
-            <div class="flex items-center gap-2">
-              {#if target.path && !drives.some((d) => d.mount_point === target.path)}
-                <span class="tag max-w-md font-mono"><span class="truncate">{target.path}</span></span>
-              {:else if !drives.length && !target.path}
-                <span class="text-sm text-fg-muted">No drive connected. Plug one in, or choose a folder.</span>
-              {/if}
-              <button class="btn" onclick={chooseFolder}>{drives.length ? "Another folder…" : "Choose a folder…"}</button>
-            </div>
-            {#each at("target.path") as i (i.message)}
-              <!-- A new profile without a target yet isn't an error, just the next step. -->
-              <p class="text-[13px] {creating && !target.path ? 'text-fg-muted' : i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>
-            {/each}
-            {#if advanced}
-              <Field label="Folder" id="f-target" hint={target.fs_uuid ? "Tied to this drive: Flux won't write into the folder when another disk is there." : ""}>
-                <input id="f-target" class="input font-mono text-[13px]" bind:value={target.path} placeholder="/run/media/you/Backup" />
-              </Field>
-            {/if}
-          {:else}
-            {@const target = draft.target}
-            <div class="grid grid-cols-5 gap-4">
-              <div class="col-span-3"><Field label="Server" id="f-host" issues={at("target.host")}><input id="f-host" class="input" bind:value={target.host} placeholder="nas.local" /></Field></div>
-              <div class="col-span-2"><Field label="User" id="f-user" issues={at("target.user")}><input id="f-user" class="input" value={target.user ?? ""} oninput={(e) => (target.user = opt(e.currentTarget.value))} placeholder="optional" /></Field></div>
-              <div class="col-span-5"><Field label="Folder on the server" id="f-rpath" issues={at("target.path")}><input id="f-rpath" class="input font-mono text-[13px]" bind:value={target.path} /></Field></div>
-              {#if advanced}
-                <div><Field label="Port" id="f-port" issues={at("target.port")}><input id="f-port" class="input num" inputmode="numeric" value={target.port ?? ""} oninput={(e) => (target.port = e.currentTarget.value ? Number(e.currentTarget.value) : null)} placeholder="22" /></Field></div>
-                <div class="col-span-4">
-                  <Field label="Key file" id="f-key" hint="Empty: your ssh config and agent decide.">
-                    <div class="flex gap-2">
-                      <input id="f-key" class="input font-mono text-[13px]" value={target.identity_file ?? ""} oninput={(e) => (target.identity_file = opt(e.currentTarget.value))} placeholder="~/.ssh/flux_backup_ed25519" />
-                      <button class="btn" aria-label="Choose key file" onclick={async () => { const f = await pickFile("SSH private key"); if (f) target.identity_file = f; }}><Icon name="folder" size={14} /></button>
-                    </div>
-                  </Field>
-                </div>
-                <div class="col-span-5"><Field label="Upload limit per second" id="f-bw" hint="e.g. 5 MiB"><input id="f-bw" class="input" value={target.bandwidth_limit ?? ""} oninput={(e) => (target.bandwidth_limit = opt(e.currentTarget.value))} placeholder="unlimited" /></Field></div>
-              {/if}
-            </div>
-            <div class="flex items-start gap-3">
-              <button class="btn" onclick={runTest} disabled={testing || !target.host}>{testing ? "Testing…" : "Test connection"}</button>
-              {#if test}
-                <ul class="pt-2 text-[13px] {test.ok ? 'text-success' : 'text-danger'}">
-                  {#each test.messages as m (m)}<li>{m}</li>{/each}
-                </ul>
-              {/if}
-            </div>
-          {/if}
-
-          <!-- Protection -->
-          <div class="flex items-start gap-3 rounded-2xl bg-surface-3 px-4 py-3.5">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={encrypted}
-              aria-label="Encrypt with a password"
-              disabled={!creating && !advanced}
-              class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 {encrypted ? 'bg-primary' : 'bg-track'}"
-              onclick={() => setEncrypted(!encrypted)}
-            >
-              <span class="absolute top-0.5 left-0.5 size-4 rounded-full transition-transform {encrypted ? 'translate-x-4 bg-on-primary' : 'bg-fg-muted'}"></span>
-            </button>
-            <span class="min-w-0">
-              <span class="block text-sm font-medium">Encrypt with a password</span>
-              <span class="block text-[12.5px] text-fg-muted">
-                {encrypted
-                  ? `Nobody can read the backups without the password; they're also compressed and deduplicated.${creating ? " You'll choose the password at the first backup." : ""}`
-                  : "Backups are plain folders you can open in any file manager."}
-              </span>
-            </span>
-          </div>
-          {#if !creating && JSON.parse(initial).engine !== draft.engine}
-            <p class="text-[13px] text-warning">This starts a new backup history. Existing snapshots stay where they are, but won't appear here.</p>
-          {/if}
-
-          {#if advanced}
-            <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Storage engine">
-              {#each [{ e: "mirror", title: "Mirror", text: "Plain hard-linked folders" }, { e: "vault", title: "Vault", text: "Deduplicated, compressed, optionally encrypted" }] as eng (eng.e)}
-                <button role="radio" aria-checked={draft.engine === eng.e} class="rounded-2xl px-4 py-3 text-left transition-colors {draft.engine === eng.e ? 'bg-primary-container text-on-primary-container' : 'bg-surface-3 hover:bg-track'}" onclick={() => setEngine(eng.e as "mirror" | "vault")}>
-                  <span class="block text-sm font-medium">{eng.title}</span>
-                  <span class="block text-[12.5px] opacity-75">{eng.text}</span>
+                {#if custom}
+                  <div class="row" role="radio" aria-checked="true">
+                    <Icon name="folder" size={17} class="shrink-0 text-fg-2" />
+                    <span class="selectable min-w-0 flex-1 truncate font-mono text-[13px]" title={target.path}>{target.path}</span>
+                    <Icon name="check" size={18} class="shrink-0 text-fg" />
+                  </div>
+                {:else if !drives.length && !target.path}
+                  <div class="row text-[13.5px] text-fg-muted">No drive connected. Plug one in, or choose a folder.</div>
+                {/if}
+                <button class="row row-link text-fg-2" onclick={chooseFolder}>
+                  <Icon name="folder" size={17} class="shrink-0" />
+                  <span class="flex-1 font-medium">{drives.length || custom ? "Another folder…" : "Choose a folder…"}</span>
                 </button>
+              </div>
+              {#each at("target.path") as i (i.message)}
+                <!-- A new profile without a target yet isn't an error, just the next step. -->
+                <p class="mt-1.5 px-0.5 text-[12.5px] first-letter:uppercase {creating && !target.path ? 'text-fg-muted' : i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>
               {/each}
+              {#if target.fs_uuid}
+                <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">Tied to this drive: Flux won't write into the folder when another disk is mounted there.</p>
+              {/if}
+            {:else}
+              {@const target = draft.target}
+              <div class="rows">
+                <label class="row gap-3"><span class="w-36 shrink-0 font-medium">Server</span><input id="f-host" class="input flex-1" bind:value={target.host} placeholder="nas.local" /></label>
+                <label class="row gap-3"><span class="w-36 shrink-0 font-medium">User</span><input id="f-user" class="input flex-1" value={target.user ?? ""} oninput={(e) => (target.user = opt(e.currentTarget.value))} placeholder="optional" /></label>
+                <label class="row gap-3"><span class="w-36 shrink-0 font-medium">Folder on the server</span><input id="f-rpath" class="input flex-1 font-mono text-[13px]" bind:value={target.path} /></label>
+                <div class="row gap-3">
+                  <span class="min-w-0 flex-1 text-[13px]">
+                    {#if test}
+                      <span class="block {test.ok ? 'text-success' : 'text-danger'}">{#each test.messages as m (m)}<span class="block">{m}</span>{/each}</span>
+                    {:else}
+                      <span class="text-fg-muted">Checks that Flux can log in and write there.</span>
+                    {/if}
+                  </span>
+                  <button class="btn shrink-0" onclick={runTest} disabled={testing || !target.host}>{testing ? "Testing…" : "Test connection"}</button>
+                </div>
+              </div>
+              {#each [...at("target.host"), ...at("target.user"), ...at("target.path")] as i (i.message)}
+                <!-- Nothing typed yet on a new backup: the next step, not an error. -->
+                <p class="mt-1.5 px-0.5 text-[12.5px] first-letter:uppercase {creating && !target.host ? 'text-fg-muted' : i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>
+              {/each}
+            {/if}
+
+            {/if}
+          {/snippet}
+
+          {#snippet protectRows()}
+            {#if draft}
+            <div class="rows mt-3">
+              {#if draft.target.kind === "ssh"}{@render pageRow("connection", "terminal", connectionSummary)}{/if}
+              <Toggle row icon="lock" checked={encrypted} onchange={setEncrypted} label="Encrypt with a password" hint={encryptText} disabled={encryptLocked} reason={encryptReason} />
+              {#if askPassword}
+                <label class="row gap-3">
+                  <span class="w-5 shrink-0"></span>
+                  <span class="w-32 shrink-0 font-medium capitalize">{pwWord}</span>
+                  <input id="f-pw" type="password" class="input flex-1" bind:value={pw} autocomplete="new-password" placeholder={pwRequired ? "" : "optional"} />
+                </label>
+                <label class="row gap-3">
+                  <span class="w-5 shrink-0"></span>
+                  <span class="w-32 shrink-0 font-medium">Repeat it</span>
+                  <input type="password" class="input flex-1" bind:value={pw2} autocomplete="new-password" />
+                </label>
+              {/if}
+              {@render pageRow("storage", "layers", storageSummary, "Flux's formats, or rsync and Borg so backups work without Flux")}
             </div>
-            {#if draft.engine === "vault" && draft.vault}
-              {@const vault = draft.vault}
-              <Toggle bind:checked={vault.encryption} label="Encrypt" hint={creating ? "Can't be changed once the Vault exists." : "Fixed when the Vault was created."} disabled={!creating} />
-              {#if vault.encryption}
-                <Field label="Password comes from" id="f-pwsrc" issues={at("vault.password_source")} hint={sys ? "System backups run with nobody logged in: unlock once and Flux keeps the password in a root-only key file." : "Scheduled backups need a source that works without you."}>
-                  <select id="f-pwsrc" class="input" value={vault.password_source.from} onchange={(e) => setPasswordSource(e.currentTarget.value)}>
-                    <option value="keyring" disabled={sys}>Desktop keyring (asked once){sys ? " — not for system backups" : ""}</option>
+            {#if askPassword}
+              <p class="mt-1.5 px-0.5 text-[12.5px] {pw && pw2 && pw !== pw2 ? 'text-danger' : 'text-fg-muted'}">
+                {#if pw && pw2 && pw !== pw2}
+                  The two {pwWord}s don't match.
+                {:else if pwSource?.from === "keyring"}
+                  Flux keeps it in your desktop keyring, so scheduled backups run on their own. Write it down too: you need it to restore on another computer, and if it's lost, so are the backups.
+                {:else if pwSource?.from === "prompt"}
+                  Flux asks for it each time a backup starts, so scheduled backups wait for you. Choose the desktop keyring under How backups are stored to let them run on their own.
+                {:else if pwSource?.from === "file"}
+                  Kept in <span class="font-mono">{pwSource.path || "the key file"}</span>. Leave it empty if that file already holds the {pwWord}.
+                {/if}
+                {#if wasEncrypted && neverRan}<span class="block">It hasn't made its first backup yet: set the {pwWord} now so that backup doesn't have to ask.</span>{/if}
+              </p>
+            {/if}
+            {#if engineChanged}
+              <p class="mt-1.5 px-0.5 text-[12.5px] text-warning">This starts a new backup history. Existing snapshots stay where they are, but won't appear here.</p>
+            {/if}
+            {/if}
+          {/snippet}
+
+          {#snippet whenBody()}
+            {#if draft}
+            <div class="segmented flex-wrap" role="radiogroup" aria-label="How often">
+              {@render choice(when === "hourly", "Every hour", () => setWhen("hourly"))}
+              {@render choice(when === "daily", "Every day", () => setWhen("daily"))}
+              {@render choice(when === "weekly", "Once a week", () => setWhen("weekly"))}
+              {@render choice(when === "manual", "Only when I click", () => setWhen("manual"))}
+              {#if when === "custom"}{@render choice(true, presetLabel[preset] === "Custom" ? "Custom" : draft.schedule.trigger === "interval" ? `Every ${draft.schedule.every}` : presetLabel[preset], () => openPage("schedule"))}{/if}
+            </div>
+            <div class="rows mt-3">
+              {#if when === "daily" || when === "weekly"}
+                <div class="row">
+                  <Icon name="clock" size={17} class="shrink-0 text-fg-2" />
+                  <span class="flex-1 font-medium">{when === "weekly" ? "Day and time" : "Time"}</span>
+                  {#if when === "weekly"}
+                    <select class="input w-28" bind:value={weekday} onchange={applyCalendar} aria-label="Day">{#each days as d (d)}<option>{d}</option>{/each}</select>
+                  {/if}
+                  <input type="time" class="input w-32" bind:value={timeOfDay} onchange={applyCalendar} aria-label="Time" />
+                </div>
+              {/if}
+              {#if draft.target.kind === "local" && draft.target.fs_uuid}
+                <Toggle row icon="drive" bind:checked={draft.schedule.on_connect} label="Also when this drive is plugged in" hint="Back up as soon as the drive is connected." />
+              {/if}
+              {@render pageRow("schedule", "calendar", scheduleSummary)}
+            </div>
+            {#each at("schedule.on_connect") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] text-danger">{i.message}</p>{/each}
+            {/if}
+          {/snippet}
+
+          {#snippet passwordGroup()}
+            {#if draft && pwSource}
+            <section>
+              <h3 class="group-title">{askPassword ? `Choose a ${pwWord}` : `Where the ${pwWord} comes from`}</h3>
+              <div class="rows">
+                {#if askPassword}
+                  <label class="row gap-3">
+                    <Icon name="lock" size={17} class="shrink-0 text-fg-2" />
+                    <span class="w-28 shrink-0 font-medium capitalize">{pwWord}</span>
+                    <input id="f-pw" type="password" class="input flex-1" bind:value={pw} autocomplete="new-password" placeholder={pwRequired ? "" : "optional"} />
+                  </label>
+                  <label class="row gap-3">
+                    <span class="w-[17px] shrink-0"></span>
+                    <span class="w-28 shrink-0 font-medium">Repeat it</span>
+                    <input type="password" class="input flex-1" bind:value={pw2} autocomplete="new-password" />
+                  </label>
+                {/if}
+                <!-- Just this choice, in place: not the whole "How backups are stored" dialog. -->
+                <label class="row gap-3">
+                  <Icon name="layers" size={17} class="shrink-0 text-fg-2" />
+                  <span class="flex-1 font-medium">Where it's kept</span>
+                  <select class="input w-auto min-w-56" value={pwSource.from} onchange={(e) => setPasswordSource(e.currentTarget.value)} aria-label="Where the {pwWord} is kept">
+                    <option value="keyring" disabled={sys}>Desktop keyring{sys ? " (not for system)" : ""}</option>
                     <option value="prompt">Ask every time</option>
                     <option value="file">A file</option>
                     <option value="command">A command (e.g. pass)</option>
                   </select>
-                </Field>
-                {#if vault.password_source.from === "file"}
-                  {@const src = vault.password_source}
-                  <Field label="Password file" id="f-pwfile" issues={at("vault")}><input id="f-pwfile" class="input font-mono text-[13px]" bind:value={src.path} placeholder="~/.config/flux-backup/vault.pass" /></Field>
-                {:else if vault.password_source.from === "command"}
-                  {@const src = vault.password_source}
-                  <Field label="Command" id="f-pwcmd"><input id="f-pwcmd" class="input font-mono text-[13px]" bind:value={src.command} placeholder="pass show backup/vault" /></Field>
+                </label>
+                {#if pwSource.from === "file"}
+                  <label class="row gap-3">
+                    <span class="w-[17px] shrink-0"></span>
+                    <span class="w-28 shrink-0 font-medium">Key file</span>
+                    <input class="input flex-1 font-mono text-[13px]" value={pwSource.path} oninput={(e) => setSourceField("path", e.currentTarget.value)} placeholder="~/.config/flux-backup/{profileId || 'backup'}.key" aria-label="Key file" />
+                  </label>
+                {:else if pwSource.from === "command"}
+                  <label class="row gap-3">
+                    <span class="w-[17px] shrink-0"></span>
+                    <span class="w-28 shrink-0 font-medium">Command</span>
+                    <input class="input flex-1 font-mono text-[13px]" value={pwSource.command} oninput={(e) => setSourceField("command", e.currentTarget.value)} placeholder="pass show backup/flux" aria-label="Command" />
+                  </label>
                 {/if}
-              {/if}
-              <Field label="Compression: level {vault.compression_level}" id="f-zstd" hint="0 off · 3 fast (default) · 19 smallest" issues={at("vault.compression_level")}>
-                <input id="f-zstd" type="range" min="0" max="19" class="w-full accent-[var(--c-primary)]" bind:value={vault.compression_level} />
-              </Field>
+              </div>
+              <p class="mt-1.5 px-0.5 text-[12.5px] {pw && pw2 && pw !== pw2 ? 'text-danger' : 'text-fg-muted'}">
+                {#if pw && pw2 && pw !== pw2}
+                  The two {pwWord}s don't match.
+                {:else if pwSource.from === "keyring"}
+                  Flux keeps it in your desktop keyring, so scheduled backups run on their own. Write it down too: you need it to restore on another computer, and if it's lost, so are the backups.
+                {:else if pwSource.from === "prompt"}
+                  Flux asks for it each time a backup starts, so scheduled backups wait for you. Keep it in the desktop keyring to let them run on their own.
+                {:else if pwSource.from === "file"}
+                  Flux writes it to this file (readable only by you) if it doesn't exist yet; leave the {pwWord} empty if the file already holds one.
+                {:else}
+                  Flux runs this command each time it needs the {pwWord}, and sets up the encryption with it when you create the backup.
+                {/if}
+              </p>
+            </section>
             {/if}
-          {/if}
-        </section>
+          {/snippet}
 
-        <!-- When -->
-        <section id="sec-schedule" class="card flex flex-col gap-4 px-6 py-5">
-          {@render heading("When")}
-          <div class="flex flex-wrap gap-2" role="radiogroup" aria-label="How often">
-            {@render choice(when === "hourly", "Every hour", () => setWhen("hourly"))}
-            {@render choice(when === "daily", "Every day", () => setWhen("daily"))}
-            {@render choice(when === "weekly", "Once a week", () => setWhen("weekly"))}
-            {@render choice(when === "manual", "Only when I click", () => setWhen("manual"))}
-            {#if when === "custom" && !advanced}{@render choice(true, "Custom", () => (advanced = true))}{/if}
-          </div>
-          {#if when === "daily" || when === "weekly"}
-            <div class="flex items-center gap-2 text-sm text-fg-2">
-              {#if when === "weekly"}
-                <span>on</span>
-                <select class="input w-28" bind:value={weekday} onchange={applyCalendar} aria-label="Day">{#each days as d (d)}<option>{d}</option>{/each}</select>
-              {/if}
-              <span>at</span>
-              <input type="time" class="input w-32" bind:value={timeOfDay} onchange={applyCalendar} aria-label="Time" />
-            </div>
+          {#if !creating}
+            <!-- ===================== Settings: every question on one page ===================== -->
+            {@render nameGroup()}
+            <section id="sec-sources">
+              <h2 class="group-title">What to back up</h2>
+              {@render whatBody()}
+            </section>
+            <section id="sec-destination">
+              <div class="flex items-end justify-between gap-3 pb-2">
+                <h2 class="group-title pb-0">Where to keep it</h2>
+                {@render whereKind()}
+              </div>
+              {@render whereList()}
+              {@render protectRows()}
+            </section>
+            <section id="sec-schedule">
+              <h2 class="group-title">When</h2>
+              {@render whenBody()}
+            </section>
+            <!-- Keep -->
+            <section id="sec-retention">
+              <h2 class="group-title">What to keep</h2>
+              <div class="rows">{@render pageRow("retention", "history", "", keepSummary)}</div>
+            </section>
+
+            <!-- More -->
+            <section>
+              <h2 class="group-title">More</h2>
+              <div class="rows">
+                {@render pageRow("hooks", "terminal", hooksSummary)}
+                {@render pageRow("options", "gauge", optionsSummary)}
+                {#if !creating && id}
+                  <Row title="Export this profile" subtitle="As a file to import elsewhere, or for borgmatic, restic, rsync or Borg." icon="download" onclick={() => (app.dialog = { kind: "export", id: id! })} />
+                {/if}
+              </div>
+            </section>
+
+            <!-- Last, and apart from everything else (destructive). -->
+            {#if !creating && id}
+              <div class="rows mt-6">
+                <Row
+                  title="Delete this backup profile"
+                  subtitle="Stops these backups and forgets their settings. The backups already made stay where they are."
+                  icon="trash"
+                  tone="danger"
+                  onclick={() => (app.dialog = { kind: "delete-profile", id: id! })}
+                />
+              </div>
+            {/if}
+          {:else if done}
+            <!-- ===================== Wizard: done ===================== -->
+            <section class="animate-step flex flex-col items-start gap-6 pt-4" style:--step-dir={dir}>
+              <span class="glyph glyph-ok size-16"><Icon name="shieldCheck" size={32} /></span>
+              <div>
+                <h2 id="step-title" tabindex="-1" class="text-[26px] leading-tight font-semibold tracking-[-0.015em] text-balance outline-none">“{draft.name}” is set up.</h2>
+                <p class="mt-2 max-w-[60ch] text-[15px] text-fg-2">
+                  {when === "manual" ? "It backs up when you click Back up now." : `It backs up ${whenSummary.charAt(0).toLowerCase()}${whenSummary.slice(1)}, in the background, even with the app closed.`}
+                  The first backup copies everything once; the ones after it only what changed.
+                </p>
+              </div>
+              <div class="rows w-full">
+                <div class="row"><Icon name="folder" size={17} class="shrink-0 text-fg-2" /><span class="min-w-0 flex-1 truncate">{whatSummary}</span></div>
+                <div class="row"><Icon name={draft.target.kind === "ssh" ? "server" : "drive"} size={17} class="shrink-0 text-fg-2" /><span class="min-w-0 flex-1 truncate">{whereSummary}</span></div>
+                {#if encrypted}
+                  <div class="row">
+                    <Icon name="lock" size={17} class="shrink-0 text-fg-2" />
+                    <span class="min-w-0 flex-1">{encReady ? `Encrypted and ready: the ${pwWord} is ${sourceWords[pwSource?.from ?? "keyring"]}.` : `Encrypted. The first backup sets it up and asks for the ${pwWord}.`}</span>
+                  </div>
+                {/if}
+              </div>
+              <div class="flex gap-2">
+                <button class="btn btn-primary h-10 px-5" onclick={startFirst}><Icon name="play" size={14} /> Back up now</button>
+                <button class="btn btn-ghost h-10" onclick={() => done && onsaved(done)}>Later</button>
+              </div>
+            </section>
+          {:else}
+            <!-- ===================== Wizard: one question per step ===================== -->
+            <ol class="flex items-center gap-1.5" aria-label="Setup steps">
+              {#each steps as s, i (s.id)}
+                {@const current = i === stepIndex}
+                {@const passed = i < stepIndex || (i <= reached && !current)}
+                <li class="flex items-center gap-1.5 {i < steps.length - 1 ? 'flex-1' : ''}">
+                  <button
+                    class="flex shrink-0 items-center gap-2 rounded-lg py-1 pr-1.5 pl-1 text-[13px] font-medium transition-colors {current ? 'text-fg' : i <= reached ? 'text-fg-2 hover:text-fg' : 'text-fg-muted'}"
+                    disabled={i > reached}
+                    aria-current={current ? "step" : undefined}
+                    onclick={() => go(s.id)}
+                  >
+                    <span class="grid size-6 place-items-center rounded-full text-[12px] font-semibold {current ? 'bg-primary text-on-primary' : passed ? 'bg-selected text-fg' : 'bg-surface-3 text-fg-muted'}">
+                      {#if passed && !stepIssue(s.id)}<Icon name="check" size={13} />{:else}{i + 1}{/if}
+                    </span>
+                    {s.label}
+                  </button>
+                  {#if i < steps.length - 1}<span class="h-px min-w-3 flex-1 {i < stepIndex ? 'bg-fg-muted/60' : 'bg-sep'}"></span>{/if}
+                </li>
+              {/each}
+            </ol>
+
+            {#key step}
+              <section class="animate-step flex flex-col gap-6" style:--step-dir={dir}>
+                <header>
+                  <h2 id="step-title" tabindex="-1" class="text-[24px] leading-tight font-semibold tracking-[-0.012em] text-balance outline-none">
+                    {step === "review" ? `Ready to create “${draft.name}”` : steps[stepIndex]!.title}
+                  </h2>
+                  <p class="mt-1.5 max-w-[62ch] text-[14.5px] text-fg-2">{steps[stepIndex]!.text}</p>
+                </header>
+
+                {#if step === "what"}
+                  <div id="sec-sources">{@render whatBody()}</div>
+                {:else if step === "where"}
+                  <div id="sec-destination" class="flex flex-col gap-3">
+                    <div class="self-start">{@render whereKind()}</div>
+                    <div>{@render whereList()}</div>
+                    {#if draft.target.kind === "ssh"}<div class="rows">{@render pageRow("connection", "terminal", connectionSummary)}</div>{/if}
+                  </div>
+                {:else if step === "protect"}
+                  <StorageChoice engine={draft.engine} onchoose={(e) => setEngine(e)} />
+                  {#if encrypted}{@render passwordGroup()}{/if}
+                {:else if step === "when"}
+                  <div id="sec-schedule">{@render whenBody()}</div>
+                  <section>
+                    <h3 class="group-title">What to keep</h3>
+                    <div class="rows">{@render pageRow("retention", "history", "", keepSummary)}</div>
+                  </section>
+                {:else}
+                  {@render nameGroup()}
+                  <section>
+                    <h3 class="group-title">Your backup</h3>
+                    <div class="rows">
+                      <Row title="What" icon="folder" subtitle={whatSummary} onclick={() => go("what")} />
+                      <Row title="Where" icon={draft.target.kind === "ssh" ? "server" : "drive"} subtitle={whereSummary} onclick={() => go("where")} />
+                      <Row title="Protection" icon="lock" subtitle={protectSummary} onclick={() => go("protect")} />
+                      <Row title="When" icon="clock" subtitle={whenSummary} onclick={() => go("when")} />
+                      <Row title="What to keep" icon="history" subtitle={keepSummary} onclick={() => openPage("retention")} />
+                    </div>
+                  </section>
+                  <section>
+                    <h3 class="group-title">More options</h3>
+                    <div class="rows">
+                      {@render pageRow("hooks", "terminal", hooksSummary)}
+                      {@render pageRow("options", "gauge", optionsSummary)}
+                    </div>
+                    <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">Optional: the defaults suit most backups.</p>
+                  </section>
+                {/if}
+              </section>
+            {/key}
           {/if}
-          {#if draft.target.kind === "local" && draft.target.fs_uuid}
-            <Toggle bind:checked={draft.schedule.on_connect} label="Also when this drive is plugged in" />
-          {/if}
-          {#each at("schedule.on_connect") as i (i.message)}<p class="text-[13px] text-danger">{i.message}</p>{/each}
-          {#if advanced}
-            <div class="flex flex-wrap gap-2" role="radiogroup" aria-label="More schedules">
-              {@render choice(draft.schedule.trigger === "calendar" && preset === "weekdays", "Weekdays", () => { preset = "weekdays"; if (draft) draft.schedule.trigger = "calendar"; applyCalendar(); })}
-              {@render choice(draft.schedule.trigger === "interval", "Every few hours", () => setTrigger("interval"))}
-              {@render choice(draft.schedule.trigger === "calendar" && preset === "custom", "Custom times", () => { preset = "custom"; if (draft) draft.schedule.trigger = "calendar"; })}
-            </div>
-            {#if draft.schedule.trigger === "calendar" && preset === "weekdays"}
-              <div class="flex items-center gap-2 text-sm text-fg-2"><span>at</span><input type="time" class="input w-32" bind:value={timeOfDay} onchange={applyCalendar} aria-label="Time" /></div>
-            {:else if draft.schedule.trigger === "calendar" && preset === "custom"}
-              <Field label="systemd calendar expression" id="f-cal" issues={at("schedule.on_calendar")} hint="e.g. Mon,Wed,Fri 07:30 or *-*-01 03:00 (man systemd.time)">
-                <input id="f-cal" class="input font-mono text-[13px]" value={draft.schedule.on_calendar ?? ""} oninput={(e) => draft && (draft.schedule.on_calendar = opt(e.currentTarget.value))} />
+      </div>
+    </div>
+
+    <!-- A group of settings opens in a dialog over the editor, so you never lose your place.
+         Its changes join the draft; nothing is saved until Save / Create backup. -->
+    {#if page}
+      <Modal title={pageTitle[page].title} width="max-w-2xl" onclose={() => openPage(null)}>
+        <p class="-mt-1 mb-5 max-w-[62ch] text-[13.5px] text-fg-2">{pageTitle[page].text}</p>
+        <div class="flex flex-col gap-5">
+
+          {#if page === "exclusions"}
+            <section class="flex flex-col gap-4">
+              <Field label="" hint="*.iso or node_modules/ match anywhere; /path or ~/path one place; !pattern keeps something back in." issues={at("sources.exclude")}>
+                <ListEditor bind:items={draft.sources.exclude} placeholder="~/Videos/  or  *.iso" label="Left out" icon="filter" />
               </Field>
-            {:else if draft.schedule.trigger === "interval"}
-              <Field label="Every" issues={at("schedule.every")} hint="Counted from the last successful backup.">
-                <div class="flex gap-2">
-                  <NumberInput bind:value={everyN} min={1} label="Interval" />
-                  <select class="input w-32" bind:value={everyUnit} aria-label="Unit">
-                    <option value="min">minutes</option>
-                    <option value="h">hours</option>
-                    <option value="d">days</option>
-                  </select>
+              {#if suggestions.length}
+                {@const exclude = draft.sources.exclude}
+                <div>
+                  <p class="label pb-2">Often left out (click to add or remove)</p>
+                  <div class="flex flex-wrap gap-2">
+                    {#each suggestions as sg (sg.pattern)}
+                      {@const added = exclude.includes(sg.pattern)}
+                      <button
+                        class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors {added ? 'bg-selected font-medium text-on-selected' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
+                        title="{sg.why}{sg.size ? ` · ${bytes(sg.size)}` : ''}"
+                        aria-pressed={added}
+                        onclick={() => draft && (draft.sources.exclude = added ? exclude.filter((x) => x !== sg.pattern) : [...exclude, sg.pattern])}
+                      >
+                        <Icon name={added ? "check" : "plus"} size={13} />
+                        {sg.label}{#if sg.size}<span class="num font-mono text-[12px] opacity-70">{bytes(sg.size)}</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
                 </div>
+              {/if}
+            </section>
+            <div class="rows">
+              <Toggle row bind:checked={draft.sources.exclude_caches} label="Skip cache folders" hint="Folders marked with a CACHEDIR.TAG (browser and app caches)." />
+              <Toggle row bind:checked={draft.sources.one_file_system} label="Stay on one disk" hint="Don't follow into other drives mounted inside the folders you back up." />
+              <Row title="Skip files larger than" subtitle="Very large files (disk images, videos) can be left out.">
+                <input class="input w-36" value={draft.sources.exclude_larger_than ?? ""} oninput={(e) => draft && (draft.sources.exclude_larger_than = opt(e.currentTarget.value))} placeholder="no limit" aria-label="Skip files larger than" />
+              </Row>
+            </div>
+            {#each [...at("sources.exclude_larger_than"), ...at("sources.exclude_caches")] as i (i.message)}<p class="text-[13px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+            <section>
+              <h2 class="group-title">Skip folders that contain a file named</h2>
+              <Field label="" hint="e.g. .nobackup: put an empty file with this name in any folder to leave it out.">
+                <ListEditor bind:items={draft.sources.exclude_if_present!} placeholder=".nobackup" label="Marker files" />
               </Field>
-            {/if}
-            {#if draft.schedule.trigger === "calendar"}
-              <Toggle bind:checked={draft.schedule.catch_up} label="Catch up on missed backups" hint="If the computer was off at the time, back up soon after it starts." />
-            {/if}
-            <Toggle bind:checked={draft.schedule.skip_on_battery} label="Wait for mains power" hint="Scheduled backups don't run on battery." />
-          {/if}
-        </section>
-
-        <!-- Keep -->
-        <section id="sec-retention" class="card flex flex-col gap-4 px-6 py-5">
-          {@render heading("What to keep", keepSummary)}
-          {#if advanced}
-            <Toggle bind:checked={draft.retention.enabled} label="Remove old snapshots automatically" hint="The newest, pinned and named snapshots always stay." />
-            {#if draft.retention.enabled}
-              {@const r = draft.retention}
-              <div class="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2.5 text-sm text-fg-2">
-                <span>Always keep the newest</span><NumberInput bind:value={r.keep_last} label="Keep last" />
-                <span>One per hour, for … hours</span><NumberInput bind:value={r.keep_hourly} label="Hourly" />
-                <span>One per day, for … days</span><NumberInput bind:value={r.keep_daily} label="Daily" />
-                <span>One per week, for … weeks</span><NumberInput bind:value={r.keep_weekly} label="Weekly" />
-                <span>One per month, for … months</span><NumberInput bind:value={r.keep_monthly} label="Monthly" />
-                <span>One per year, for … years</span><NumberInput bind:value={r.keep_yearly} label="Yearly" />
+            </section>
+          {:else if page === "storage"}
+            <section>
+              <StorageChoice engine={draft.engine} onchoose={(e) => setEngine(e)} />
+              {#if engineChanged}
+                <p class="mt-4 rounded-lg bg-warning/10 px-4 py-3 text-[13px] text-warning">This starts a new backup history. Existing snapshots stay where they are, but won't appear here.</p>
+              {/if}
+            </section>
+            {#if draft.engine === "vault" && draft.vault}
+              {@const vault = draft.vault}
+              <div class="rows">
+                <Toggle row bind:checked={vault.encryption} label="Encrypt" hint="Without it, the Vault is compressed and deduplicated but readable by anyone with the drive." disabled={!creating && !engineChanged} reason="Fixed when the Vault was created." />
+                {#if vault.encryption}
+                  <Row title="Password comes from" subtitle={sys ? "System backups run with nobody logged in: unlock once and Flux keeps the password in a root-only key file." : "Scheduled backups need a source that works without you."}>
+                    <select class="input w-auto min-w-56" value={vault.password_source.from} onchange={(e) => setPasswordSource(e.currentTarget.value)} aria-label="Password comes from">
+                      <option value="keyring" disabled={sys}>Desktop keyring{sys ? " (not for system)" : ""}</option>
+                      <option value="prompt">Ask every time</option>
+                      <option value="file">A file</option>
+                      <option value="command">A command (e.g. pass)</option>
+                    </select>
+                  </Row>
+                {/if}
+                <Row title="Compression: level {vault.compression_level}" subtitle="0 off · 3 fast (default) · 19 smallest">
+                  <input type="range" min="0" max="19" class="w-40 accent-[var(--c-primary)]" bind:value={vault.compression_level} aria-label="Compression level" />
+                </Row>
               </div>
-              <div class="grid grid-cols-3 gap-4">
-                <Field label="Keep everything from the last" id="f-within" hint="e.g. 1 day" issues={at("retention.keep_within")}>
-                  <input id="f-within" class="input" value={r.keep_within ?? ""} oninput={(e) => (r.keep_within = opt(e.currentTarget.value))} placeholder="—" />
+              {#if vault.encryption && vault.password_source.from === "file"}
+                {@const src = vault.password_source}
+                <Field label="Password file" id="f-pwfile" issues={at("vault")}><input id="f-pwfile" class="input font-mono text-[13px]" bind:value={src.path} placeholder="~/.config/flux-backup/vault.pass" /></Field>
+              {:else if vault.encryption && vault.password_source.from === "command"}
+                {@const src = vault.password_source}
+                <Field label="Command" id="f-pwcmd"><input id="f-pwcmd" class="input font-mono text-[13px]" bind:value={src.command} placeholder="pass show backup/vault" /></Field>
+              {/if}
+            {:else if draft.engine === "borg" && draft.borg}
+              {@const borg = draft.borg}
+              <div class="rows">
+                <Row title="Encryption" subtitle={creating || engineChanged ? "Fixed when the repository is created." : "Fixed when the repository was created."}>
+                  <select class="input w-auto min-w-56" bind:value={borg.encryption} disabled={!creating && !engineChanged} aria-label="Encryption">
+                    <option value="repokey-blake2">repokey-blake2 (recommended)</option>
+                    <option value="repokey">repokey (SHA-256)</option>
+                    <option value="none">none</option>
+                  </select>
+                </Row>
+                {#if borg.encryption !== "none"}
+                  <Row title="Passphrase comes from" subtitle={sys ? "System backups run with nobody logged in: unlock once and Flux keeps it in a root-only key file." : "Scheduled backups need a source that works without you."}>
+                    <select class="input w-auto min-w-56" value={borg.password_source.from} onchange={(e) => setPasswordSource(e.currentTarget.value)} aria-label="Passphrase comes from">
+                      <option value="keyring" disabled={sys}>Desktop keyring{sys ? " (not for system)" : ""}</option>
+                      <option value="prompt">Ask every time</option>
+                      <option value="file">A file</option>
+                      <option value="command">A command (e.g. pass)</option>
+                    </select>
+                  </Row>
+                {/if}
+                <Row title="Compression" subtitle="Borg's --compression: lz4, zstd,3, auto,zstd,10, none">
+                  <input class="input w-40 font-mono text-[13px]" list="borg-compressions" bind:value={borg.compression} aria-label="Compression" />
+                  <datalist id="borg-compressions"><option value="lz4"></option><option value="zstd,3"></option><option value="zstd,10"></option><option value="auto,zstd,6"></option><option value="none"></option></datalist>
+                </Row>
+                {#if draft.target.kind === "ssh"}
+                  <Row title="borg on the server" subtitle="Only if it isn't on the server's PATH.">
+                    <input class="input w-40 font-mono text-[13px]" value={borg.remote_path ?? ""} oninput={(e) => (borg.remote_path = opt(e.currentTarget.value))} placeholder="borg" aria-label="borg on the server" />
+                  </Row>
+                {/if}
+              </div>
+              {#each at("borg") as i (i.message)}<p class="text-[13px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+              {#if borg.encryption !== "none" && borg.password_source.from === "file"}
+                {@const src = borg.password_source}
+                <Field label="Passphrase file"><input class="input font-mono text-[13px]" bind:value={src.path} placeholder="~/.config/flux-backup/borg.pass" /></Field>
+              {:else if borg.encryption !== "none" && borg.password_source.from === "command"}
+                {@const src = borg.password_source}
+                <Field label="Command"><input class="input font-mono text-[13px]" bind:value={src.command} placeholder="pass show backup/borg" /></Field>
+              {/if}
+              <section class="card px-6 py-5">
+                <Field label="Extra borg create options" hint="For Borg users, e.g. --checkpoint-interval=600. Recorded in the recovery script." issues={at("borg.extra_args")}>
+                  <ListEditor bind:items={borg.extra_args!} placeholder="--checkpoint-interval=600" />
                 </Field>
-                <Field label="Never keep longer than" id="f-maxage" hint="e.g. 2 years" issues={at("retention.max_age")}>
-                  <input id="f-maxage" class="input" value={r.max_age ?? ""} oninput={(e) => (r.max_age = opt(e.currentTarget.value))} placeholder="no limit" />
+              </section>
+            {:else if draft.engine === "rsync" && draft.rsync}
+              {@const rs = draft.rsync}
+              <section class="card px-6 py-5">
+                <Field label="Extra rsync options" hint="For rsync users, e.g. --compress for slow links. Recorded with every snapshot." issues={at("rsync.extra_args")}>
+                  <ListEditor bind:items={rs.extra_args!} placeholder="--compress" />
                 </Field>
-                <Field label="Keep this much free" id="f-minfree" hint="e.g. 50 GiB" issues={at("retention.min_free_space")}>
-                  <input id="f-minfree" class="input" value={r.min_free_space ?? ""} oninput={(e) => (r.min_free_space = opt(e.currentTarget.value))} placeholder="—" />
+              </section>
+            {/if}
+          {:else if page === "connection" && draft.target.kind === "ssh"}
+            {@const target = draft.target}
+            <section class="card grid grid-cols-5 gap-4 px-6 py-5">
+              <div class="col-span-1"><Field label="Port" id="f-port" issues={at("target.port")}><input id="f-port" class="input num" inputmode="numeric" value={target.port ?? ""} oninput={(e) => (target.port = e.currentTarget.value ? Number(e.currentTarget.value) : null)} placeholder="22" /></Field></div>
+              <div class="col-span-4">
+                <Field label="Key file" id="f-key" hint="Empty: your ssh config and agent decide.">
+                  <div class="flex gap-2">
+                    <input id="f-key" class="input font-mono text-[13px]" value={target.identity_file ?? ""} oninput={(e) => (target.identity_file = opt(e.currentTarget.value))} placeholder="~/.ssh/flux_backup_ed25519" />
+                    <button class="btn" aria-label="Choose key file" onclick={async () => { const f = await pickFile("SSH private key"); if (f) target.identity_file = f; }}><Icon name="folder" size={14} /></button>
+                  </div>
                 </Field>
               </div>
-              <Toggle bind:checked={r.keep_named} label="Never remove named snapshots" />
-              {#each at("retention").filter((i) => i.field === "retention") as i (i.message)}<p class="text-sm text-danger">{i.message}</p>{/each}
+              <div class="col-span-5"><Field label="Upload limit per second" id="f-bw" hint="e.g. 5 MiB. Empty: as fast as the connection allows."><input id="f-bw" class="input" value={target.bandwidth_limit ?? ""} oninput={(e) => (target.bandwidth_limit = opt(e.currentTarget.value))} placeholder="unlimited" /></Field></div>
+              <div class="col-span-5"><Field label="Extra ssh options" hint="As in ssh -o: Compression=no, ProxyJump=gateway…"><ListEditor bind:items={target.ssh_options!} placeholder="Compression=no" /></Field></div>
+            </section>
+            <div class="flex items-start gap-3">
+              <button class="btn" onclick={runTest} disabled={testing || !target.host}>{testing ? "Testing…" : "Test connection"}</button>
+              {#if test}<ul class="pt-2 text-[13px] {test.ok ? 'text-success' : 'text-danger'}">{#each test.messages as m (m)}<li>{m}</li>{/each}</ul>{/if}
+            </div>
+          {:else if page === "schedule"}
+            <section class="card flex flex-col gap-4 px-6 py-5">
+              <div class="segmented flex-wrap self-start" role="radiogroup" aria-label="Other timings">
+                {@render choice(draft.schedule.trigger === "calendar" && preset === "weekdays", "Weekdays", () => { preset = "weekdays"; if (draft) draft.schedule.trigger = "calendar"; applyCalendar(); })}
+                {@render choice(draft.schedule.trigger === "interval", "Every few hours", () => setTrigger("interval"))}
+                {@render choice(draft.schedule.trigger === "calendar" && preset === "custom", "Custom times", () => { preset = "custom"; if (draft) draft.schedule.trigger = "calendar"; })}
+              </div>
+              {#if draft.schedule.trigger === "calendar" && preset === "weekdays"}
+                <div class="flex items-center gap-2 text-sm text-fg-2"><span>Monday to Friday at</span><input type="time" class="input w-32" bind:value={timeOfDay} onchange={applyCalendar} aria-label="Time" /></div>
+              {:else if draft.schedule.trigger === "calendar" && preset === "custom"}
+                <Field label="systemd calendar expression" id="f-cal" issues={at("schedule.on_calendar")} hint="e.g. Mon,Wed,Fri 07:30 or *-*-01 03:00 (man systemd.time)">
+                  <input id="f-cal" class="input font-mono text-[13px]" value={draft.schedule.on_calendar ?? ""} oninput={(e) => draft && (draft.schedule.on_calendar = opt(e.currentTarget.value))} />
+                </Field>
+              {:else if draft.schedule.trigger === "interval"}
+                <Field label="Every" issues={at("schedule.every")} hint="Counted from the last successful backup.">
+                  <div class="flex gap-2">
+                    <NumberInput bind:value={everyN} min={1} label="Interval" />
+                    <select class="input w-32" bind:value={everyUnit} aria-label="Unit">
+                      <option value="min">minutes</option>
+                      <option value="h">hours</option>
+                      <option value="d">days</option>
+                    </select>
+                  </div>
+                </Field>
+              {:else}
+                <p class="text-[13px] text-fg-muted">The main page sets hourly, daily and weekly backups. Pick one of these for other timings.</p>
+              {/if}
+            </section>
+            <div class="rows">
+              <Toggle row bind:checked={draft.schedule.catch_up} label="Catch up on missed backups" hint="If the computer was off at the time, back up soon after it starts." disabled={draft.schedule.trigger !== "calendar"} reason="Only for backups at set times." />
+              <Toggle row bind:checked={draft.schedule.skip_on_battery} label="Wait for mains power" hint="Scheduled backups don't run on battery." />
+              <Toggle
+                row
+                bind:checked={draft.schedule.skip_on_metered!}
+                label="Not on metered connections"
+                hint="Scheduled backups to a server wait while you're on mobile data or a phone's hotspot (as NetworkManager reports it)."
+                disabled={draft.target.kind !== "ssh"}
+                reason="Only for backups to a server: a drive doesn't use the network."
+              />
+            </div>
+            <section class="flex flex-col gap-2">
+              <h3 class="px-1 text-[14px] font-medium">Upkeep after scheduled backups</h3>
+              <div class="rows">
+                <Toggle row bind:checked={draft.maintenance!.verify_monthly} label="Verify every byte once a month" hint="Reads all stored data back to make sure it can be restored. Takes a while; you're notified if anything is wrong." />
+                <Toggle
+                  row
+                  bind:checked={draft.maintenance!.free_space_weekly}
+                  label="Free up space once a week"
+                  hint="Old snapshots are removed at each backup; this deletes the data only they used."
+                  disabled={draft.engine !== "vault"}
+                  reason={draft.engine === "borg" ? "Borg frees the space when it removes snapshots." : "Plain folders free their space straight away."}
+                />
+              </div>
+            </section>
+          {:else if page === "retention"}
+            {@const r = draft.retention}
+            <div class="rows">
+              <Toggle row bind:checked={r.enabled} label="Remove old snapshots automatically" hint="The newest, pinned and named snapshots always stay." />
+              {#if r.enabled}<Toggle row bind:checked={r.keep_named} label="Never remove named snapshots" />{/if}
+            </div>
+            {#if r.enabled}
+              <section class="card flex flex-col gap-4 px-6 py-5">
+                <h3 class="text-[14px] font-medium">Keep</h3>
+                <div class="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2.5 text-sm text-fg-2">
+                  <span>The newest snapshots</span><NumberInput bind:value={r.keep_last} label="Keep last" />
+                  <span>One per hour, for … hours</span><NumberInput bind:value={r.keep_hourly} label="Hourly" />
+                  <span>One per day, for … days</span><NumberInput bind:value={r.keep_daily} label="Daily" />
+                  <span>One per week, for … weeks</span><NumberInput bind:value={r.keep_weekly} label="Weekly" />
+                  <span>One per month, for … months</span><NumberInput bind:value={r.keep_monthly} label="Monthly" />
+                  <span>One per year, for … years</span><NumberInput bind:value={r.keep_yearly} label="Yearly" />
+                </div>
+                <div class="grid grid-cols-3 gap-4">
+                  <Field label="Everything from the last" id="f-within" hint="e.g. 1 day" issues={at("retention.keep_within")}>
+                    <input id="f-within" class="input" value={r.keep_within ?? ""} oninput={(e) => (r.keep_within = opt(e.currentTarget.value))} placeholder="—" />
+                  </Field>
+                  <Field label="Never longer than" id="f-maxage" hint="e.g. 2 years" issues={at("retention.max_age")}>
+                    <input id="f-maxage" class="input" value={r.max_age ?? ""} oninput={(e) => (r.max_age = opt(e.currentTarget.value))} placeholder="no limit" />
+                  </Field>
+                  <Field label="Keep this much free" id="f-minfree" hint="e.g. 50 GiB" issues={at("retention.min_free_space")}>
+                    <input id="f-minfree" class="input" value={r.min_free_space ?? ""} oninput={(e) => (r.min_free_space = opt(e.currentTarget.value))} placeholder="—" />
+                  </Field>
+                </div>
+                {#each at("retention").filter((i) => i.field === "retention") as i (i.message)}<p class="text-sm text-danger">{i.message}</p>{/each}
+              </section>
             {/if}
             {#if preview}
-              <div class="rounded-2xl bg-surface-sunken p-1.5">
+              <div class="rounded-lg bg-surface-3/50 p-1.5">
                 <div class="flex justify-between px-3 pt-2 pb-1 text-[13px]">
                   <span class="text-fg-2">Your snapshots with these rules</span>
                   <span class={previewRemoved ? "text-warning" : "text-fg-muted"}>{previewRemoved ? `${previewRemoved} of ${preview.length} would go` : `all ${preview.length} stay`}</span>
                 </div>
                 <ul class="max-h-56 overflow-y-auto text-[13px]">
                   {#each preview as row (row.id)}
-                    <li class="flex items-center gap-3 rounded-xl px-3 py-1.5 {row.keep ? '' : 'text-danger'}" title={row.keep ? row.reasons.join(", ") : row.expired ? "older than the limit" : "no rule keeps it"}>
+                    <li class="flex items-center gap-3 rounded-md px-3 py-1.5 {row.keep ? '' : 'text-danger'}" title={row.keep ? row.reasons.join(", ") : row.expired ? "older than the limit" : "no rule keeps it"}>
                       <Icon name={row.keep ? "check" : "trash"} size={13} class={row.keep ? "text-success" : ""} />
                       <span class="num">{dateTime(row.time)}</span>
                       <span class="min-w-0 flex-1 truncate text-fg-muted">{row.name ?? ""}</span>
@@ -595,111 +1293,116 @@
                 </ul>
               </div>
             {/if}
-          {/if}
-        </section>
-
-        {#if advanced}
-          <!-- Hooks -->
-          <section id="sec-hooks" class="card flex flex-col gap-4 px-6 py-5">
-            {@render heading("Hooks", "Shell commands run around each backup, one per line. A failing “before” command cancels it.")}
-            {#each [{ k: "pre_backup", label: "Before the backup", ph: "mount /mnt/nas" }, { k: "post_backup", label: "After a successful backup", ph: "notify-send 'Backup done'" }, { k: "on_error", label: "When a backup fails", ph: "logger -t flux \"$FLUX_ERROR\"" }] as h (h.k)}
-              {@const key = h.k as "pre_backup" | "post_backup" | "on_error"}
-              <Field label={h.label} id="f-{h.k}">
-                <textarea
-                  id="f-{h.k}"
-                  class="input h-16 py-2 font-mono text-[13px]"
-                  placeholder={h.ph}
-                  value={(draft.hooks?.[key] ?? []).join("\n")}
-                  oninput={(e) => draft && (draft.hooks = { ...(draft.hooks ?? {}), [key]: lines(e.currentTarget.value) })}
-                ></textarea>
+          {:else if page === "hooks"}
+            <section class="card flex flex-col gap-4 px-6 py-5">
+              {#each [{ k: "pre_backup", label: "Before the backup", ph: "mount /mnt/nas" }, { k: "post_backup", label: "After a successful backup", ph: "notify-send 'Backup done'" }, { k: "on_error", label: "When a backup fails", ph: "logger -t flux \"$FLUX_ERROR\"" }] as h (h.k)}
+                {@const key = h.k as "pre_backup" | "post_backup" | "on_error"}
+                <Field label={h.label} id="f-{h.k}">
+                  <textarea
+                    id="f-{h.k}"
+                    class="input h-16 py-2 font-mono text-[13px]"
+                    placeholder={h.ph}
+                    value={(draft.hooks?.[key] ?? []).join("\n")}
+                    oninput={(e) => draft && (draft.hooks = { ...(draft.hooks ?? {}), [key]: lines(e.currentTarget.value) })}
+                  ></textarea>
+                </Field>
+              {/each}
+              <Field label="Stop a hook after" id="f-hooktimeout" issues={at("hooks.timeout")}>
+                <input id="f-hooktimeout" class="input w-40" value={draft.hooks?.timeout ?? ""} oninput={(e) => draft && (draft.hooks = { ...(draft.hooks ?? {}), timeout: opt(e.currentTarget.value) })} placeholder="10m" />
               </Field>
-            {/each}
-            <Field label="Stop a hook after" id="f-hooktimeout" issues={at("hooks.timeout")}>
-              <input id="f-hooktimeout" class="input w-40" value={draft.hooks?.timeout ?? ""} oninput={(e) => draft && (draft.hooks = { ...(draft.hooks ?? {}), timeout: opt(e.currentTarget.value) })} placeholder="10m" />
-            </Field>
-          </section>
-
-          <!-- Options -->
-          <section id="sec-advanced" class="card flex flex-col gap-4 px-6 py-5">
-            {@render heading("Options")}
-            <div class="grid grid-cols-2 gap-x-8 gap-y-4">
-              <Toggle bind:checked={draft.options.preserve_acl} label="Keep ACLs" />
-              <Toggle bind:checked={draft.options.preserve_xattr} label="Keep extended attributes" />
-              <Toggle bind:checked={draft.options.continue_on_errors} label="Finish despite unreadable files" />
-              <Toggle bind:checked={draft.options.snapshot_if_unchanged} label="Snapshot even when nothing changed" />
-              <Toggle bind:checked={draft.options.notify} label="Notify me about problems" />
-              <Toggle bind:checked={draft.options.backup_before_restore} label="Keep my files when restoring over them" />
-            </div>
-            <div class="grid grid-cols-2 gap-5">
-              <Field label="Symbolic links" id="f-links">
-                <select id="f-links" class="input" bind:value={draft.options.symlinks}>
+            </section>
+          {:else if page === "options"}
+            <h3 class="pt-2 text-[13px] font-medium text-fg-muted">What's kept with your files</h3>
+            <div class="rows">
+              <Toggle row bind:checked={draft.options.preserve_acl} label="Keep access lists (ACLs)" hint="Extra permissions some files have." />
+              <Toggle row bind:checked={draft.options.preserve_xattr} label="Keep extended attributes" hint="Labels and metadata some apps attach to files." />
+              <Row title="Symbolic links" subtitle="Shortcuts to other files or folders.">
+                <select class="input w-auto min-w-56" bind:value={draft.options.symlinks} aria-label="Symbolic links">
                   <option value="preserve">Store links as links</option>
                   <option value="follow_unsafe">Follow links pointing outside</option>
                   <option value="follow">Always follow links</option>
                 </select>
-              </Field>
-              <Field label="Detect changes by" id="f-detect">
-                <select id="f-detect" class="input" bind:value={draft.options.change_detection}>
+              </Row>
+              <Row title="Detect changes by" subtitle="Checksums also catch edits that kept the date, but read every file.">
+                <select class="input w-auto min-w-56" bind:value={draft.options.change_detection} aria-label="Detect changes by">
                   <option value="metadata">Size and time (fast)</option>
                   <option value="checksum">Content checksums (slow)</option>
                 </select>
-              </Field>
-              <Field label="CPU priority: nice {draft.options.nice}" id="f-nice">
-                <input id="f-nice" type="range" min="0" max="19" class="w-full accent-[var(--c-primary)]" bind:value={draft.options.nice} />
-              </Field>
-              <Field label="Disk priority" id="f-io">
-                <select id="f-io" class="input" bind:value={draft.options.io_priority}>
+              </Row>
+            </div>
+            <h3 class="pt-2 text-[13px] font-medium text-fg-muted">How backups run</h3>
+            <div class="rows">
+              <Toggle row bind:checked={draft.options.continue_on_errors} label="Finish despite unreadable files" hint="They're listed in the backup's details." />
+              <Toggle row bind:checked={draft.options.snapshot_if_unchanged} label="Snapshot even when nothing changed" hint={draft.engine === "borg" ? "Borg always makes an archive." : "Usually skipped: the newest snapshot is still up to date."} disabled={draft.engine === "borg"} reason="Borg makes an archive every time." />
+              <Row title="Disk priority" subtitle="Lower priority keeps the computer responsive during backups.">
+                <select class="input w-auto min-w-56" bind:value={draft.options.io_priority} aria-label="Disk priority">
                   <option value="normal">Normal</option>
                   <option value="best_effort_low">Low</option>
                   <option value="idle">Only when the disk is idle</option>
                 </select>
-              </Field>
-              <Field label="Worker threads (0 = automatic)">
+              </Row>
+              <Row title="CPU priority: nice {draft.options.nice}" subtitle="0 normal · 19 lowest">
+                <input type="range" min="0" max="19" class="w-40 accent-[var(--c-primary)]" bind:value={draft.options.nice} aria-label="CPU priority" />
+              </Row>
+              <Row title="Worker threads" subtitle="0 lets Flux decide.">
                 <NumberInput bind:value={draft.options.threads} max={256} label="Worker threads" />
-              </Field>
+              </Row>
             </div>
-          </section>
-
-          {#if !creating}
-            <section class="card flex items-center gap-3 px-6 py-4">
-              <span class="min-w-0 flex-1 text-sm text-fg-2">Delete this profile. Its backups stay where they are.</span>
-              {#if confirmDelete}
-                <button class="btn btn-danger" onclick={remove}>Delete profile</button>
-                <button class="btn btn-ghost" onclick={() => (confirmDelete = false)}>Keep</button>
-              {:else}
-                <button class="btn btn-danger" onclick={() => (confirmDelete = true)}>Delete…</button>
-              {/if}
-            </section>
+            <h3 class="pt-2 text-[13px] font-medium text-fg-muted">Restoring and notifications</h3>
+            <div class="rows">
+              <Toggle row bind:checked={draft.options.backup_before_restore} label="Keep my files when restoring over them" hint="Differing files are renamed instead of replaced." />
+              <Toggle row bind:checked={draft.options.notify} label="Notify me about problems" hint="A desktop notification when a backup fails or skips files." />
+            </div>
           {/if}
-        {/if}
-
-        <button class="btn btn-ghost mt-1 self-center" aria-expanded={advanced} onclick={() => (advanced = !advanced)}>
-          <Icon name={advanced ? "chevronDown" : "settings"} size={15} />
-          {advanced ? "Hide advanced options" : "Advanced options"}
-        </button>
-      </div>
-    </div>
+        </div>
+        <!-- Pinned to the dialog's bottom edge, so Done is always in reach. -->
+        <div class="sticky bottom-0 z-10 -mx-6 mt-6 -mb-6 flex items-center gap-3 border-t border-sep bg-surface-1 px-6 py-3">
+          <span class="text-[12.5px] text-fg-muted">{creating ? "Applies to this new backup." : "Saved when you click Save."}</span>
+          <button class="btn btn-primary ml-auto" onclick={() => openPage(null)}>Done</button>
+        </div>
+      </Modal>
+    {/if}
 
     <!-- Footer -->
-    <footer class="flex items-center gap-3 px-8 py-4">
-      {#if totalErrors}
-        {@const first = issues.find((i) => i.severity === "error")!}
-        <button class="flex min-w-0 items-center gap-1.5 text-left text-sm {creating ? 'text-fg-2' : 'text-danger'}" onclick={() => void jumpTo(first.field)}>
-          {#if creating}
-            <span class="truncate">To finish: {first.message}{totalErrors > 1 ? ` (and ${totalErrors - 1} more)` : ""}</span>
+    {#if creating && done}
+      <!-- The closing screen carries its own buttons. -->
+    {:else if creating}
+      {@const issue = stepIssue(step)}
+      <footer class="flex items-center gap-3 border-t border-sep bg-surface-1 px-10 py-3">
+        <button class="btn btn-ghost -ml-3" onclick={oncancel}>Cancel</button>
+        {#if issue}<span class="min-w-0 truncate text-sm text-fg-2 first-letter:uppercase">To {step === "review" ? "finish" : "continue"}: {issue}</span>{/if}
+        <div class="ml-auto flex shrink-0 gap-2">
+          {#if stepIndex > 0}<button class="btn" onclick={back}><Icon name="chevronLeft" size={15} /> Back</button>{/if}
+          {#if step !== "review"}
+            <button class="btn btn-primary" onclick={next} disabled={!!issue}>Continue <Icon name="chevronRight" size={15} /></button>
           {:else}
-            <Icon name="alert" size={15} /> {totalErrors === 1 ? "One thing to fix" : `${totalErrors} things to fix`}
+            <button class="btn btn-primary" onclick={save} disabled={saving || !!issue}>{saving ? "Creating…" : "Create backup"}</button>
           {/if}
-        </button>
-      {:else if dirty && !creating}
-        <span class="text-sm text-fg-muted">Unsaved changes</span>
-      {/if}
-      <div class="ml-auto flex gap-2">
-        <button class="btn btn-ghost" onclick={oncancel}>Cancel</button>
-        <button class="btn btn-primary h-10" onclick={save} disabled={saving || totalErrors > 0 || !dirty || !profileId}>
-          {saving ? "Saving…" : creating ? "Create backup" : "Save"}
-        </button>
-      </div>
-    </footer>
+        </div>
+      </footer>
+    {:else}
+      <footer class="flex items-center gap-3 border-t border-sep bg-surface-1 px-10 py-3">
+        {#if totalErrors}
+          {@const first = issues.find((i) => i.severity === "error")!}
+          <button class="flex min-w-0 items-center gap-1.5 text-left text-sm {creating ? 'text-fg-2' : 'text-danger'} hover:underline" onclick={() => void jumpTo(first.field)}>
+            {#if creating}
+              <span class="truncate">To finish: {first.message}{totalErrors > 1 ? ` (and ${totalErrors - 1} more)` : ""}</span>
+            {:else}
+              <Icon name="alert" size={15} /> {totalErrors === 1 ? "One thing to fix" : `${totalErrors} things to fix`}
+            {/if}
+          </button>
+        {:else if pwIssue}
+          <span class="truncate text-sm text-fg-2">To finish: {pwIssue}</span>
+        {:else if dirty && !creating}
+          <span class="text-sm text-fg-muted">Unsaved changes</span>
+        {/if}
+        <div class="ml-auto flex gap-2">
+          <button class="btn btn-ghost" onclick={oncancel}>Cancel</button>
+          <button class="btn btn-primary" onclick={save} disabled={saving || totalErrors > 0 || !!pwIssue || (!dirty && !pw) || !profileId}>
+            {saving ? "Saving…" : creating ? "Create backup" : "Save"}
+          </button>
+        </div>
+      </footer>
+    {/if}
   </div>
 {/if}

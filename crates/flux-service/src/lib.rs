@@ -8,7 +8,11 @@
 pub mod actions;
 pub mod client;
 pub mod edit;
+pub mod extras;
+pub mod find;
+pub mod prefs;
 pub mod protocol;
+pub mod space;
 pub mod views;
 pub mod watch;
 
@@ -21,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use flux_core::{Paths, Profile, ProfileId, ProfileStore, Scope};
-use flux_fs::entry::Entry;
 use flux_runner::password::PasswordError;
 use flux_runner::repo::{AnyRepo, RepoError};
 use flux_runner::schedule::UnitEnv;
@@ -60,8 +63,11 @@ impl From<RepoError> for ApiError {
         let code = match &e {
             RepoError::Password(PasswordError::Unavailable(..))
             | RepoError::Vault(VaultError::PasswordRequired) => "password_required",
-            RepoError::Vault(VaultError::WrongPassword) => "wrong_password",
+            RepoError::Vault(VaultError::WrongPassword)
+            | RepoError::Compat(flux_compat::CompatError::WrongPassphrase) => "wrong_password",
+            RepoError::Compat(flux_compat::CompatError::PassphraseRequired) => "password_required",
             RepoError::Empty(_) => "empty",
+            RepoError::Compat(flux_compat::CompatError::Tool(_)) => "tool_missing",
             _ => "error",
         };
         ApiError::new(code, e.to_string())
@@ -90,8 +96,9 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 /// Snapshot entries cached for browsing (a few recent snapshots).
 const CACHE_SNAPSHOTS: usize = 4;
 
-/// (profile id, snapshot id) → that snapshot's entries, most recently used first.
-type EntryCache = VecDeque<((String, String), Arc<Vec<Entry>>)>;
+/// (profile id, snapshot id) → that snapshot's entries and folder index, most recently
+/// used first.
+type EntryCache = VecDeque<((String, String), Arc<views::SnapshotIndex>)>;
 
 /// One scope's profiles (yours, or the system's) and what the app remembers about them.
 pub struct Service {
@@ -103,6 +110,8 @@ pub struct Service {
     backup_cmd: Vec<OsString>,
     /// The `flux` CLI that timers run.
     unit_bin: PathBuf,
+    /// The latest size estimate; older ones still running stop.
+    pub(crate) estimate_gen: std::sync::atomic::AtomicU64,
 }
 
 impl Service {
@@ -126,6 +135,7 @@ impl Service {
             entries: Mutex::new(VecDeque::new()),
             backup_cmd,
             unit_bin,
+            estimate_gen: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

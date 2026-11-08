@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder};
 use std::io;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -18,7 +19,8 @@ use crate::manifest::{Entry, Kind};
 use crate::plan::{Action, Plan};
 use crate::repo::FileError;
 use flux_fs::fsops::{
-    ApplyPolicy, Copier, apply_metadata, make_special, make_tree_writable, remove_force,
+    ApplyPolicy, Copier, apply_metadata, apply_metadata_fd, make_special, make_tree_writable,
+    remove_force,
 };
 
 pub struct ExecCtx<'a> {
@@ -31,6 +33,8 @@ pub struct ExecCtx<'a> {
     pub resume: bool,
     pub policy: &'a ApplyPolicy,
     pub copier: &'a Copier,
+    /// How many large files may be copied at once (spinning disks: two).
+    pub gate: &'a flux_fs::disk::IoGate,
     pub progress: &'a Progress,
     pub report: Reporter<'a>,
     pub continue_on_errors: bool,
@@ -107,61 +111,83 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
         cleanup_partial(ctx.dest, plan).map_err(|e| MirrorError::io(ctx.dest, e))?;
     }
 
-    // 1. Directories, parents first (path order guarantees that). Private until finished.
+    // Directories by depth: every directory of one level is independent of the others.
+    let levels = dir_levels(plan);
+
+    // 1. Directories, one level at a time (parents before children), each level in
+    // parallel. Private until finished.
     let mut builder = DirBuilder::new();
     builder.mode(0o700);
-    for (idx, e) in plan.entries.iter().enumerate() {
-        if plan.actions[idx] != Action::Mkdir {
-            continue;
-        }
-        let d = st.dest(e);
-        match builder.create(&d) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists && d.is_dir() => {}
-            Err(err) => st.fail(idx, e, err),
-        }
-        ctx.progress.entries_done.fetch_add(1, Relaxed);
+    for level in &levels {
+        level.par_iter().for_each(|&idx| {
+            let e = &plan.entries[idx];
+            let d = st.dest(e);
+            match builder.create(&d) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists && d.is_dir() => {}
+                Err(err) => st.fail(idx, e, err),
+            }
+        });
+        ctx.progress
+            .entries_done
+            .fetch_add(level.len() as u64, Relaxed);
     }
 
-    // 2. Everything except hard-link followers, in parallel.
-    (0..n).into_par_iter().for_each(|idx| {
-        if st.stopped() {
-            return;
-        }
-        let e = &plan.entries[idx];
-        let r = match plan.actions[idx] {
-            Action::Mkdir | Action::LinkGroup(_) => return,
-            Action::LinkPrev => link_prev(&st, e),
-            Action::Copy => copy_from_source(&st, e, ctx.resume),
-            Action::Symlink => make_symlink(&st, e),
-            Action::Special => make_special_file(&st, e),
-        };
-        if let Err(err) = r {
-            st.fail(idx, e, err);
-        }
-        ctx.progress.entries_done.fetch_add(1, Relaxed);
-    });
+    // 2. Everything except hard-link followers, in parallel. Progress counts per chunk
+    // of entries, not per file (sixteen threads bumping one counter per file contend).
+    (0..n)
+        .into_par_iter()
+        .chunks(PROGRESS_CHUNK)
+        .for_each(|chunk| {
+            let mut done = 0;
+            for idx in chunk {
+                if st.stopped() {
+                    break;
+                }
+                let e = &plan.entries[idx];
+                let r = match plan.actions[idx] {
+                    Action::Mkdir | Action::LinkGroup(_) => continue,
+                    Action::LinkPrev => link_prev(&st, e),
+                    Action::Copy => copy_from_source(&st, e, ctx.resume),
+                    Action::Symlink => make_symlink(&st, e),
+                    Action::Special => make_special_file(&st, e),
+                };
+                if let Err(err) = r {
+                    st.fail(idx, e, err);
+                }
+                done += 1;
+            }
+            ctx.progress.entries_done.fetch_add(done, Relaxed);
+        });
 
     // 3. Hard-link followers: link to their leader's new copy.
-    (0..n).into_par_iter().for_each(|idx| {
-        let Action::LinkGroup(leader) = plan.actions[idx] else {
-            return;
-        };
-        if st.stopped() {
-            return;
-        }
-        let e = &plan.entries[idx];
-        let r = if st.failed[leader].load(Relaxed) {
-            copy_from_source(&st, e, ctx.resume)
-        } else {
-            let dst = st.dest(e);
-            remove_force(&dst).and_then(|()| fs::hard_link(st.dest(&plan.entries[leader]), &dst))
-        };
-        if let Err(err) = r {
-            st.fail(idx, e, err);
-        }
-        ctx.progress.entries_done.fetch_add(1, Relaxed);
-    });
+    (0..n)
+        .into_par_iter()
+        .chunks(PROGRESS_CHUNK)
+        .for_each(|chunk| {
+            let mut done = 0;
+            for idx in chunk {
+                let Action::LinkGroup(leader) = plan.actions[idx] else {
+                    continue;
+                };
+                if st.stopped() {
+                    break;
+                }
+                let e = &plan.entries[idx];
+                let r = if st.failed[leader].load(Relaxed) {
+                    copy_from_source(&st, e, ctx.resume)
+                } else {
+                    let dst = st.dest(e);
+                    remove_force(&dst)
+                        .and_then(|()| fs::hard_link(st.dest(&plan.entries[leader]), &dst))
+                };
+                if let Err(err) = r {
+                    st.fail(idx, e, err);
+                }
+                done += 1;
+            }
+            ctx.progress.entries_done.fetch_add(done, Relaxed);
+        });
 
     if ctx.progress.is_cancelled() {
         return Err(MirrorError::Cancelled);
@@ -175,15 +201,17 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
         ));
     }
 
-    // 4. Directory metadata, children before parents, so restrictive modes and mtimes
-    // aren't disturbed by later writes.
-    for (idx, e) in plan.entries.iter().enumerate().rev() {
-        if plan.actions[idx] == Action::Mkdir
-            && !st.failed[idx].load(Relaxed)
-            && let Err(err) = apply_metadata(&st.dest(e), e, ctx.policy)
-        {
-            st.fail(idx, e, err);
-        }
+    // 4. Directory metadata, deepest level first (children before parents, so restrictive
+    // modes and mtimes aren't disturbed by later writes), each level in parallel.
+    for level in levels.iter().rev() {
+        level.par_iter().for_each(|&idx| {
+            let e = &plan.entries[idx];
+            if !st.failed[idx].load(Relaxed)
+                && let Err(err) = apply_metadata(&st.dest(e), e, ctx.policy)
+            {
+                st.fail(idx, e, err);
+            }
+        });
     }
 
     Ok(ExecResult {
@@ -193,6 +221,25 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
         copied_bytes: st.copied_bytes.into_inner(),
         linked_files: st.linked_files.into_inner(),
     })
+}
+
+/// Entries handled per progress update.
+const PROGRESS_CHUNK: usize = 256;
+
+/// The plan's directories grouped by depth, shallowest first.
+fn dir_levels(plan: &Plan) -> Vec<Vec<usize>> {
+    let mut levels: Vec<Vec<usize>> = Vec::new();
+    for (idx, e) in plan.entries.iter().enumerate() {
+        if plan.actions[idx] != Action::Mkdir {
+            continue;
+        }
+        let depth = e.path.iter().filter(|&&b| b == b'/').count();
+        if levels.len() <= depth {
+            levels.resize_with(depth + 1, Vec::new);
+        }
+        levels[depth].push(idx);
+    }
+    levels
 }
 
 fn link_prev(st: &State<'_>, e: &Entry) -> io::Result<()> {
@@ -238,7 +285,15 @@ fn copy_from_source(st: &State<'_>, e: &Entry, resume: bool) -> io::Result<()> {
         remove_force(&dst)?;
     }
     let src = e.abs_path();
-    let n = st.ctx.copier.copy(&src, &dst, st.ctx.progress)?;
+    let output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&dst)?;
+    let n = {
+        let _turn = st.ctx.gate.enter(e.size);
+        st.ctx.copier.copy_to(&src, &output, st.ctx.progress)?
+    };
     if n != e.size {
         (st.ctx.report)(Event::Warning {
             path: src.display().to_string(),
@@ -254,7 +309,9 @@ fn copy_from_source(st: &State<'_>, e: &Entry, resume: bool) -> io::Result<()> {
     }
     st.copied_files.fetch_add(1, Relaxed);
     st.copied_bytes.fetch_add(n, Relaxed);
-    apply_metadata(&dst, e, st.ctx.policy)
+    // Owner, permissions, extended attributes and mtime through the open file: no path
+    // lookups, and nothing can be swapped in between.
+    apply_metadata_fd(output.as_fd(), e, st.ctx.policy, 0)
 }
 
 fn make_symlink(st: &State<'_>, e: &Entry) -> io::Result<()> {

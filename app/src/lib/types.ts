@@ -1,6 +1,9 @@
 // Shapes of the JSON exchanged with the Rust side (see app/src-tauri/src/commands.rs).
 
-export type Engine = "mirror" | "vault";
+export type Engine = "mirror" | "vault" | "rsync" | "borg";
+/** Compatibility mode: the backups are written by a standard tool, in its own format. */
+export const isCompat = (e: Engine | undefined | null) => e === "rsync" || e === "borg";
+export const engineLabel: Record<Engine, string> = { mirror: "Mirror", vault: "Vault", rsync: "rsync", borg: "Borg" };
 export type Kind = "dir" | "file" | "symlink" | "fifo" | "char_device" | "block_device" | "socket";
 export type SnapshotStatus = "complete" | "complete_with_errors";
 export type RunStatus =
@@ -76,6 +79,8 @@ export interface ProfileSummary {
   /** Human-readable target, e.g. "/run/media/me/Backup" or "ssh://nas/srv/backup". */
   target: string;
   remote: boolean;
+  /** What it backs up, home shown as `~` (older helpers don't send it). */
+  sources?: string[];
   schedule: string;
   /** Validation errors (empty when the profile is usable). */
   errors: string[];
@@ -89,11 +94,65 @@ export interface Overview {
   oldest: string | null;
   latest: SnapshotMeta | null;
   recent_runs: RunRecord[];
+  /** RFC 3339. */
   next_run: string | null;
   timer_active: boolean;
   free_bytes: number | null;
   /** Why snapshots couldn't be read (e.g. the drive isn't connected). */
   repo_error: string | null;
+  /** Things worth knowing, in words. */
+  health: Health[];
+  /** Free space, its history and forecast (local targets). */
+  space: Space | null;
+}
+
+/** A health warning, in words. */
+export interface Health {
+  level: "warning" | "danger";
+  text: string;
+  /** What to do about it. */
+  hint: string | null;
+}
+
+/** One local calendar day of a backup's history. */
+export interface Day {
+  /** YYYY-MM-DD. */
+  date: string;
+  state: "ok" | "failed" | "none";
+  /** Copied (Mirror, rsync) or stored (Vault, Borg) that day. */
+  bytes: number;
+}
+
+/** How a backup is doing, without opening its repository (no password needed). */
+export interface BackupStatus {
+  /** RFC 3339. */
+  next_run: string | null;
+  timer_active: boolean;
+  /** The last backup that kept a copy. RFC 3339. */
+  last_good: string | null;
+  health: Health[];
+  /** The last 30 days, oldest first. */
+  days: Day[];
+}
+
+/** What a profile being set up would back up. */
+export interface Estimate {
+  files: number;
+  folders: number;
+  bytes: number;
+  unreadable: number;
+  missing: string[];
+  free: number | null;
+}
+
+export interface Space {
+  free: number;
+  size: number | null;
+  /** Oldest first, ending with now. */
+  points: { t: string; free: number }[];
+  /** Change in free bytes per day (negative: filling up); null without enough history. */
+  per_day: number | null;
+  days_left: number | null;
 }
 
 export interface DirEntry {
@@ -146,6 +205,60 @@ export interface RestoreOutcome {
   would_write: string[];
 }
 
+/** A path found in any snapshot. */
+export interface Found {
+  path: string;
+  kind: "file" | "dir" | "symlink" | "fifo" | "char_device" | "block_device" | "socket";
+  /** Distinct versions across the snapshots. */
+  versions: number;
+  snapshots: number;
+  /** Newest snapshot containing it. */
+  latest: string;
+  latest_size: number;
+  latest_mtime: number;
+}
+
+export interface FindResult {
+  hits: Found[];
+  total: number;
+  snapshots: number;
+}
+
+/** One distinct version of a path, held by snapshots `first`…`last`. */
+export interface Version {
+  first: string;
+  last: string;
+  snapshots: number;
+  kind: Found["kind"];
+  size: number;
+  mtime: number;
+}
+
+/** What a restore would do. */
+export interface RestorePreview {
+  new: number;
+  differ: number;
+  identical: number;
+  new_folders: number;
+  bytes: number;
+  keep_existing: boolean;
+  differ_paths: string[];
+  new_paths: string[];
+  unsafe_paths: number;
+}
+
+/** Scheduled backups paused until a moment, or until resumed (`until: null`). */
+export interface Pause {
+  until: string | null;
+}
+
+export interface Preferences {
+  notify_success: boolean;
+  default_exclude: string[];
+  default_exclude_custom: boolean;
+  pause: Pause | null;
+}
+
 export type ApiErrorCode =
   | "password_required"
   | "wrong_password"
@@ -158,6 +271,7 @@ export type ApiErrorCode =
   | "helper_missing"
   | "helper_failed"
   | "bad_request"
+  | "cancelled"
   | "error";
 
 export interface SystemStatus {
@@ -233,6 +347,7 @@ export interface Profile {
     every?: string | null;
     catch_up: boolean;
     skip_on_battery: boolean;
+    skip_on_metered?: boolean;
     on_connect: boolean;
   };
   options: {
@@ -250,6 +365,57 @@ export interface Profile {
   };
   hooks?: { pre_backup?: string[]; post_backup?: string[]; on_error?: string[]; timeout?: string | null };
   vault?: { compression_level: number; encryption: boolean; password_source: PasswordSource } | null;
+  rsync?: { extra_args?: string[] } | null;
+  borg?: BorgOptions | null;
+  /** Upkeep after scheduled backups (absent: the defaults). */
+  maintenance?: { verify_monthly: boolean; free_space_weekly: boolean };
+}
+
+export type BorgEncryption = "repokey-blake2" | "repokey" | "none";
+
+export interface BorgOptions {
+  encryption: BorgEncryption;
+  compression: string;
+  password_source: PasswordSource;
+  remote_path?: string | null;
+  extra_args?: string[];
+}
+
+/** Whether a standard tool (rsync, borg) is installed. */
+export interface ToolStatus {
+  tool: "rsync" | "borg";
+  program: string;
+  version: string | null;
+  supported: boolean;
+  hint: string | null;
+}
+
+export interface ExportFormat {
+  id: "flux" | "borgmatic" | "restic" | "rsync" | "borg";
+  label: string;
+  description: string;
+  works_with: string;
+}
+
+export interface ProfileExport {
+  format: ExportFormat["id"];
+  filename: string;
+  contents: string;
+  executable: boolean;
+  /** What couldn't be carried over. */
+  notes: string[];
+}
+
+/** How to use a compatibility-mode profile's backups without Flux. */
+export interface RecoveryKit {
+  engine: Engine;
+  /** Where the backups and the kit are (a path, or user@host:path). */
+  location: string;
+  /** FLUX-RECOVERY.txt */
+  recovery: string;
+  /** flux-backup.sh */
+  script: string;
+  tool: ToolStatus;
 }
 
 export interface Issue {

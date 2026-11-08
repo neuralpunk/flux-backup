@@ -100,6 +100,7 @@ pub struct Found {
     /// Newest snapshot containing the path.
     pub latest: String,
     pub latest_size: u64,
+    pub latest_mtime: i64,
 }
 
 /// Paths matching `matches` in any of `snaps` (oldest first), searched in parallel.
@@ -133,6 +134,7 @@ pub fn find<E: Send>(
                     f.snapshots += 1;
                     f.latest = snap.id.clone();
                     f.latest_size = e.size;
+                    f.latest_mtime = e.mtime;
                     f.kind = e.kind;
                     *prev = e;
                     *prev_i = i;
@@ -145,6 +147,7 @@ pub fn find<E: Send>(
                         snapshots: 1,
                         latest: snap.id.clone(),
                         latest_size: e.size,
+                        latest_mtime: e.mtime,
                     };
                     acc.insert(e.path.clone(), (e, i, f));
                 }

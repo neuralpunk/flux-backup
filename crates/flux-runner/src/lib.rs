@@ -2,14 +2,18 @@
 //! the GUI.
 //!
 //! ```text
-//! battery check (scheduled runs) → lower priority (scheduled runs) → inhibit suspend
-//!   → pre_backup hooks → engine backup (+ retention) → post_backup / on_error hooks
-//!   → notification (failures) → run record + event log
+//! pause, battery and metered checks (scheduled runs) → lower priority (scheduled runs)
+//!   → inhibit suspend → pre_backup hooks → engine backup (+ retention)
+//!   → post_backup / on_error hooks → upkeep when due (scheduled runs)
+//!   → notification (failures; successes if asked) → run record + event log
 //! ```
 
 pub mod desktop;
+pub mod index;
 pub mod jobs;
+pub mod maintenance;
 pub mod password;
+pub mod prefs;
 pub mod repo;
 pub mod runlog;
 pub mod schedule;
@@ -55,6 +59,8 @@ pub enum RunError {
     #[error(transparent)]
     Repo(#[from] repo::RepoError),
     #[error(transparent)]
+    Compat(#[from] flux_compat::CompatError),
+    #[error(transparent)]
     Hook(#[from] HookError),
     #[error("skipped: {0}")]
     Skipped(String),
@@ -67,9 +73,9 @@ pub enum RunError {
 impl RunError {
     pub fn is_cancelled(&self) -> bool {
         match self {
-            RunError::Engine(MirrorError::Cancelled) | RunError::Vault(VaultError::Cancelled) => {
-                true
-            }
+            RunError::Engine(MirrorError::Cancelled)
+            | RunError::Vault(VaultError::Cancelled)
+            | RunError::Compat(flux_compat::CompatError::Cancelled) => true,
             RunError::Repo(r) => r.is_cancelled(),
             _ => false,
         }
@@ -144,6 +150,15 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
         }
         let mut hooks_run: Vec<HookRun> = Vec::new();
         let outcome = run_inner(job, progress, &tee, &mut hooks_run);
+        if job.trigger == Trigger::Scheduled
+            && !job.dry_run
+            && matches!(
+                outcome,
+                Ok(BackupOutcome::Created { .. } | BackupOutcome::Unchanged { .. })
+            )
+        {
+            maintenance::after_backup(job.paths, job.id, job.profile, job.ask, progress, &tee);
+        }
         let record = finish_run(job, started, &log.run_id, progress, &outcome, hooks_run);
         if let Some(sh) = &shared {
             sh.finish(record.status, record.error.clone());
@@ -177,6 +192,19 @@ fn quick_skip(job: &BackupJob<'_>, now: Timestamp) -> Option<String> {
     let p = job.profile;
     if job.trigger != Trigger::Scheduled {
         return None;
+    }
+    if let Some(pause) = prefs::pause(job.paths, now) {
+        return Some(match pause.until {
+            Some(t) => format!(
+                "scheduled backups are paused until {}",
+                t.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%d %H:%M")
+            ),
+            None => "scheduled backups are paused".into(),
+        });
+    }
+    if p.schedule.skip_on_metered && matches!(p.target, Target::Ssh { .. }) && power::metered() {
+        return Some("on a metered connection".into());
     }
     if job.only_if_due
         && p.schedule.trigger == flux_core::profile::Trigger::Interval
@@ -226,6 +254,7 @@ fn unrecorded(
         stats: None,
         warnings: 0,
         hooks: Vec::new(),
+        free_after: None,
     };
     RunResult { record, outcome }
 }
@@ -253,6 +282,20 @@ fn finish_run(
                     &format!(
                         "{} items could not be backed up. Run `flux info {} {}` for details.",
                         snapshot.errors_total, job.id, snapshot.id
+                    ),
+                    desktop::Urgency::Normal,
+                )
+            }
+            (Ok(BackupOutcome::Created { snapshot, .. }), RunStatus::Completed)
+                if job.trigger == Trigger::Scheduled
+                    && prefs::Settings::load(job.paths).notify_success =>
+            {
+                desktop::notify(
+                    &format!("Backed up “{}”", p.name),
+                    &format!(
+                        "{} new or changed files, {} copied.",
+                        snapshot.stats.new + snapshot.stats.changed,
+                        flux_core::ByteSize(snapshot.stats.copied_bytes).display_approx()
                     ),
                     desktop::Urgency::Normal,
                 )
@@ -287,6 +330,27 @@ fn finish_run(
         stats,
         warnings: progress.warnings.load(std::sync::atomic::Ordering::Relaxed),
         hooks: hooks_run,
+        free_after: free_space(&p.target),
+    }
+}
+
+/// Free space on a local target's filesystem.
+pub fn free_space(target: &flux_core::profile::Target) -> Option<u64> {
+    match target {
+        flux_core::profile::Target::Local { path, .. } => rustix::fs::statvfs(path)
+            .ok()
+            .map(|v| v.f_bavail.saturating_mul(v.f_frsize)),
+        flux_core::profile::Target::Ssh { .. } => None,
+    }
+}
+
+/// Size of a local target's filesystem.
+pub fn disk_size(target: &flux_core::profile::Target) -> Option<u64> {
+    match target {
+        flux_core::profile::Target::Local { path, .. } => rustix::fs::statvfs(path)
+            .ok()
+            .map(|v| v.f_blocks.saturating_mul(v.f_frsize)),
+        flux_core::profile::Target::Ssh { .. } => None,
     }
 }
 
@@ -365,6 +429,21 @@ fn run_inner(
             )
             .map_err(RunError::from),
             Engine::Vault => vault_backup(job, progress, report),
+            Engine::Borg => borg_backup(job, progress, report),
+            Engine::Rsync => flux_compat::rsync::backup(
+                &flux_compat::rsync::BackupRequest {
+                    paths: job.paths,
+                    id: job.id,
+                    profile: p,
+                    name: job.name.clone(),
+                    dry_run: job.dry_run,
+                    prune: job.prune,
+                    batch: job.ask.is_none(),
+                },
+                progress,
+                report,
+            )
+            .map_err(RunError::from),
         });
 
     match &result {
@@ -373,7 +452,17 @@ fn run_inner(
             let status = match outcome {
                 BackupOutcome::Created { snapshot, .. } => {
                     env.insert("FLUX_SNAPSHOT_ID".into(), snapshot.id.clone());
-                    if let Ok(repo) = flux_mirror::open_repo(job.id, p) {
+                    if p.engine == Engine::Rsync {
+                        env.insert(
+                            "FLUX_SNAPSHOT_PATH".into(),
+                            format!(
+                                "{}/{}/{}",
+                                flux_compat::rsync::repo_location(job.id, p),
+                                flux_compat::rsync::SNAPSHOTS,
+                                snapshot.id
+                            ),
+                        );
+                    } else if let Ok(repo) = flux_mirror::open_repo(job.id, p) {
                         env.insert(
                             "FLUX_SNAPSHOT_PATH".into(),
                             repo.snapshot_dir(&snapshot.id).display().to_string(),
@@ -414,6 +503,51 @@ fn run_inner(
     result
 }
 
+fn borg_backup(
+    job: &BackupJob<'_>,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<BackupOutcome, RunError> {
+    let p = job.profile;
+    let passphrase = if p.password_source().is_some() && !job.dry_run {
+        let exists = flux_compat::borg::repository_exists(job.paths, job.id, p, job.ask.is_none())?;
+        Some(
+            password::obtain(
+                job.id,
+                p,
+                if exists {
+                    password::Purpose::Open
+                } else {
+                    password::Purpose::Create
+                },
+                job.ask,
+            )
+            .map_err(repo::RepoError::from)?,
+        )
+    } else if p.password_source().is_some() {
+        Some(
+            password::obtain(job.id, p, password::Purpose::Open, job.ask)
+                .map_err(repo::RepoError::from)?,
+        )
+    } else {
+        None
+    };
+    Ok(flux_compat::borg::backup(
+        &flux_compat::borg::BackupRequest {
+            paths: job.paths,
+            id: job.id,
+            profile: p,
+            name: job.name.clone(),
+            dry_run: job.dry_run,
+            prune: job.prune,
+            batch: job.ask.is_none(),
+            passphrase,
+        },
+        progress,
+        report,
+    )?)
+}
+
 fn vault_backup(
     job: &BackupJob<'_>,
     progress: &Progress,
@@ -437,6 +571,7 @@ fn vault_backup(
             name: job.name.clone(),
             dry_run: job.dry_run,
             never,
+            cache_dir: Some(job.paths.cache_dir.join("vault")),
         },
         progress,
         report,

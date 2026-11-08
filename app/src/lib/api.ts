@@ -9,15 +9,20 @@ import {
   type Comparison,
   type Drive,
   type Editable,
+  type ExportFormat,
+  type FindResult,
   type Issue,
   type JobMessage,
   type Listing,
   type LoggedEvent,
   type Overview,
+  type BackupStatus,
   type PreviewRow,
   type Profile,
   type ProfileSummary,
+  type ProfileExport,
   type PruneSummary,
+  type RecoveryKit,
   type RestoreOutcome,
   type RunRecord,
   type SaveResult,
@@ -25,6 +30,12 @@ import {
   type Suggestion,
   type SystemStatus,
   type TargetTest,
+  type ToolStatus,
+  type RestorePreview,
+  type Version,
+  type Estimate,
+  type Pause,
+  type Preferences,
 } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -50,11 +61,17 @@ async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise
 export const api = {
   profiles: () => call<ProfileSummary[]>("profiles"),
   overview: (id: string) => call<Overview>("overview", { id }),
+  /** How a backup is doing, from its run log and timer (cheap; never asks for a password). */
+  status: (id: string) => call<BackupStatus>("status", { id }),
   snapshots: (id: string) => call<SnapshotMeta[]>("snapshots", { id }),
   listDir: (id: string, snapshot: string, path: string) => call<Listing>("list_dir", { id, snapshot, path }),
   unlock: (id: string, password: string, create = false) => call<void>("unlock", { id, password, create }),
   /** Keep the unlocked Vault password in a root-only key file, for scheduled backups. */
   saveKeyFile: (id: string) => call<string>("save_key_file", { id }),
+  /** While setting a backup up: create its encrypted repository now with this password
+   * (or check it opens the existing one) and keep it where the profile's password comes
+   * from, so the first backup, even a scheduled one, needs nobody to type it. */
+  setPassword: (id: string, password: string) => call<void>("set_password", { id, password }),
   backupNow: (id: string) => call<void>("backup_now", { id }),
   cancel: (id: string) => call<void>("cancel", { id }),
   restore: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean) =>
@@ -85,13 +102,43 @@ export const api = {
       setName: "name" in change,
       pinned: change.pinned ?? null,
     }),
-  /** Bytes freed (Vaults), or `null` (Mirrors, whose folders simply go). */
+  /** Bytes freed (Vault, Borg), or `null` (Mirror, rsync: folders simply go). */
   deleteSnapshot: (id: string, snapshot: string) => call<number | null>("delete_snapshot", { id, snapshot }),
   compare: (id: string, old: string, newer: string | null) => call<Comparison>("compare", { id, old, new: newer }),
   runs: (id: string, limit = 100) => call<RunRecord[]>("runs", { id, limit }),
   runEvents: (id: string, runId: string) => call<LoggedEvent[]>("run_events", { id, runId }),
   prune: (id: string, dryRun: boolean) => call<PruneSummary>("prune", { id, dryRun }),
   check: (id: string, readData: boolean) => call<CheckSummary>("check", { id, readData }),
+
+  /** Compatibility mode: the recovery guide and script for a profile. */
+  recoveryKit: (id: string) => call<RecoveryKit>("recovery_kit", { id }),
+  /** Save the guide and script into a folder; returns the files written. */
+  saveRecoveryKit: (id: string, dir: string) => call<string[]>("save_recovery_kit", { id, dir }),
+  /** Copy a file out of a snapshot and open it in its usual program; returns the copy. */
+  openFile: (id: string, snapshot: string, path: string) => call<string>("open_snapshot_file", { id, snapshot, path }),
+  /** Copy a profile; returns the new id. */
+  duplicateProfile: (id: string) => call<string>("duplicate_profile", { id }),
+  /** Text for a bug report (secrets hidden). */
+  diagnostics: (id: string) => call<string>("diagnostics", { id }),
+  preferences: () => call<Preferences>("preferences"),
+  savePreferences: (notifySuccess: boolean, defaultExclude: string[] | null) =>
+    call<Preferences>("save_preferences", { notifySuccess, defaultExclude }),
+  setPause: (pause: "hour" | "tomorrow" | "resumed" | "off") => call<Pause | null>("set_pause", { pause }),
+  autostart: () => call<boolean>("autostart"),
+  setAutostart: (on: boolean) => call<void>("set_autostart", { on }),
+  find: (id: string, query: string) => call<FindResult>("find", { id, query }),
+  versions: (id: string, path: string) => call<Version[]>("versions", { id, path }),
+  estimate: (profile: Profile, system = false) => call<Estimate>("estimate", { profile, system }),
+  restorePreview: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean) =>
+    call<RestorePreview>("restore_preview", { id, snapshot, paths, to, overwrite }),
+  exportFormats: () => call<ExportFormat[]>("export_formats"),
+  exportProfile: (id: string, format: string) => call<ProfileExport>("export_profile", { id, format }),
+  /** Save an export into a folder; returns the file written. */
+  saveExport: (id: string, format: string, dir: string) => call<string>("save_export", { id, format, dir }),
+  /** Import the Flux profile in a file; returns its new id and any problems. */
+  importProfile: (path: string, system = false) => call<{ id: string; issues: Issue[] }>("import_profile", { path, system }),
+  /** Are rsync and borg installed? */
+  tools: () => call<ToolStatus[]>("tools"),
 };
 
 /** Subscribe to backend events. Returns an unsubscribe function. */

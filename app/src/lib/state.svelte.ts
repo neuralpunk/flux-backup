@@ -1,7 +1,7 @@
 // Application state shared across components (Svelte 5 runes).
 
-import { api, listen, type JobEventPayload } from "./api";
-import { ApiError, type JobEvent, type ProfileSummary, type ProgressSnapshot, type RunStatus, type SystemStatus } from "./types";
+import { api, listen, pickFile, type JobEventPayload } from "./api";
+import { ApiError, type BackupStatus, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type SystemStatus } from "./types";
 
 export interface Job {
   profile: string;
@@ -25,6 +25,16 @@ function loadTheme(): Theme {
   return "dark";
 }
 
+/** Failed runs the user has already looked at (profile id → run id), so a failure stays
+ * marked in the sidebar until its backup is opened. Remembered on this computer only. */
+function loadSeen(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem("flux.seenFailures") ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
 /** The desktop's preference (WebKitGTK follows the GTK theme). */
 const prefersDark = typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
@@ -33,6 +43,11 @@ class AppState {
   loading = $state(true);
   loadError = $state<string | null>(null);
   selectedId = $state<string | null>(null);
+  /** "All backups" is showing (the start page: are you protected?). */
+  home = $state(true);
+  /** How each backup is doing (run log and timer), for All backups and the sidebar. */
+  statuses = $state<Record<string, BackupStatus>>({});
+  private seenFailures = $state<Record<string, string>>(loadSeen());
   tab = $state<Tab>("overview");
   /** The new-profile editor is open. */
   creating = $state(false);
@@ -42,8 +57,17 @@ class AppState {
   system = $state<SystemStatus>({ available: false, unlocked: false });
   unlockingSystem = $state(false);
   showShortcuts = $state(false);
-  /** The profile editor shows its advanced options (remembered while the app runs). */
-  editorAdvanced = $state(false);
+  /** A password dialog for profile `id`; `retry` runs once it's unlocked. */
+  unlock = $state<{ id: string; retry: () => void } | null>(null);
+  /** A dialog opened from a menu (any backup, not only the selected one). */
+  dialog = $state<{ kind: "delete-profile" | "recovery" | "system-unlock" | "export" | "pause"; id?: string } | null>(null);
+  /** The app's preferences page is showing (instead of a backup). */
+  prefsOpen = $state(false);
+  /** Scheduled backups are paused (until a moment, or until resumed). */
+  pause = $state<Pause | null>(null);
+  /** Backups being started or stopped from the app (buttons show it). */
+  starting = $state<Record<string, boolean>>({});
+  stopping = $state<Record<string, boolean>>({});
   jobs = $state<Record<string, Job>>({});
   theme = $state<Theme>(loadTheme());
   private systemDark = $state(prefersDark?.matches ?? true);
@@ -63,6 +87,7 @@ class AppState {
       if (!this.selectedId || !list.some((p) => p.id === this.selectedId)) {
         this.selectedId = list[0]?.id ?? null;
       }
+      void this.loadStatuses();
     } catch (e) {
       this.loadError = (e as Error).message;
     } finally {
@@ -70,9 +95,155 @@ class AppState {
     }
   }
 
+  /** Reload every backup's status (cheap: no repository is opened). */
+  async loadStatuses() {
+    await Promise.all(
+      this.profiles.map(async (p) => {
+        try {
+          this.statuses[p.id] = await api.status(p.id);
+        } catch {
+          /* an older backend or helper: All backups shows what the summary knows */
+        }
+      }),
+    );
+  }
+
+  /** The last run failed and nobody has opened this backup since. */
+  unseenFailure(p: ProfileSummary): boolean {
+    return p.last_run?.status === "failed" && this.seenFailures[p.id] !== p.last_run.run_id;
+  }
+
+  private markSeen(id: string) {
+    const r = this.profiles.find((p) => p.id === id)?.last_run;
+    if (r?.status !== "failed" || this.seenFailures[id] === r.run_id) return;
+    this.seenFailures[id] = r.run_id;
+    try {
+      localStorage.setItem("flux.seenFailures", JSON.stringify(this.seenFailures));
+    } catch {
+      /* storage unavailable: it stays marked this session */
+    }
+  }
+
   newProfile(system = false) {
     this.creatingSystem = system;
     this.creating = true;
+    this.prefsOpen = false;
+    this.home = false;
+  }
+
+  openPreferences() {
+    this.creating = false;
+    this.home = false;
+    this.prefsOpen = true;
+  }
+
+  /** Show All backups. */
+  openHome() {
+    this.creating = false;
+    this.prefsOpen = false;
+    this.home = true;
+  }
+
+  async loadPause() {
+    try {
+      this.pause = (await api.preferences()).pause;
+    } catch {
+      /* older backend */
+    }
+  }
+
+  /** Pause scheduled backups for an hour, until tomorrow morning, until resumed; or resume. */
+  async setPause(kind: "hour" | "tomorrow" | "resumed" | "off") {
+    try {
+      this.pause = await api.setPause(kind);
+      this.toast("info", this.pause ? `Scheduled backups paused ${pauseUntil(this.pause)}. Backing up by hand still works.` : "Scheduled backups will run again.");
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+    }
+  }
+
+  /** Show backup `id` on `tab`. */
+  open(id: string, tab: Tab = "overview") {
+    this.creating = false;
+    this.prefsOpen = false;
+    this.home = false;
+    this.selectedId = id;
+    this.tab = tab;
+    this.markSeen(id);
+  }
+
+  /** Start a backup of `id` (asks for the password first if it needs one). */
+  async backupNow(id: string) {
+    this.starting[id] = true;
+    try {
+      await api.backupNow(id);
+      const p = this.profiles.find((x) => x.id === id);
+      if (p) p.running = true;
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "password_required") {
+        this.open(id);
+        this.unlock = { id, retry: () => void this.backupNow(id) };
+      } else this.toast("bad", (e as Error).message);
+    } finally {
+      this.starting[id] = false;
+    }
+  }
+
+  /** Stop a running backup; the next one continues where it stopped. */
+  async stop(id: string) {
+    this.stopping[id] = true;
+    try {
+      await api.cancel(id);
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+      this.stopping[id] = false;
+    }
+  }
+
+  /** Import a Flux profile from a file the user picks, then open its settings (a drive
+   * may have another name on this computer). */
+  async importProfile(system = false) {
+    const path = await pickFile("Import a Flux profile (.toml)");
+    if (!path) return;
+    try {
+      const r = await api.importProfile(path, system);
+      await this.refresh();
+      this.open(r.id, "settings");
+      const errors = r.issues.filter((i) => i.severity === "error").length;
+      this.toast(
+        errors ? "info" : "ok",
+        errors
+          ? `Imported. ${errors === 1 ? "One setting needs" : `${errors} settings need`} attention before it can run.`
+          : "Imported. Check where it backs up to, then Save to turn on its schedule.",
+      );
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+    }
+  }
+
+  /** Copy a profile ("Name (copy)") and open the copy's settings. */
+  async duplicateProfile(id: string) {
+    try {
+      const copy = await api.duplicateProfile(id);
+      await this.refresh();
+      this.open(copy, "settings");
+      this.toast("ok", "Copied. Give the copy its own destination or folders, then Save.");
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+    }
+  }
+
+  /** Delete a profile (its backups stay where they are). */
+  async deleteProfile(id: string) {
+    const p = this.profiles.find((x) => x.id === id);
+    await api.deleteProfile(id);
+    this.toast("ok", `Deleted “${p?.name ?? id}”. Its backups were left where they are.`);
+    await this.refresh();
+    if (this.selectedId === id || !this.selected) {
+      this.selectedId = this.profiles.find((x) => x.scope === p?.scope)?.id ?? this.profiles[0]?.id ?? null;
+      this.tab = "overview";
+      this.openHome();
+    }
   }
 
   async unlockSystem() {
@@ -156,6 +327,8 @@ class AppState {
   private setRunning(profile: string, running: boolean) {
     const p = this.profiles.find((x) => x.id === profile);
     if (p) p.running = running;
+    // "Stopping…" until the backup has actually stopped.
+    if (!running) this.stopping[profile] = false;
   }
 
   async start() {
@@ -168,6 +341,7 @@ class AppState {
     await listen<{ profile: string }>("flux://changed", () => {
       this.revision++;
     });
+    await listen("flux://pause", () => void this.loadPause());
     await listen<{ unlocked: boolean }>("flux://system", (e) => {
       if (!e.unlocked && this.system.unlocked) {
         this.onSystemLocked();
@@ -180,7 +354,20 @@ class AppState {
       /* older backend: no system support */
     }
     await this.refresh();
+    await this.loadPause();
   }
+}
+
+/** "until 7:00 tomorrow", "until 15:20", "until you resume them". */
+export function pauseUntil(p: Pause): string {
+  if (!p.until) return "until you resume them";
+  const d = new Date(p.until);
+  const t = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (d.toDateString() === today.toDateString()) return `until ${t}`;
+  if (d.toDateString() === tomorrow.toDateString()) return `until ${t} tomorrow`;
+  return `until ${d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}, ${t}`;
 }
 
 export const app = new AppState();

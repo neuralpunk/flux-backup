@@ -16,7 +16,7 @@ use crate::{ApiError, Result, Service};
 #[derive(Serialize)]
 pub struct Editable {
     id: String,
-    profile: Profile,
+    pub(crate) profile: Profile,
     issues: Vec<Issue>,
 }
 
@@ -65,11 +65,7 @@ pub fn new_profile_impl(state: &Service) -> Result<Editable> {
         },
         vec![home.clone()],
     );
-    p.sources.exclude = vec![
-        "~/.cache/".into(),
-        "~/.local/share/Trash/".into(),
-        "node_modules/".into(),
-    ];
+    p.sources.exclude = crate::prefs::new_profile_excludes(state);
     p.schedule.trigger = flux_core::profile::Trigger::Calendar;
     p.schedule.on_calendar = Some("daily".into());
     Ok(Editable {
@@ -88,7 +84,7 @@ pub struct SaveResult {
     schedule: Option<String>,
 }
 
-fn parse(profile: serde_json::Value) -> std::result::Result<Profile, Vec<Issue>> {
+pub(crate) fn parse(profile: serde_json::Value) -> std::result::Result<Profile, Vec<Issue>> {
     serde_json::from_value::<Profile>(profile).map_err(|e| {
         vec![Issue {
             severity: Severity::Error,
@@ -140,18 +136,7 @@ pub fn save_profile_impl(
         store.save(&id, &p)?;
     }
     state.forget_cached(&id);
-    let sd = Systemd::new(&state.paths);
-    let needs_timer =
-        p.schedule.trigger != flux_core::profile::Trigger::Manual || p.schedule.on_connect;
-    let schedule = if needs_timer || schedule::installed_ids(&sd).contains(&id) {
-        Some(match schedule::apply(&sd, &id, &p, &state.unit_env()) {
-            Ok(a) if a.changed() => format!("Timer updated: {}", schedule::summary(&p)),
-            Ok(_) => "Timer unchanged".into(),
-            Err(e) => format!("Saved, but the timer couldn't be updated: {e}"),
-        })
-    } else {
-        None
-    };
+    let schedule = apply_timer(state, &id, &p);
     Ok(SaveResult {
         id: id.to_string(),
         issues,
@@ -165,6 +150,8 @@ pub fn delete_profile_impl(state: &Service, id: String) -> Result<()> {
     let id = ProfileId::new(id).map_err(|e| ApiError::new("error", e.to_string()))?;
     let _ = schedule::remove(&Systemd::new(&state.paths), &id);
     ProfileStore::new(&state.paths).delete(&id)?;
+    flux_runner::index::remove(&state.paths, &id);
+    state.forget_cached(&id);
     Ok(())
 }
 
@@ -176,15 +163,15 @@ pub fn save_key_file_impl(state: &Service, id: String) -> Result<String> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let (pid, mut p) = state.load(&id)?;
-    let Some(vault) = p.vault.as_mut().filter(|v| v.encryption) else {
+    if p.password_source().is_none() {
         return Err(ApiError::new(
             "error",
-            "only encrypted Vaults have a password",
+            "only encrypted Vaults and Borg repositories have a password",
         ));
-    };
+    }
     let password = state
         .password(&pid)
-        .ok_or_else(|| ApiError::new("password_required", "Unlock the Vault first."))?;
+        .ok_or_else(|| ApiError::new("password_required", "Unlock the backups first."))?;
     let dir = state.paths.config_dir.join("keys");
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -202,7 +189,12 @@ pub fn save_key_file_impl(state: &Service, id: String) -> Result<String> {
     f.write_all(b"\n")?;
     f.sync_all()?;
     std::fs::rename(&tmp, &path)?;
-    vault.password_source = PasswordSource::File { path: path.clone() };
+    let source = PasswordSource::File { path: path.clone() };
+    if p.engine == flux_core::Engine::Borg {
+        p.borg.get_or_insert_with(Default::default).password_source = source;
+    } else {
+        p.vault.get_or_insert_with(Default::default).password_source = source;
+    }
     ProfileStore::new(&state.paths).save(&pid, &p)?;
     state.forget_cached(&pid);
     Ok(path.display().to_string())
@@ -453,6 +445,22 @@ pub struct TargetTest {
 pub fn test_target_impl(state: &Service, profile: serde_json::Value) -> Result<TargetTest> {
     let p = parse(profile).map_err(|i| ApiError::new("error", i[0].message.clone()))?;
     let mut messages = Vec::new();
+    if p.engine.is_compat() {
+        let tool = if p.engine == flux_core::Engine::Borg {
+            flux_compat::tools::borg_status()
+        } else {
+            flux_compat::tools::rsync_status()
+        };
+        match (&tool.version, tool.supported) {
+            (Some(v), true) => messages.push(format!("{} {v} is installed", tool.tool)),
+            _ => {
+                return Ok(TargetTest {
+                    ok: false,
+                    messages: vec![tool.hint.unwrap_or_default()],
+                });
+            }
+        }
+    }
     match &p.target {
         Target::Local { path, fs_uuid } => {
             match target_check::check_local_target(path, fs_uuid.as_deref()) {
@@ -484,11 +492,33 @@ pub fn test_target_impl(state: &Service, profile: serde_json::Value) -> Result<T
             let result = (|| -> std::result::Result<(), String> {
                 t.run("true").map_err(|e| format!("{e}. If this server needs a password or a new host key, run `flux ssh test` in a terminal once."))?;
                 messages.push(format!("logged in to {}", t.destination()));
-                if p.engine == flux_core::Engine::Mirror {
+                if matches!(
+                    p.engine,
+                    flux_core::Engine::Mirror | flux_core::Engine::Rsync
+                ) {
                     t.run("command -v rsync").map_err(|_| {
-                        "rsync is not installed on the server (Mirror over SSH needs it)".to_owned()
+                        format!(
+                            "rsync is not installed on the server ({} over SSH needs it)",
+                            p.engine.label()
+                        )
                     })?;
                     messages.push("rsync is available".into());
+                }
+                if p.engine == flux_core::Engine::Borg {
+                    let remote = p
+                        .borg
+                        .as_ref()
+                        .and_then(|b| b.remote_path.clone())
+                        .unwrap_or_else(|| "borg".into());
+                    t.run(&format!(
+                        "command -v {}",
+                        flux_transport::shell_quote(&remote)
+                    ))
+                    .map_err(|_| {
+                        "borg is not installed on the server (the Borg engine over SSH needs it)"
+                            .to_owned()
+                    })?;
+                    messages.push("borg is available on the server".into());
                 }
                 let mut s = t.sftp().map_err(|e| e.to_string())?;
                 let dir = path.display().to_string();
@@ -519,4 +549,75 @@ pub fn test_target_impl(state: &Service, profile: serde_json::Value) -> Result<T
             }
         }
     }
+}
+
+/// Install, update or remove the profile's systemd timer to match its schedule. Returns
+/// what happened, for people (`None`: no timer involved).
+pub fn apply_timer(state: &Service, id: &ProfileId, p: &Profile) -> Option<String> {
+    let sd = Systemd::new(&state.paths);
+    let needs_timer =
+        p.schedule.trigger != flux_core::profile::Trigger::Manual || p.schedule.on_connect;
+    if !needs_timer && !schedule::installed_ids(&sd).contains(id) {
+        return None;
+    }
+    Some(match schedule::apply(&sd, id, p, &state.unit_env()) {
+        Ok(a) if a.changed() => format!("Timer updated: {}", schedule::summary(p)),
+        Ok(_) => "Timer unchanged".into(),
+        Err(e) => format!("Saved, but the timer couldn't be updated: {e}"),
+    })
+}
+
+/// The formats a profile can be exported in.
+pub fn export_formats_impl() -> Vec<flux_compat::export::FormatInfo> {
+    flux_compat::export::Format::ALL
+        .into_iter()
+        .map(|f| f.info())
+        .collect()
+}
+
+/// A profile exported as `format` (see `flux_compat::export`).
+pub fn export_profile_impl(
+    state: &Service,
+    id: String,
+    format: String,
+) -> Result<flux_compat::export::Export> {
+    let (pid, p) = state.load(&id)?;
+    let f = flux_compat::export::Format::parse(&format)
+        .ok_or_else(|| ApiError::new("bad_request", format!("unknown export format {format:?}")))?;
+    Ok(flux_compat::export::export(&pid, &p, f))
+}
+
+#[derive(Serialize)]
+pub struct Imported {
+    id: String,
+    issues: Vec<flux_core::Issue>,
+}
+
+/// Import a Flux profile. Its id: `id`, else the one it was exported under, else one
+/// from its name; made unique (`-2`, `-3`…) rather than replacing a profile. Problems
+/// (a drive that has another name here…) don't stop the import; they're returned so the
+/// app can open the profile's settings.
+pub fn import_profile_impl(state: &Service, toml: String, id: Option<String>) -> Result<Imported> {
+    let (exported, p) = flux_compat::export::parse_flux(&toml)
+        .map_err(|e| ApiError::new("error", format!("This isn't a Flux profile: {e}")))?;
+    let base = id
+        .or(exported)
+        .and_then(|i| ProfileId::new(i).ok())
+        .or_else(|| ProfileId::slugify(&p.name))
+        .ok_or_else(|| ApiError::new("error", "The profile has no usable name."))?;
+    let store = ProfileStore::new(&state.paths);
+    let mut pid = base.clone();
+    let mut n = 2;
+    while store.exists(&pid) {
+        pid = ProfileId::new(format!(
+            "{}-{n}",
+            &base.as_str()[..base.as_str().len().min(60)]
+        ))?;
+        n += 1;
+    }
+    store.create(&pid, &p)?;
+    Ok(Imported {
+        id: pid.to_string(),
+        issues: p.validate_in(state.scope()),
+    })
 }
