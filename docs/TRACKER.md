@@ -1108,3 +1108,17 @@ left as it was, see phase 37).
 - [x] AppStream 0.2.0 release notes cover the new look, setup and speed; validated
 - [x] Published from `../FluxBackup-public` as tag `v0.2.0`, release built by the Release
       workflow
+- [x] Pushed over HTTPS with `gh` as the git credential helper (the router blocks SSH to
+      GitHub); `origin` in the public repo still points at the SSH URL
+- [x] Published https://github.com/neuralpunk/flux-backup/releases/tag/v0.2.0 with
+      hand-written notes; the four checksums match GitHub's own digests
+- [x] `SHA256SUMS` listed build paths (`target/release/bundle/deb/…`), so `sha256sum -c`
+      failed next to the downloads (0.1.0 too). The 0.2.0 file was replaced with bare
+      names; the Release workflow now writes bare names (tested locally). Not yet in the
+      public repo: it goes out with the next sync
+
+### Website on GitHub Pages (2026-11-08)
+- [x] `.github/workflows/pages.yml` publishes `site/` to https://neuralpunk.github.io/flux-backup/
+      on pushes to main that touch the site (or by hand); Pages turned on for the repo
+- [x] README links the website and the latest release near the top; the repo's About box
+      links the website

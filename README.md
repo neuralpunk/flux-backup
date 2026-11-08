@@ -2,6 +2,9 @@
 
 Fast, good-looking snapshot backups for Linux, with a CLI (`flux`) and a desktop app.
 
+**Website: [neuralpunk.github.io/flux-backup](https://neuralpunk.github.io/flux-backup/)** ·
+[Download the latest release](https://github.com/neuralpunk/flux-backup/releases/latest)
+
 Flux takes the proven model of [Back in Time](https://github.com/bit-team/backintime)
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.

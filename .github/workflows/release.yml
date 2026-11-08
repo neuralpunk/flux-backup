@@ -40,7 +40,11 @@ jobs:
           cp -r packaging/polkit packaging/linux packaging/install.sh "$name/packaging/"
           cp README.md LICENSE-MIT LICENSE-APACHE docs/USER_GUIDE.md "$name/"
           tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" target/release/bundle/*/*.{deb,rpm,AppImage} > SHA256SUMS
+          # Bare file names, so `sha256sum -c SHA256SUMS` works next to the downloads.
+          sha256sum "$name.tar.gz" > SHA256SUMS
+          for f in target/release/bundle/*/*.{deb,rpm,AppImage}; do
+            (cd "$(dirname "$f")" && sha256sum "$(basename "$f")")
+          done >> SHA256SUMS
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
