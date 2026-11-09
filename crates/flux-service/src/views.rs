@@ -1308,7 +1308,10 @@ mod tests {
             &|_| {},
         )
         .unwrap();
-        assert_eq!(std::fs::read_to_string(e.src.join("b.txt")).unwrap(), "beta");
+        assert_eq!(
+            std::fs::read_to_string(e.src.join("b.txt")).unwrap(),
+            "beta"
+        );
         let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
         assert!(l.entries.iter().all(|x| x.on_disk == Some(true)));
         let found = crate::find::find_impl(&e.state, "t".into(), "b.txt".into()).unwrap();

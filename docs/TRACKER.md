@@ -1420,3 +1420,9 @@ and the Adwaita palette.
 - [x] Synced to `../FluxBackup-public` as one commit, "Flux Backup 0.3.0" (a mirror of this
       repo's tracked files, as for 0.1.0 and 0.2.0), tagged `v0.3.0`, pushed over HTTPS
       with `gh` as the credential helper; the Release workflow builds the draft release
+- [x] First tag failed: CI's `cargo fmt --check` (one test in `flux-service/src/views.rs`
+      wasn't formatted) and, in the Release build on Ubuntu 22.04, `agrees_with_systemd`:
+      systemd 249 labels later runs "Iter. #2:" where newer ones say "Iteration #2:". The
+      test reads both and prints systemd's output if it still can't. Checked locally with
+      CI's own steps (fmt, clippy -D warnings, tests); synced as a follow-up commit and
+      `v0.3.0` moved to it (no release had been made from the first tag)

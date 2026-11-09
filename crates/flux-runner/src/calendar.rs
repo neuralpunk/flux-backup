@@ -487,13 +487,17 @@ mod tests {
                 else {
                     return; // no systemd here
                 };
-                let theirs: Vec<Timestamp> = String::from_utf8_lossy(&out.stdout)
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                // "Next elapse: …", then "Iteration #2: …" (systemd 250 and later) or
+                // "Iter. #2: …" (older, such as Ubuntu 22.04's 249).
+                let theirs: Vec<Timestamp> = stdout
                     .lines()
                     .filter_map(|l| {
                         let l = l.trim();
                         l.strip_prefix("Next elapse:").or_else(|| {
-                            l.strip_prefix("Iteration #")
-                                .and_then(|r| r.split_once(':').map(|x| x.1))
+                            l.starts_with("Iter")
+                                .then(|| l.split_once(':').map(|x| x.1))
+                                .flatten()
                         })
                     })
                     .filter_map(|v| {
@@ -513,7 +517,7 @@ mod tests {
                 assert_eq!(
                     theirs.len(),
                     5,
-                    "{e}: systemd-analyze output not understood"
+                    "{e}: systemd-analyze output not understood:\n{stdout}"
                 );
                 let mut ours = Vec::new();
                 let mut t = Timestamp::from_second(base).unwrap();
