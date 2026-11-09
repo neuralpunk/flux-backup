@@ -13,21 +13,27 @@ use flux_core::progress::{Event, Progress};
 use flux_core::{ProfileId, ProfileStore};
 use flux_runner::jobs::{self, Client, Message};
 use flux_runner::runlog;
-use flux_runner::schedule::{self, Systemd, UnitEnv};
+use flux_runner::schedule::{self, Scheduler, SchedulerKind, UnitEnv};
 
 use crate::backup_cmd::{LiveProgress, load_profile, when};
 use crate::{Ctx, output};
 
 #[derive(Subcommand)]
 pub enum ScheduleCmd {
-    /// Install or update the systemd timer for a profile, per its [schedule] settings.
+    /// Install or update the schedule for a profile, per its [schedule] settings.
     Install { profile: String },
-    /// Remove a profile's timer (the profile itself is kept).
+    /// Remove a profile's schedule (the profile itself is kept).
     Remove { profile: String },
-    /// Make installed timers match all profiles (install, update, remove).
+    /// Make installed schedules match all profiles (install, update, remove).
     Sync,
-    /// Show timers, next and last runs.
+    /// Show schedules, next and last runs.
     Status,
+    /// Run scheduled backups with systemd timers (the default) or cron; moves every
+    /// schedule over.
+    Use {
+        #[arg(value_parser = ["systemd", "cron"])]
+        scheduler: String,
+    },
 }
 
 #[derive(Args)]
@@ -54,12 +60,12 @@ fn print_applied(id: &ProfileId, a: &schedule::Applied) {
 }
 
 pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
-    let sd = Systemd::new(&ctx.paths);
+    let sd = Scheduler::new(&ctx.paths);
     let env = UnitEnv::current(ctx.paths.scope);
     match cmd {
         ScheduleCmd::Install { profile } => {
             let (id, p) = load_profile(ctx, &profile)?;
-            let a = schedule::apply(&sd, &id, &p, &env)?;
+            let a = sd.apply(&id, &p, &env)?;
             if ctx.json {
                 output::print_json(&a)?;
                 return Ok(ExitCode::SUCCESS);
@@ -75,7 +81,10 @@ pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             print_applied(&id, &a);
-            let st = schedule::status(&sd, &id, &p, &env);
+            if let Some(w) = sd.unsupported(&p) {
+                println!("{id}: {w}");
+            }
+            let st = sd.status(&id, &p, &env);
             if let Some(next) = st.next_run {
                 println!("{id}: next run {next}");
             }
@@ -83,7 +92,7 @@ pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
         }
         ScheduleCmd::Remove { profile } => {
             let id = ProfileId::new(profile)?;
-            let a = schedule::remove(&sd, &id)?;
+            let a = sd.remove(&id)?;
             if ctx.json {
                 output::print_json(&a)?;
             } else if a.removed.is_empty() {
@@ -100,15 +109,15 @@ pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
                 known.push(l.id.clone());
                 match l.profile {
                     Ok(p) if !has_errors(&p.validate()) => {
-                        let a = schedule::apply(&sd, &l.id, &p, &env)?;
+                        let a = sd.apply(&l.id, &p, &env)?;
                         results.push((l.id, a));
                     }
                     _ => eprintln!("{}: skipped (profile has errors)", l.id),
                 }
             }
-            for id in schedule::installed_ids(&sd) {
+            for id in sd.installed_ids() {
                 if !known.contains(&id) {
-                    let a = schedule::remove(&sd, &id)?;
+                    let a = sd.remove(&id)?;
                     results.push((id, a));
                 }
             }
@@ -130,7 +139,7 @@ pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
             let mut all = Vec::new();
             for l in store.list()? {
                 let Ok(p) = l.profile else { continue };
-                let st = schedule::status(&sd, &l.id, &p, &env);
+                let st = sd.status(&l.id, &p, &env);
                 let last = runlog::recent_runs(&ctx.paths, &l.id, 1).into_iter().next();
                 rows.push(vec![
                     l.id.to_string(),
@@ -156,29 +165,84 @@ pub fn run_schedule(ctx: &Ctx, cmd: ScheduleCmd) -> anyhow::Result<ExitCode> {
             if ctx.json {
                 output::print_json(&all)?;
             } else {
-                output::table(
-                    &["PROFILE", "SCHEDULE", "TIMER", "NEXT RUN", "LAST RUN"],
-                    &rows,
-                );
+                println!("Scheduled backups run with {}.\n", sd.kind().label());
+                let col = match sd.kind() {
+                    SchedulerKind::Systemd => "TIMER",
+                    SchedulerKind::Cron => "CRON",
+                };
+                output::table(&["PROFILE", "SCHEDULE", col, "NEXT RUN", "LAST RUN"], &rows);
                 linger_hint(&sd);
             }
+        }
+        ScheduleCmd::Use { scheduler } => {
+            let to: SchedulerKind = scheduler.parse().map_err(anyhow::Error::msg)?;
+            let was = sd.kind();
+            let profiles: Vec<_> = ProfileStore::new(&ctx.paths)
+                .list()?
+                .into_iter()
+                .filter_map(|l| match l.profile {
+                    Ok(p) if !has_errors(&p.validate()) => Some((l.id, p)),
+                    _ => None,
+                })
+                .collect();
+            let done = schedule::switch(&ctx.paths, to, &profiles, &env)?;
+            let now = Scheduler::of(&ctx.paths, to);
+            if ctx.json {
+                let applied: Vec<_> = done
+                    .iter()
+                    .map(|(id, a)| serde_json::json!({ "profile": id, "applied": a }))
+                    .collect();
+                output::print_json(&serde_json::json!({ "scheduler": to, "applied": applied }))?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            if was == to {
+                println!("Scheduled backups already run with {}.", to.label());
+            } else {
+                println!(
+                    "Scheduled backups now run with {} instead of {}.",
+                    to.label(),
+                    was.label()
+                );
+            }
+            for (id, a) in &done {
+                if a.changed() {
+                    print_applied(id, a);
+                }
+            }
+            for (id, p) in &profiles {
+                if let Some(w) = now.unsupported(p) {
+                    println!("{id}: {w}");
+                }
+            }
+            linger_hint(&now);
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn linger_hint(sd: &Systemd) {
-    if sd.scope == flux_core::Scope::User && schedule::linger_enabled() == Some(false) {
-        println!(
-            "\nNote: your timers run only while you are logged in. To back up while logged out, run\n  loginctl enable-linger"
-        );
+fn linger_hint(sd: &Scheduler) {
+    match sd.kind() {
+        SchedulerKind::Systemd => {
+            if sd.scope() == flux_core::Scope::User && schedule::linger_enabled() == Some(false) {
+                println!(
+                    "\nNote: your timers run only while you are logged in. To back up while logged out, run\n  loginctl enable-linger"
+                );
+            }
+        }
+        SchedulerKind::Cron => {
+            if flux_runner::cron::daemon_running() == Some(false) {
+                println!(
+                    "\nNote: Flux uses cron, but no cron daemon is running. Start it (on Fedora: sudo systemctl enable --now crond)."
+                );
+            }
+        }
     }
 }
 
 /// `flux status`: what's running, how the last runs went, what's next.
 pub fn run_status(ctx: &Ctx, args: StatusArgs) -> anyhow::Result<ExitCode> {
     let store = ProfileStore::new(&ctx.paths);
-    let sd = Systemd::new(&ctx.paths);
+    let sd = Scheduler::new(&ctx.paths);
     let env = UnitEnv::current(ctx.paths.scope);
     let running = jobs::running(&ctx.paths);
     let mut rows = Vec::new();
@@ -191,7 +255,7 @@ pub fn run_status(ctx: &Ctx, args: StatusArgs) -> anyhow::Result<ExitCode> {
         let job = running.iter().find(|j| j.profile == l.id.as_str());
         let live = job.and_then(|_| first_progress(ctx, &l.id));
         let last = runlog::recent_runs(&ctx.paths, &l.id, 1).into_iter().next();
-        let st = schedule::status(&sd, &l.id, &p, &env);
+        let st = sd.status(&l.id, &p, &env);
         let now = match (&job, &live) {
             (Some(_), Some(s)) if s.bytes_total > 0 => format!(
                 "running: {} {:.0}%",
@@ -282,7 +346,7 @@ fn first_progress(ctx: &Ctx, id: &ProfileId) -> Option<flux_core::progress::Prog
     let mut c = Client::connect(&ctx.paths, id).ok()?;
     for _ in 0..1000 {
         match c.next_message().ok()?? {
-            Message::Progress { progress } => return Some(progress),
+            Message::Progress { progress, .. } => return Some(progress),
             Message::Finished { .. } => return None,
             _ => {}
         }
@@ -316,7 +380,7 @@ pub fn run_watch(ctx: &Ctx, args: ProfileArg) -> anyhow::Result<ExitCode> {
                 info.run_id,
                 when(info.started)
             )),
-            Message::Progress { progress: s } => {
+            Message::Progress { progress: s, .. } => {
                 if local.phase() != s.phase {
                     local.set_phase(s.phase);
                 }
@@ -332,7 +396,7 @@ pub fn run_watch(ctx: &Ctx, args: ProfileArg) -> anyhow::Result<ExitCode> {
             Message::Event {
                 event: Event::Info { message },
             } if !ctx.json => live.println(message),
-            Message::Finished { status, error } => {
+            Message::Finished { status, error, .. } => {
                 result = Some((status, error));
                 break;
             }

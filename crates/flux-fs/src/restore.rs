@@ -1,7 +1,8 @@
 //! Restore paths from a snapshot, to their original location or into another directory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use flux_core::filter::Filter;
 use flux_core::progress::{Event, Phase, Progress, Reporter};
 
 use crate::entry::{Entry, Kind, is_clean_path, is_within};
@@ -70,6 +72,12 @@ pub struct RestoreRequest<'a> {
     /// Which symlinks in destination paths may be followed; usually
     /// [`LinkPolicy::for_process`].
     pub links: LinkPolicy,
+    /// Make restored folders exactly as they are in the snapshot: what's in them now but
+    /// not in the snapshot is removed (moved aside with `keep_existing`). Whatever the
+    /// backup never takes, judged by this filter (exclusions, the size limit, cache
+    /// folders), and anything on another filesystem, is left alone. `None`: only add and
+    /// replace.
+    pub exact: Option<&'a Filter>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -84,6 +92,9 @@ pub struct RestoreOutcome {
     pub errors: Vec<FileError>,
     /// For dry runs: destination paths that would be written.
     pub would_write: Vec<PathBuf>,
+    /// Exact restores: items that weren't in the snapshot and were removed (or moved
+    /// aside, then also listed in `moved_aside`).
+    pub removed: u64,
 }
 
 pub fn restore(
@@ -292,6 +303,44 @@ pub fn restore(
         return Err(RestoreError::Cancelled);
     }
 
+    // Exact: remove what the restored folders hold that the snapshot doesn't. Before the
+    // folders' dates are set, which removing would change.
+    let mut removed = 0u64;
+    if let Some(filter) = req.exact {
+        let wanted: HashSet<&Path> = items.iter().map(|(_, d)| d.as_path()).collect();
+        let aside: HashSet<PathBuf> = moved.lock().unwrap().iter().cloned().collect();
+        for (e, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+            let r = tree.dir(dest, false).and_then(|dir| {
+                let found = list_fd(dir.as_fd())?;
+                let parent_dev = rustix::fs::fstat(&*dir)?.st_dev;
+                for f in extras(
+                    found,
+                    parent_dev,
+                    dest,
+                    &e.abs_path(),
+                    filter,
+                    &wanted,
+                    &aside,
+                ) {
+                    let path = dest.join(&f.name);
+                    let kind = if f.is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::RegularFile
+                    };
+                    match ctx.set_aside(dir.as_fd(), &f.name, &path, kind) {
+                        Ok(()) => removed += 1,
+                        Err(err) => warn(&path, &err),
+                    }
+                }
+                Ok(())
+            });
+            if let Err(err) = r {
+                warn(dest, &err);
+            }
+        }
+    }
+
     // Directory metadata last, deepest first, through descriptors of the directories.
     for (e, dest) in items.iter().rev().filter(|(e, _)| e.kind == Kind::Dir) {
         let r = tree.parent(dest, false).and_then(|(dir, name)| {
@@ -319,7 +368,82 @@ pub fn restore(
     out.errors = unsafe_paths;
     out.errors.extend(errors.into_inner().unwrap());
     out.moved_aside = moved.into_inner().unwrap();
+    out.removed = removed;
     Ok(out)
+}
+
+/// An item found in a destination folder.
+struct Found {
+    name: OsString,
+    is_dir: bool,
+    size: u64,
+    dev: u64,
+}
+
+/// What a folder at the destination holds, read through its descriptor (never following
+/// a link).
+fn list_fd(dir: BorrowedFd<'_>) -> io::Result<Vec<Found>> {
+    let mut out = Vec::new();
+    // The tree's descriptors are for paths only; reading needs one opened for reading.
+    let readable = rustix::fs::openat(
+        dir,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut d = rustix::fs::Dir::read_from(&readable)?;
+    while let Some(ent) = d.read() {
+        let ent = ent?;
+        let name = OsStr::from_bytes(ent.file_name().to_bytes());
+        if name == "." || name == ".." {
+            continue;
+        }
+        match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => out.push(Found {
+                name: name.to_owned(),
+                is_dir: FileType::from_raw_mode(st.st_mode) == FileType::Directory,
+                size: st.st_size as u64,
+                dev: st.st_dev,
+            }),
+            Err(Errno::NOENT) => {} // gone meanwhile
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+/// Which of `found` (in destination folder `dest`, the snapshot's `original`) an exact
+/// restore removes: what the snapshot doesn't have, unless the backup would never have
+/// taken it (`filter`), it's on another filesystem, or it's a copy a restore moved aside.
+fn extras(
+    found: Vec<Found>,
+    parent_dev: u64,
+    dest: &Path,
+    original: &Path,
+    filter: &Filter,
+    wanted: &HashSet<&Path>,
+    aside: &HashSet<PathBuf>,
+) -> Vec<Found> {
+    // A cache folder (or one with an exclude_if_present marker): its contents were never
+    // backed up.
+    if filter.has_markers()
+        && filter.skip_dir_by_marker(dest, found.iter().map(|f| f.name.as_bytes()))
+    {
+        return Vec::new();
+    }
+    found
+        .into_iter()
+        .filter(|f| {
+            let at = dest.join(&f.name);
+            !wanted.contains(at.as_path())
+                && !aside.contains(&at)
+                // Copies an earlier restore kept (`name.flux-<snapshot>`): the person's own.
+                && !f.name.as_bytes().windows(6).any(|w| w == b".flux-")
+                && f.dev == parent_dev
+                && !filter.is_excluded(&original.join(&f.name), f.is_dir)
+                && (f.is_dir || !filter.is_too_large(f.size))
+        })
+        .collect()
 }
 
 /// The entries a request covers, with their destinations, in path order; and the paths a
@@ -358,13 +482,20 @@ fn select(
             });
             continue;
         }
+        // A request may name a folder and something inside it: every path that covers the
+        // entry is found, and the outermost one decides where it goes.
+        let mut outer: Option<&Vec<u8>> = None;
         for (i, w) in wanted.iter().enumerate() {
             if is_within(&e.path, w) {
                 found[i] = true;
-                let dest = destination(&e, w, req.to.as_deref());
-                items.push((e, dest));
-                break;
+                if outer.is_none_or(|o| w.len() < o.len()) {
+                    outer = Some(w);
+                }
             }
+        }
+        if let Some(w) = outer {
+            let dest = destination(&e, w, req.to.as_deref());
+            items.push((e, dest));
         }
     }
     if let Some(i) = found.iter().position(|f| !f) {
@@ -399,6 +530,10 @@ pub struct RestorePreview {
     pub new_paths: Vec<PathBuf>,
     /// Damaged or forged paths in the snapshot, which a restore skips.
     pub unsafe_paths: u64,
+    /// Exact restores: items not in the snapshot that would be removed (moved aside with
+    /// `keep_existing`), and the first [`PREVIEW_PATHS`] of them.
+    pub remove: u64,
+    pub remove_paths: Vec<PathBuf>,
 }
 
 /// What [`restore`] would do with `req`: compares the snapshot's entries with what is at
@@ -415,6 +550,46 @@ pub fn preview(
         unsafe_paths: unsafe_paths.len() as u64,
         ..Default::default()
     };
+    if let Some(filter) = req.exact {
+        let wanted: HashSet<&Path> = items.iter().map(|(_, d)| d.as_path()).collect();
+        for (e, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+            // Only folders that are there now (and are folders) can hold anything extra.
+            let Ok(m) = fs::symlink_metadata(dest) else {
+                continue;
+            };
+            if !m.is_dir() {
+                continue;
+            }
+            let Ok(rd) = fs::read_dir(dest) else { continue };
+            let found = rd
+                .flatten()
+                .filter_map(|ent| {
+                    let m = ent.metadata().ok()?; // DirEntry::metadata doesn't follow links
+                    Some(Found {
+                        name: ent.file_name(),
+                        is_dir: m.is_dir(),
+                        size: m.len(),
+                        dev: m.dev(),
+                    })
+                })
+                .collect();
+            for f in extras(
+                found,
+                m.dev(),
+                dest,
+                &e.abs_path(),
+                filter,
+                &wanted,
+                &HashSet::new(),
+            ) {
+                out.remove += 1;
+                if out.remove_paths.len() < PREVIEW_PATHS {
+                    out.remove_paths.push(dest.join(&f.name));
+                }
+            }
+        }
+        out.remove_paths.sort();
+    }
     for (e, dest) in items {
         let size = if e.kind == Kind::File { e.size } else { 0 };
         match fs::symlink_metadata(&dest) {
@@ -611,6 +786,7 @@ mod tests {
                     other: false,
                 },
                 links: LinkPolicy::FollowAll,
+                exact: None,
             },
             &Progress::new(),
             &flux_core::progress::silent,
@@ -682,6 +858,7 @@ mod tests {
                 other: false,
             },
             links: LinkPolicy::FollowAll,
+            exact: None,
         };
         let p = preview(entries.into_iter().map(Ok), &req).unwrap();
         assert_eq!((p.new, p.differ, p.identical, p.new_folders), (1, 1, 1, 1));

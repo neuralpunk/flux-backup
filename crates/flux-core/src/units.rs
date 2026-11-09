@@ -75,21 +75,28 @@ impl FromStr for ByteSize {
 }
 
 impl fmt::Display for ByteSize {
-    /// Prints the largest binary unit that represents the value exactly, so that
-    /// `to_string()` → `parse()` round-trips without loss.
+    /// Prints the unit, binary or decimal, that represents the value exactly with the
+    /// smallest number ("500MB", "2GiB", "1TB"), so that `to_string()` → `parse()`
+    /// round-trips without loss and reads the way it was most likely written.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const UNITS: [(&str, u64); 4] = [
+        const UNITS: [(&str, u64); 8] = [
             ("TiB", 1 << 40),
+            ("TB", 1_000_000_000_000),
             ("GiB", 1 << 30),
+            ("GB", 1_000_000_000),
             ("MiB", 1 << 20),
+            ("MB", 1_000_000),
             ("KiB", 1 << 10),
+            ("kB", 1_000),
         ];
-        for (name, m) in UNITS {
-            if self.0 >= m && self.0.is_multiple_of(m) {
-                return write!(f, "{}{}", self.0 / m, name);
-            }
+        let best = UNITS
+            .iter()
+            .filter(|(_, m)| self.0 >= *m && self.0.is_multiple_of(*m))
+            .min_by_key(|(_, m)| self.0 / m);
+        match best {
+            Some((name, m)) => write!(f, "{}{}", self.0 / m, name),
+            None => write!(f, "{}B", self.0),
         }
-        write!(f, "{}B", self.0)
     }
 }
 
@@ -190,11 +197,27 @@ mod tests {
 
     #[test]
     fn size_display_round_trips() {
-        for v in [0, 1, 1000, 1024, 1536, 5 << 30, (1 << 40) * 3, 123_456_789] {
+        for v in [
+            0,
+            1,
+            1000,
+            1024,
+            1536,
+            5 << 30,
+            (1 << 40) * 3,
+            123_456_789,
+            500_000_000,
+            1_000_000_000_000,
+            1_500_000_000,
+        ] {
             let b = ByteSize(v);
             assert_eq!(b.to_string().parse::<ByteSize>().unwrap(), b, "{b}");
         }
         assert_eq!(ByteSize(2 << 30).to_string(), "2GiB");
+        // Decimal sizes read as written (the app's size limits use MB, GB, TB).
+        assert_eq!(ByteSize(500_000_000).to_string(), "500MB");
+        assert_eq!(ByteSize(1_000_000_000_000).to_string(), "1TB");
+        assert_eq!(ByteSize(1).to_string(), "1B");
         assert_eq!(ByteSize(1536).display_approx(), "1.5 KiB");
     }
 

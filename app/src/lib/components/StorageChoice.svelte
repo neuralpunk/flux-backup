@@ -5,6 +5,7 @@
   import { api } from "../api";
   import type { Engine, ToolStatus } from "../types";
   import Icon, { type IconName } from "./Icon.svelte";
+  import InfoDetails from "./InfoDetails.svelte";
 
   let { engine, onchoose }: { engine: Engine; onchoose: (e: Engine) => void } = $props();
 
@@ -113,23 +114,22 @@
   {/each}
 
   {#if engine === "rsync" || engine === "borg"}
-    <details class="rounded-card bg-surface-2 px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--c-group-edge)]">
-      <summary class="cursor-pointer text-fg-2 select-none">What exactly Flux does (for {engine === "borg" ? "Borg" : "rsync"} users)</summary>
+    <InfoDetails summary="What exactly Flux does (for {engine === 'borg' ? 'Borg' : 'rsync'} users)">
       {#if engine === "rsync"}
-        <ul class="mt-3 flex flex-col gap-2 text-fg-2">
+        <ul class="flex list-disc flex-col gap-2 pl-4 marker:text-primary/60">
           <li>Each backup is one run of <code class="font-mono text-fg">rsync --archive --hard-links --numeric-ids --relative --delete --link-dest=../../&lt;previous&gt;/data</code> into <code class="font-mono text-fg">snapshots/.partial</code>, renamed to the date and time when it finishes.</li>
           <li>Unchanged files are hard links to the previous snapshot; every snapshot is complete. The exact command and filter rules are saved in each snapshot.</li>
           <li>Your exclusions become rsync filter rules with the same meaning; folders with a <code class="font-mono text-fg">CACHEDIR.TAG</code> are found first and listed as rules.</li>
           <li>Next to the snapshots: <code class="font-mono text-fg">FLUX-RECOVERY.txt</code> and <code class="font-mono text-fg">flux-backup.sh</code>, which does the same backup with rsync alone.</li>
         </ul>
       {:else}
-        <ul class="mt-3 flex flex-col gap-2 text-fg-2">
+        <ul class="flex list-disc flex-col gap-2 pl-4 marker:text-primary/60">
           <li>A Borg 1.x repository: <code class="font-mono text-fg">borg init --encryption=repokey-blake2</code>, one archive per backup named after its date and time.</li>
           <li><code class="font-mono text-fg">borg create --compression=zstd,3 --exclude-caches --patterns-from=flux-patterns.txt</code>; your exclusions become Borg patterns.</li>
           <li>Names and pins you give snapshots are stored in the archive comment, inside the repository. Retention uses <code class="font-mono text-fg">borg delete</code> and <code class="font-mono text-fg">borg compact</code>.</li>
           <li>Uses your normal <code class="font-mono text-fg">~/.config/borg</code> and <code class="font-mono text-fg">~/.cache/borg</code>; archives you create with borg yourself show up in Flux too.</li>
         </ul>
       {/if}
-    </details>
+    </InfoDetails>
   {/if}
 </div>

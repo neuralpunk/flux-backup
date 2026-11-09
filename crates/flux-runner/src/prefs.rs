@@ -18,6 +18,22 @@ pub struct Settings {
     /// The exclusions new profiles start with; `None`: Flux's own suggestions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_exclude: Option<Vec<String>>,
+    /// Run one backup at a time: a backup that starts while another of this scope runs
+    /// waits for it to finish.
+    #[serde(skip_serializing_if = "is_default")]
+    pub one_at_a_time: bool,
+    /// The program that compares two versions of a file (`meld`, `kompare`…, with any
+    /// arguments; the two files are added). `None`: the first known one installed; empty:
+    /// none, only the app's own comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_tool: Option<String>,
+    /// What runs scheduled backups: systemd timers (the default) or cron.
+    #[serde(skip_serializing_if = "is_default")]
+    pub scheduler: crate::schedule::SchedulerKind,
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 impl Settings {
@@ -111,9 +127,17 @@ mod tests {
         let s = Settings {
             notify_success: true,
             default_exclude: Some(vec!["*.iso".into()]),
+            scheduler: crate::schedule::SchedulerKind::Cron,
+            one_at_a_time: true,
+            diff_tool: Some("meld --newtab".into()),
         };
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths), s);
+        assert!(
+            std::fs::read_to_string(paths.config_dir.join("settings.toml"))
+                .unwrap()
+                .contains("scheduler = \"cron\"")
+        );
 
         let now = Timestamp::now();
         assert!(pause(&paths, now).is_none());

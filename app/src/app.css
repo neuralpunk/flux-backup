@@ -8,8 +8,8 @@
 
 /*
  * "At home on the desktop" (docs/DESIGN.md). The GNOME/Adwaita screen tradition in
- * graphite and calm blue: a blue-graphite shell (sidebar, titlebar) around a flatter
- * graphite view; content in grouped lists (one rounded group, rows split by hairlines).
+ * Adwaita's neutral greys and blue: a shell (sidebar, titlebar) a step lighter than the
+ * view; content in grouped lists (one rounded group, rows split by hairlines).
  *
  * Colour has one job each:
  *   blue (primary)              = act: the one primary button, progress, focus
@@ -49,66 +49,77 @@
   --color-danger: var(--c-danger);
 }
 
+/* Adwaita's own neutral greys (no blue cast) with its blue accent. As in libadwaita, the
+   shell (sidebar, titlebar) is a step lighter than the view, and groups lift above both. */
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
-  /* The shell: sidebar and titlebar, a blue-tinted graphite. */
-  --c-bg: #15181d;
+  /* The shell: sidebar and titlebar. */
+  --c-bg: #2e2e32;
   /* The view the content sits on. */
-  --c-surface-1: #1c1e22;
+  --c-surface-1: #222226;
   /* Groups (grouped lists, panels). */
-  --c-surface-2: #25272c;
+  --c-surface-2: #343438;
   /* Controls: buttons, inputs. */
-  --c-surface-3: #2f3238;
+  --c-surface-3: #3d3d42;
   /* Hover in the shell. */
-  --c-surface-sunken: #1f232a;
+  --c-surface-sunken: #38383d;
   /* Control hover, progress and switch tracks. */
-  --c-track: #3a3d44;
-  /* Hairlines between rows of a group. */
-  --c-sep: #34373d;
+  --c-track: #4a4a4f;
+  /* Hairlines between rows of a group: darker than the group, as in Adwaita. */
+  --c-sep: #29292d;
   /* Where you are: a neutral lift, never blue. */
-  --c-selected: #2b3038;
-  --c-on-selected: #eceef1;
-  --c-fg: #eceef1;
-  --c-fg-2: #b8bcc3;
-  --c-fg-muted: #949aa4;
-  --c-primary: #78b0f0;
+  --c-selected: #3b3b40;
+  --c-on-selected: #ffffff;
+  --c-fg: #f4f4f5;
+  --c-fg-2: #c4c4c8;
+  --c-fg-muted: #a8a8ad;
+  /* Blue as text, focus and progress. */
+  --c-primary: #78aeed;
   --c-on-primary: #0b1626;
+  /* Blue as a fill: the primary button and an on switch, with white text (4.9:1). */
+  --c-accent: #3170c8;
+  --c-on-accent: #ffffff;
   --c-brand: #7abdff;
   /* Chart series (≥3:1 on groups). */
   --c-chart: #6aa6ea;
   --c-success: #72c79a;
   --c-warning: #e7b65a;
-  --c-danger: #ef8576;
-  /* A group's edge: only the light theme needs one. */
+  --c-danger: #f39488;
+  /* A group's edge and soft shadow: only the light theme needs them. */
   --c-group-edge: transparent;
+  --group-shadow: 0 0 0 0 transparent;
   /* The chosen button of a segmented control. */
-  --c-seg-on: #4a4e56;
+  --c-seg-on: #55555b;
 }
 
 [data-theme="light"] {
   color-scheme: light;
-  --c-bg: #e4e8ee;
-  --c-surface-1: #f6f7f9;
+  --c-bg: #ebebed;
+  --c-surface-1: #fafafb;
   --c-surface-2: #ffffff;
-  --c-surface-3: #e9ecf0;
-  --c-surface-sunken: #d9dee6;
-  --c-track: #dde1e7;
-  --c-sep: #e2e5ea;
-  --c-selected: #d3dae4;
-  --c-on-selected: #17191d;
-  --c-fg: #17191d;
-  --c-fg-2: #3f444c;
-  --c-fg-muted: #555c66;
-  --c-primary: #2759a4;
+  --c-surface-3: #e7e7e9;
+  --c-surface-sunken: #e0e0e2;
+  --c-track: #d9d9dc;
+  --c-sep: #ebebed;
+  --c-selected: #dcdcdf;
+  --c-on-selected: #1e1e22;
+  --c-fg: #1e1e22;
+  --c-fg-2: #45454b;
+  --c-fg-muted: #5c5c63;
+  --c-primary: #185cb4;
   --c-on-primary: #ffffff;
-  --c-brand: #2759a4;
-  --c-chart: #2759a4;
+  --c-accent: #1c6dd0;
+  --c-on-accent: #ffffff;
+  --c-brand: #1c6dd0;
+  --c-chart: #1c6dd0;
   /* Status hues stay; darker so text on the shell and groups stays AA. */
   --c-success: #1b6e45;
   --c-warning: #7d5200;
   --c-danger: #b3321f;
-  --c-group-edge: rgb(0 0 6 / 0.09);
+  /* Adwaita's card: a near-invisible ring and a soft two-layer shadow. */
+  --c-group-edge: rgb(0 0 6 / 0.03);
+  --group-shadow: 0 1px 3px 1px rgb(0 0 6 / 0.07), 0 2px 6px 2px rgb(0 0 6 / 0.03);
   --c-seg-on: #ffffff;
 }
 
@@ -176,7 +187,7 @@
   .card {
     background: var(--c-surface-2);
     border-radius: var(--radius-card);
-    box-shadow: 0 0 0 1px var(--c-group-edge);
+    box-shadow: 0 0 0 1px var(--c-group-edge), var(--group-shadow);
   }
 
   /* Page heading inside the view. */
@@ -224,11 +235,11 @@
   }
   .btn-primary {
     font-weight: 650;
-    background: var(--c-primary);
-    color: var(--c-on-primary);
+    background: var(--c-accent);
+    color: var(--c-on-accent);
   }
   .btn-primary:hover:not(:disabled) {
-    background: var(--c-primary);
+    background: var(--c-accent);
     filter: brightness(1.08);
   }
   .btn-ghost {
@@ -343,7 +354,7 @@
     flex-direction: column;
     border-radius: var(--radius-card);
     background: var(--c-surface-2);
-    box-shadow: 0 0 0 1px var(--c-group-edge);
+    box-shadow: 0 0 0 1px var(--c-group-edge), var(--group-shadow);
     overflow: hidden;
   }
   .row {
@@ -363,7 +374,7 @@
   .row:not(.rows .row) {
     background: var(--c-surface-2);
     border-radius: var(--radius-card);
-    box-shadow: 0 0 0 1px var(--c-group-edge);
+    box-shadow: 0 0 0 1px var(--c-group-edge), var(--group-shadow);
   }
   .row-link {
     transition: background-color 120ms;
@@ -386,7 +397,7 @@
     transition: background-color 150ms;
   }
   .switch[aria-checked="true"] {
-    background: var(--c-primary);
+    background: var(--c-accent);
   }
   .switch-knob {
     position: absolute;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ramp } from "../ramp";
   import { api } from "../api";
   import { app } from "../state.svelte";
   import { ago, bytes, count, dateTime, dayLabel, time } from "../format";
@@ -8,6 +9,7 @@
   import FindResults from "./FindResults.svelte";
   import Icon from "./Icon.svelte";
   import MenuButton from "./MenuButton.svelte";
+  import SizeLimitNotice from "./SizeLimitNotice.svelte";
   import { contextMenu, type MenuEntry } from "../menu.svelte";
 
   let { id, onLocked }: { id: string; onLocked: (retry: () => void) => void } = $props();
@@ -110,12 +112,10 @@
     return e === "vault" || e === "borg";
   });
   const month = (t: string) => new Date(t).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-  /** The same size ramp as the history strip: how much a snapshot copied. */
+  /** The history strip's bar for a snapshot: 4 to 12px tall on the same fixed ramp, standing
+   * on the text's baseline. */
   function mark(s: SnapshotMeta): number {
-    const b = stored ? s.stats.stored_bytes : s.stats.copied_bytes;
-    if (b <= 1024 ** 2) return 4;
-    const lo = Math.log10(1024 ** 2), hi = Math.log10(10 * 1024 ** 3);
-    return Math.round(4 + Math.min(1, (Math.log10(b) - lo) / (hi - lo)) * 7);
+    return Math.round(4 + ramp(stored ? s.stats.stored_bytes : s.stats.copied_bytes) * 8);
   }
 
 
@@ -165,6 +165,7 @@
     <p class="max-w-sm text-sm text-fg-muted">Your first backup creates one. Each later backup adds another, storing only what changed.</p>
   </div>
 {:else}
+  <SizeLimitNotice {id} class="mb-3" />
   <div class="flex min-h-0 flex-1 gap-3">
     <!-- Snapshot list, newest first -->
     <div class="card flex w-64 shrink-0 flex-col overflow-hidden">
@@ -195,8 +196,8 @@
             onclick={() => ((selectedId = s.id), (query = null), (show = null))}
             use:contextMenu={{ items: () => snapshotMenu(s), label: `Snapshot ${dateTime(s.started)}` }}
           >
-            <span class="grid w-3.5 shrink-0 place-items-center" aria-hidden="true">
-              <span class="block rounded-full {s.status !== 'complete' ? 'bg-warning' : 'bg-success'}" style:width="{mark(s)}px" style:height="{mark(s)}px"></span>
+            <span class="flex h-3 w-3.5 shrink-0 items-end justify-center" aria-hidden="true">
+              <span class="block w-[5px] rounded-[2px] {s.status !== 'complete' ? 'bg-warning' : 'bg-success'}" style:height="{mark(s)}px"></span>
             </span>
             <span class="min-w-0 flex-1 truncate {s.id === selectedId ? 'font-semibold text-fg' : ''}">{s.name ?? dayLabel(s.started)}</span>
             {#if s.pinned}<Icon name="pin" size={13} label="Pinned" />{/if}
@@ -252,5 +253,5 @@
 {/if}
 
 {#if comparing}
-  <CompareDialog profile={id} old={comparing.old} newer={comparing.newer} title={comparing.title} onclose={() => (comparing = null)} />
+  <CompareDialog profile={id} old={comparing.old} newer={comparing.newer} title={comparing.title} oldSnap={snaps?.find((s) => s.id === comparing!.old) ?? null} onclose={() => (comparing = null)} />
 {/if}

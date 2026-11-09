@@ -405,6 +405,20 @@ pub fn xattr_policy(profile: &flux_core::Profile) -> XattrPolicy {
     }
 }
 
+/// What an exact restore leaves alone because the profile's backups never take it: its
+/// exclusions, size limit and cache markers, and a local backup drive inside the sources.
+pub fn exact_filter(
+    profile: &flux_core::Profile,
+) -> Result<Filter, flux_core::filter::FilterError> {
+    let mut f = Filter::new(&profile.sources, flux_core::sys::home_dir().as_deref())?;
+    if let flux_core::profile::Target::Local { path, .. } = &profile.target
+        && !path.as_os_str().is_empty()
+    {
+        f.add_hard_exclude(path);
+    }
+    Ok(f)
+}
+
 /// Scan a profile's sources with its filters, symlink and xattr rules. `never` lists
 /// paths that are always skipped (the backup repository itself). Run inside the pool from
 /// [`thread_pool`] to control parallelism.

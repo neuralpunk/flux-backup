@@ -5,12 +5,16 @@
   import Modal from "./Modal.svelte";
   import { app } from "../state.svelte";
   import { bytes, count, dateTime } from "../format";
-  import { ApiError, SYSTEM_PREFIX, engineLabel, isCompat, isSystem, type Drive, type Engine, type Estimate, type Issue, type PasswordSource, type PreviewRow, type Profile, type Suggestion, type TargetTest } from "../types";
+  import { ApiError, SYSTEM_PREFIX, engineLabel, isCompat, isSystem, type Drive, type Engine, type Estimate, type Issue, type PasswordSource, type PreviewRow, type Profile, type Suggestion, type BitProfile, type TargetTest } from "../types";
   import Field from "./form/Field.svelte";
   import ListEditor from "./form/ListEditor.svelte";
   import NumberInput from "./form/NumberInput.svelte";
   import Toggle from "./form/Toggle.svelte";
   import Row from "./form/Row.svelte";
+  import SizeLimit from "./SizeLimit.svelte";
+  import InfoDetails from "./InfoDetails.svelte";
+  import StorageMeter from "./StorageMeter.svelte";
+  import BackInTimeOffer from "./BackInTimeOffer.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
 
   let {
@@ -45,6 +49,38 @@
       (err) => (loadError = (err as Error).message),
     );
   });
+
+  // ---- starting from a Back In Time profile (new backups of your own only) ----
+  let bitProfiles = $state<BitProfile[]>([]);
+  let bitUsed = $state<BitProfile | null>(null);
+  let bitDismissed = $state(false);
+  /** The new profile as it was before importing, for "Start from scratch". */
+  let blank: Profile | null = null;
+  $effect(() => {
+    if (!creating || sys) return;
+    api.backintimeProfiles().then((v) => (bitProfiles = v), () => {});
+  });
+  function useBackInTime(b: BitProfile) {
+    if (!draft) return;
+    blank ??= structuredClone($state.snapshot(draft) as Profile);
+    const p = structuredClone($state.snapshot(b.profile) as Profile);
+    normalize(p);
+    draft = p;
+    scheduleParsed = false; // read the imported schedule into the When controls
+    bitUsed = b;
+    test = null;
+    // A name of its own is kept; Back In Time's default one says nothing, so the
+    // backup is named after its folders as usual.
+    nameTouched = b.name !== "Main profile";
+  }
+  function startFromScratch() {
+    if (blank) {
+      draft = structuredClone(blank);
+      scheduleParsed = false;
+    }
+    bitUsed = null;
+    nameTouched = false;
+  }
 
   /** Lists the form edits in place exist even when the file leaves them out. */
   function normalize(p: Profile) {
@@ -104,7 +140,13 @@
   // the editor always opens on the main page.
   type Page = "exclusions" | "storage" | "connection" | "schedule" | "retention" | "hooks" | "options";
   const demoPage = untrack(() => (!inTauri && typeof location !== "undefined" ? new URLSearchParams(location.search).get("page") : null));
-  let page = $state<Page | null>((demoPage as Page | null) ?? null);
+  // Another view may ask for one group (e.g. a notice's "Change the size limit").
+  const askedPage = untrack(() => {
+    const p = app.settingsPage;
+    app.settingsPage = null;
+    return p;
+  });
+  let page = $state<Page | null>(((askedPage ?? demoPage) as Page | null) ?? null);
   const pageTitle: Record<Page, { title: string; text: string }> = {
     exclusions: { title: "Leave some things out", text: "Files and folders that aren't worth backing up: caches, downloads, build output." },
     storage: { title: "How backups are stored", text: "Flux's own formats, or a standard tool's so the backups work without Flux." },
@@ -125,6 +167,8 @@
     if (field.startsWith("options")) return "options";
     return null;
   }
+  /** The destination drive isn't plugged in (a warning, not an error). */
+  const away = $derived(issues.find((i) => i.field === "target.connected") ?? null);
   const totalErrors = $derived(issues.filter((i) => i.severity === "error").length);
   const at = (prefix: string) => issues.filter((i) => i.field === prefix || i.field.startsWith(prefix + "[") || i.field.startsWith(prefix + "."));
   const general = $derived(issues.filter((i) => i.field === "" || i.field === "name"));
@@ -227,6 +271,10 @@
   let estimate = $state<Estimate | null>(null);
   let estimating = $state(false);
   let estimateError = $state<string | null>(null);
+  /** Bumped by the refresh button: count again with nothing changed (files on disk may
+   * have, and exclusion pages don't always change the folders). */
+  let recount = $state(0);
+  let lastRecount = 0;
   /** What the estimate depends on: the folders and exclusions, and the destination only
    * when it lies inside a source (it's left out then). A `$derived` string, so picking a
    * drive elsewhere, or typing a name, doesn't recount the whole tree. */
@@ -244,6 +292,9 @@
   });
   $effect(() => {
     if (estimateKey == null) return;
+    // A click counts at once; edits wait a moment for more typing.
+    const now = recount !== lastRecount;
+    lastRecount = recount;
     const snap = untrack(() => JSON.parse(JSON.stringify(draft)) as Profile);
     if (!snap.sources.paths.length) {
       estimate = null;
@@ -262,12 +313,31 @@
           estimateError = (e as Error).message;
         },
       );
-    }, 700);
+    }, now ? 0 : 700);
     return () => {
       current = false;
       clearTimeout(timer);
     };
   });
+
+  // ---- performance and behaviour: back to the recommended settings ----
+  /** What a new profile of this scope starts with. */
+  let defaultOptions = $state<Profile["options"] | null>(null);
+  $effect(() => {
+    if (page !== "options" || defaultOptions) return;
+    api.newProfile(sys).then((e) => (defaultOptions = e.profile.options), () => {});
+  });
+  const optionsAreDefault = $derived.by(() => {
+    if (!draft || !defaultOptions) return false;
+    const d = defaultOptions as Record<string, unknown>;
+    const o = draft.options as Record<string, unknown>;
+    return Object.keys(d).every((k) => o[k] === d[k]);
+  });
+  function useRecommendedOptions() {
+    if (!draft || !defaultOptions) return;
+    draft.options = { ...draft.options, ...structuredClone($state.snapshot(defaultOptions)) };
+    app.toast("info", creating ? "Recommended settings restored." : "Recommended settings restored. Click Save to keep them.");
+  }
 
   // ---- schedule ----
   type Preset = "hourly" | "daily" | "weekdays" | "weekly" | "custom";
@@ -671,21 +741,30 @@
             {#if creating && draft.sources.paths.length}
               <div class="mt-2 flex items-start gap-2 px-0.5 text-[13px] text-fg-2" aria-live="polite">
                 <Icon name="gauge" size={15} class="mt-0.5 shrink-0 text-fg-muted" />
-                {#if estimateError}
-                  <span class="text-fg-muted">Couldn't count the files: {estimateError}</span>
-                {:else if !estimate}
-                  <span class="text-fg-muted motion-safe:animate-pulse">Counting what that adds up to…</span>
-                {:else}
-                  {@const big = estimate.free != null && estimate.bytes > estimate.free}
-                  <span class={estimating ? "opacity-60" : ""}>
-                    About <span class="num font-semibold text-fg">{bytes(estimate.bytes)}</span> in {count(estimate.files)} files, after the exclusions.
-                    {#if draft.engine === "vault" || draft.engine === "borg"}Compression usually makes the first backup smaller.{:else}The first backup copies all of it; later ones only what changed.{/if}
-                    {#if big}<span class="block text-warning">That's more than the {bytes(estimate.free)} free where it would go.</span>{/if}
-                    {#if estimate.unreadable}<span class="block text-fg-muted">{count(estimate.unreadable)} items can't be read as {sys ? "root" : "you"} and would be skipped.</span>{/if}
-                    {#if estimate.missing.length}<span class="block text-warning">Not found: {estimate.missing.join(", ")}</span>{/if}
-                    {#if estimating}<span class="text-fg-muted"> Counting again…</span>{/if}
-                  </span>
-                {/if}
+                <span class="min-w-0 flex-1">
+                  {#if estimateError}
+                    <span class="text-fg-muted">Couldn't count the files: {estimateError}</span>
+                  {:else if !estimate}
+                    <span class="text-fg-muted motion-safe:animate-pulse">Counting what that adds up to…</span>
+                  {:else}
+                    {@const big = estimate.free != null && estimate.bytes > estimate.free}
+                    <span class={estimating ? "opacity-60" : ""}>
+                      About <span class="num font-semibold text-brand">{bytes(estimate.bytes)}</span> in <span class="num font-semibold text-brand">{count(estimate.files)}</span> files, after the exclusions.
+                      {#if draft.engine === "vault" || draft.engine === "borg"}Compression usually makes the first backup smaller.{:else}The first backup copies all of it; later ones only what changed.{/if}
+                      {#if big}<span class="block text-warning">That's more than the {bytes(estimate.free)} free where it would go.</span>{/if}
+                      {#if estimate.unreadable}<span class="block text-fg-muted">{count(estimate.unreadable)} items can't be read as {sys ? "root" : "you"} and would be skipped.</span>{/if}
+                      {#if estimate.missing.length}<span class="block text-warning">Not found: {estimate.missing.join(", ")}</span>{/if}
+                      {#if estimating}<span class="text-fg-muted"> Counting again…</span>{/if}
+                    </span>
+                  {/if}
+                </span>
+                <button
+                  class="btn-icon -mt-1 size-7 shrink-0"
+                  onclick={() => recount++}
+                  disabled={estimating}
+                  aria-label="Count again"
+                  title="Count again (after changing what's left out, or files on disk)"
+                ><Icon name="refresh" size={14} class={estimating ? "motion-safe:animate-spin" : ""} /></button>
               </div>
             {/if}
             {/if}
@@ -712,7 +791,12 @@
                     <Icon name="drive" size={17} class="shrink-0 text-fg-2" />
                     <span class="min-w-0 flex-1">
                       <span class="block truncate font-medium">{d.label}</span>
-                      <span class="num block truncate text-[12.5px] text-fg-muted">{bytes(d.free)} free · <span class="font-mono">{d.mount_point}</span></span>
+                      {#if d.total && d.free != null}
+                        <span class="block truncate font-mono text-[12px] text-fg-muted">{d.mount_point}</span>
+                        <span class="mt-1.5 block max-w-sm"><StorageMeter free={d.free} size={d.total} compact label="Space used on {d.label}" /></span>
+                      {:else}
+                        <span class="num block truncate text-[12.5px] text-fg-muted">{bytes(d.free)} free · <span class="font-mono">{d.mount_point}</span></span>
+                      {/if}
                     </span>
                     {#if chosen}<Icon name="check" size={18} class="shrink-0 text-fg" />{/if}
                   </button>
@@ -731,7 +815,7 @@
                   <span class="flex-1 font-medium">{drives.length || custom ? "Another folder…" : "Choose a folder…"}</span>
                 </button>
               </div>
-              {#each at("target.path") as i (i.message)}
+              {#each [...at("target.path"), ...at("target.connected")] as i (i.message)}
                 <!-- A new profile without a target yet isn't an error, just the next step. -->
                 <p class="mt-1.5 px-0.5 text-[12.5px] first-letter:uppercase {creating && !target.path ? 'text-fg-muted' : i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>
               {/each}
@@ -824,11 +908,57 @@
                 </div>
               {/if}
               {#if draft.target.kind === "local" && draft.target.fs_uuid}
-                <Toggle row icon="drive" bind:checked={draft.schedule.on_connect} label="Also when this drive is plugged in" hint="Back up as soon as the drive is connected." />
+                <Toggle
+                  row
+                  icon="drive"
+                  bind:checked={draft.schedule.on_connect}
+                  label="Also when this drive is plugged in"
+                  hint="Back up as soon as the drive is connected."
+                  disabled={!sys && app.scheduler === "cron" && !draft.schedule.on_connect}
+                  reason="Needs systemd timers; scheduled backups run with cron (Preferences › Advanced)."
+                />
               {/if}
               {@render pageRow("schedule", "calendar", scheduleSummary)}
             </div>
-            {#each at("schedule.on_connect") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] text-danger">{i.message}</p>{/each}
+            {#each at("schedule.on_connect") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+            {/if}
+          {/snippet}
+
+          {#snippet howItRuns()}
+            {#if draft}
+              {@const sc = draft.schedule}
+              {@const folders = draft.sources.paths.length}
+              {@const at12 = new Date(`1970-01-01T${timeOfDay}`).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+              {@const place = draft.target.kind === "ssh" ? (draft.target.host ? `the server ${draft.target.host}` : "your server") : draft.target.path ? whereSummary.split(" · ")[0] : "your backup drive"}
+              <InfoDetails summary="What happens each time it backs up, in plain words">
+                <ol class="flex list-decimal flex-col gap-2.5 pl-4 marker:font-semibold marker:text-primary">
+                  <li>
+                    <span class="font-medium text-fg">
+                      {when === "manual" ? "When you click Back up now" : when === "hourly" ? "Every hour" : when === "daily" ? `Every day at ${at12}` : when === "weekly" ? `Every ${weekday} at ${at12}` : `On its schedule (${scheduleSummary.toLowerCase()})`}{sc.on_connect ? ", and as soon as the drive is plugged in" : ""},
+                    </span>
+                    Flux looks through {folders === 1 ? "your folder" : `your ${folders} folders`} for anything new or changed since the last backup, skipping what you chose to leave out.
+                  </li>
+                  <li>
+                    {#if draft.engine === "vault"}
+                      It stores only what's new on {place}, compressed and encrypted. A file that appears in several places, or in several backups, is stored once.
+                    {:else if draft.engine === "borg"}
+                      Borg stores only what's new on {place}, compressed{encrypted ? " and encrypted" : ""}, as a new archive.
+                    {:else}
+                      It copies only the new and changed files to {place}. Files that didn't change are linked to the previous backup instead of copied again, so each snapshot is a complete copy you can browse, yet costs almost no extra space.
+                    {/if}
+                    The result is a <span class="font-medium text-fg">snapshot</span>: your files as they were at that moment.
+                  </li>
+                  {#if sc.trigger !== "manual"}
+                    <li>
+                      It runs in the background, even with the app closed.
+                      {sc.catch_up ? "If the computer is off or asleep at that time, it backs up the next time it can." : ""}
+                      {sc.skip_on_battery ? "On battery power it waits until you plug in." : ""}
+                    </li>
+                  {/if}
+                  <li>{keepSummary} Snapshots you pin or name are never removed.</li>
+                  <li>To get something back, open <span class="font-medium text-fg">Snapshots</span>, pick a day, and click <span class="font-medium text-fg">Restore</span> next to the file or folder. Nothing you restore overwrites your files unless you ask it to.</li>
+                </ol>
+              </InfoDetails>
             {/if}
           {/snippet}
 
@@ -961,10 +1091,19 @@
                   </div>
                 {/if}
               </div>
-              <div class="flex gap-2">
-                <button class="btn btn-primary h-10 px-5" onclick={startFirst}><Icon name="play" size={14} /> Back up now</button>
-                <button class="btn btn-ghost h-10" onclick={() => done && onsaved(done)}>Later</button>
-              </div>
+              {#if away}
+                <!-- The drive isn't plugged in: a first backup now could only fail. -->
+                <div class="flex w-full items-start gap-3 rounded-card bg-warning/10 px-4 py-3 text-[13.5px] ring-1 ring-warning/30 ring-inset" role="status">
+                  <Icon name="alert" size={16} class="mt-0.5 shrink-0 text-warning" />
+                  <span class="text-fg-2"><span class="font-medium text-fg">{away.message}</span> When it is, click Back up now on its page.</span>
+                </div>
+                <button class="btn btn-primary h-10 px-5" onclick={() => done && onsaved(done)}>Done</button>
+              {:else}
+                <div class="flex gap-2">
+                  <button class="btn btn-primary h-10 px-5" onclick={startFirst}><Icon name="play" size={14} /> Back up now</button>
+                  <button class="btn btn-ghost h-10" onclick={() => done && onsaved(done)}>Later</button>
+                </div>
+              {/if}
             </section>
           {:else}
             <!-- ===================== Wizard: one question per step ===================== -->
@@ -999,6 +1138,9 @@
                 </header>
 
                 {#if step === "what"}
+                  {#if bitProfiles.length && (bitUsed || !bitDismissed)}
+                    <BackInTimeOffer profiles={bitProfiles} used={bitUsed} onuse={useBackInTime} onstartover={startFromScratch} ondismiss={() => (bitDismissed = true)} />
+                  {/if}
                   <div id="sec-sources">{@render whatBody()}</div>
                 {:else if step === "where"}
                   <div id="sec-destination" class="flex flex-col gap-3">
@@ -1015,6 +1157,7 @@
                     <h3 class="group-title">What to keep</h3>
                     <div class="rows">{@render pageRow("retention", "history", "", keepSummary)}</div>
                   </section>
+                  {@render howItRuns()}
                 {:else}
                   {@render nameGroup()}
                   <section>
@@ -1062,7 +1205,7 @@
                     {#each suggestions as sg (sg.pattern)}
                       {@const added = exclude.includes(sg.pattern)}
                       <button
-                        class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors {added ? 'bg-selected font-medium text-on-selected' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
+                        class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors {added ? 'bg-success/15 font-medium text-success shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--c-success)_35%,transparent)] hover:bg-success/20' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
                         title="{sg.why}{sg.size ? ` · ${bytes(sg.size)}` : ''}"
                         aria-pressed={added}
                         onclick={() => draft && (draft.sources.exclude = added ? exclude.filter((x) => x !== sg.pattern) : [...exclude, sg.pattern])}
@@ -1079,7 +1222,7 @@
               <Toggle row bind:checked={draft.sources.exclude_caches} label="Skip cache folders" hint="Folders marked with a CACHEDIR.TAG (browser and app caches)." />
               <Toggle row bind:checked={draft.sources.one_file_system} label="Stay on one disk" hint="Don't follow into other drives mounted inside the folders you back up." />
               <Row title="Skip files larger than" subtitle="Very large files (disk images, videos) can be left out.">
-                <input class="input w-36" value={draft.sources.exclude_larger_than ?? ""} oninput={(e) => draft && (draft.sources.exclude_larger_than = opt(e.currentTarget.value))} placeholder="no limit" aria-label="Skip files larger than" />
+                <SizeLimit bind:value={draft.sources.exclude_larger_than} />
               </Row>
             </div>
             {#each [...at("sources.exclude_larger_than"), ...at("sources.exclude_caches")] as i (i.message)}<p class="text-[13px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
@@ -1312,6 +1455,16 @@
               </Field>
             </section>
           {:else if page === "options"}
+            <div class="flex min-h-[54px] items-center gap-3 rounded-card bg-surface-2 px-4 py-2.5 text-[13px] shadow-[0_0_0_1px_var(--c-group-edge)]">
+              {#if optionsAreDefault}
+                <Icon name="check" size={15} class="shrink-0 text-success" />
+                <span class="flex-1 text-fg-2">Using the recommended settings.</span>
+              {:else}
+                <Icon name="sparkle" size={15} class="shrink-0 text-fg-muted" />
+                <span class="flex-1 text-fg-2">Changed something and want to undo it? Go back to what Flux recommends.</span>
+                <button class="btn h-8 shrink-0" onclick={useRecommendedOptions} disabled={!defaultOptions}>Recommended defaults</button>
+              {/if}
+            </div>
             <h3 class="pt-2 text-[13px] font-medium text-fg-muted">What's kept with your files</h3>
             <div class="rows">
               <Toggle row bind:checked={draft.options.preserve_acl} label="Keep access lists (ACLs)" hint="Extra permissions some files have." />

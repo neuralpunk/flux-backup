@@ -580,6 +580,10 @@ impl BorgEncryption {
 }
 
 /// borg create options that would break Flux's reading of the repository.
+/// A file size limit below this (1 MiB) leaves out nearly everything, which is almost
+/// always a slip (a bare "1" means one byte): validation warns about it.
+pub const TINY_SIZE_LIMIT: u64 = 1 << 20;
+
 pub const BORG_RESERVED_ARGS: &[&str] = &[
     "--json",
     "--log-json",
@@ -897,6 +901,18 @@ impl Profile {
                 format!("[borg] settings are ignored for {} profiles", self.engine),
             ));
         }
+        if let Some(max) = self.sources.exclude_larger_than
+            && self.engine != Engine::Borg
+            && max.bytes() < TINY_SIZE_LIMIT
+        {
+            v.push(Issue::warning(
+                "sources.exclude_larger_than",
+                format!(
+                    "every file larger than {max} is left out, which is almost every file; \
+                     a limit like 1 GB or 4 GB is usual"
+                ),
+            ));
+        }
         if self.engine == Engine::Borg {
             let b = self.borg.clone().unwrap_or_default();
             if b.compression.trim().is_empty() || b.compression.contains(char::is_whitespace) {
@@ -1048,6 +1064,21 @@ mod tests {
             "my-laptop-home"
         );
         assert!(ProfileId::slugify("!!!").is_none());
+    }
+
+    #[test]
+    fn tiny_size_limit_is_warned_about() {
+        let mut p = sample();
+        p.sources.exclude_larger_than = Some(ByteSize(1));
+        let issues = p.validate();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "sources.exclude_larger_than" && i.message.contains("1B")),
+            "{issues:?}"
+        );
+        p.sources.exclude_larger_than = Some(ByteSize(4 << 30));
+        assert!(p.validate().is_empty(), "{:?}", p.validate());
     }
 
     #[test]

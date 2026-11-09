@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Job } from "../state.svelte";
+  import { app, type Job } from "../state.svelte";
   import { bytes, count, duration, phaseLabel } from "../format";
   import Icon from "./Icon.svelte";
 
@@ -24,7 +24,9 @@
     </div>
     <span class="num font-mono text-[13px] text-fg-muted">
       {#if p}
-        {#if p.phase === "scanning"}
+        {#if p.phase === "waiting"}
+          for another backup to finish (one at a time) · {duration(p.elapsed_secs)}
+        {:else if p.phase === "scanning"}
           {count(p.scanned)} items found
         {:else if transferring}
           {bytes(p.bytes_done)} / {bytes(p.bytes_total)} · {bytes(p.bytes_per_sec)}/s · {count(p.entries_done)}/{count(p.entries_total)}{#if p.eta_secs != null}&nbsp;· {duration(p.eta_secs)} left{/if}
@@ -45,4 +47,10 @@
       <div class="h-full w-1/4 rounded-full bg-primary/60 motion-safe:animate-pulse"></div>
     {/if}
   </div>
+  {#if !job.finished}
+    <label class="flex items-center gap-2 self-start text-[13px] text-fg-2">
+      <input type="checkbox" class="accent-[var(--c-primary)]" checked={job.shutdownAfter ?? false} onchange={(e) => void app.setShutdownAfter(job.profile, e.currentTarget.checked)} />
+      <Icon name="power" size={13} class="text-fg-muted" /> Shut down the computer when done
+    </label>
+  {/if}
 </section>

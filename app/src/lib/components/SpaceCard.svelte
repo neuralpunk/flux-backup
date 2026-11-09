@@ -5,6 +5,7 @@
   // same numbers are in the table below the chart.
   import { bytes, dayLabel, dateTime } from "../format";
   import type { Space } from "../types";
+  import StorageMeter from "./StorageMeter.svelte";
 
   let { space, target }: { space: Space; target: string } = $props();
 
@@ -66,12 +67,13 @@
 </script>
 
 <section class="card px-5 py-4">
-  <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-    <h2 class="title">Space on {target}</h2>
-    <span class="text-sm text-fg-2"><span class="font-medium text-fg">{bytes(space.free)}</span> free of {bytes(size)}</span>
+  <h2 class="title">Space on {target}</h2>
+  <div class="mt-3">
+    <StorageMeter free={space.free} {size} label="Space used on {target}" />
   </div>
-  <p class="mt-1 text-sm {space.days_left != null && space.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{headline}</p>
+  <p class="mt-3 text-sm {space.days_left != null && space.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{headline}</p>
 
+  {#if pts.length >= 3}
   <div class="relative mt-4" bind:clientWidth={width}>
     <svg
       width={width}
@@ -141,4 +143,5 @@
       </tbody>
     </table>
   </details>
+  {/if}
 </section>

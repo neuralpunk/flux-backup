@@ -82,6 +82,22 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.3.0" date="2026-11-09">
+      <description>
+        <p>Easier, finer-grained restores, clearer setup, a way in from Back In Time, cron as a scheduler, and a new look in GNOME's own colours.</p>
+        <ul>
+          <li>Start a new backup from a Back In Time profile: folders, exclusions, schedule and what to keep come over, and its snapshots stay untouched</li>
+          <li>Restore single files from anywhere in a snapshot, and bring back just what was deleted in one click</li>
+          <li>Restore removed or changed files straight from the list of what changed</li>
+          <li>The file size limit takes a unit and warns when it would leave out almost everything</li>
+          <li>Comparing with your files explains what the size limit leaves out and hides folder-date noise</li>
+          <li>Setup explains in plain words what each backup does, and settings can go back to the recommended defaults</li>
+          <li>Scheduled backups can run with cron instead of systemd timers, and still catch up on missed ones</li>
+          <li>Backing up to a drive that isn't plugged in says so at once, instead of seeming to run forever</li>
+          <li>A new look in GNOME's own colours, with each backup's last 30 days drawn as bars</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-08">
       <description>
         <p>Backups that don't need Flux, an app that shows at a glance whether you're protected, and faster backups.</p>

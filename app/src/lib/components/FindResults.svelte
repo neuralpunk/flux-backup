@@ -1,6 +1,7 @@
 <script lang="ts">
   // Files found in any snapshot. Click to show one in its newest snapshot; double-click a
   // file to open a read-only copy; Versions and Restore are on each row.
+  import { untrack } from "svelte";
   import { api } from "../api";
   import { app } from "../state.svelte";
   import { bytes, dayLabel, shortDateTime, dateTime } from "../format";
@@ -32,20 +33,34 @@
   let versionsOf = $state<string | null>(null);
   let restoring = $state<{ snapshot: SnapshotMeta; paths: string[] } | null>(null);
 
-  function search(q: string) {
-    result = null;
-    error = null;
+  /** `quiet`: search again keeping the results on screen (after a restore). */
+  function search(q: string, quiet = false) {
+    if (!quiet) {
+      result = null;
+      error = null;
+    }
     api.find(profile, q).then(
       (r) => {
         if (q === query) result = r;
       },
       (e) => {
+        if (quiet) return;
         if (e instanceof ApiError && e.code === "password_required") onLocked(() => search(q));
         else error = (e as Error).message;
       },
     );
   }
   $effect(() => search(query));
+  // Whether each result is on the computer is checked on every search: after a restore,
+  // search again so what came back isn't still marked deleted.
+  let seenDisk = untrack(() => app.diskRevision);
+  $effect(() => {
+    const r = app.diskRevision;
+    if (r !== seenDisk) {
+      seenDisk = r;
+      untrack(() => search(query, true));
+    }
+  });
 
   const newest = $derived(snaps.at(-1)?.id);
   const snap = (id: string) => snaps.find((s) => s.id === id);
@@ -113,7 +128,11 @@
     {:else}
       <ul class="px-2 pb-2">
         {#each result.hits as f (f.path)}
+          <!-- Not in the newest snapshot: "last in …" rather than a version count. -->
           {@const gone = f.latest !== newest}
+          <!-- Deleted means not on the computer now (when that can't be checked: not in the
+               newest snapshot). Something restored since is on the computer again. -->
+          {@const deleted = f.on_disk === false || (f.on_disk == null && gone)}
           <li use:contextMenu={{ items: () => menu(f), label: nameOf(f.path) }}>
             <div class="group flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-surface-3">
               <button class="flex min-w-[9rem] flex-1 items-center gap-3 text-left" onclick={() => onshow(f.latest, f.path)} ondblclick={() => f.kind === "file" && openCopy(f)} title="Show in its snapshot{f.kind === 'file' ? ' (double-click to open a copy)' : ''}">
@@ -121,7 +140,7 @@
                 <span class="min-w-0 flex-1">
                   <span class="flex items-center gap-2">
                     <span class="truncate text-[14px]">{nameOf(f.path)}</span>
-                    {#if gone}<span class="tag tag-warn shrink-0" title="Not in the newest snapshot">Deleted</span>{/if}
+                    {#if deleted}<span class="tag tag-warn shrink-0" title="Not on your computer any more: deleted or moved since it was backed up">Deleted</span>{/if}
                   </span>
                   <span class="block truncate font-mono text-[11.5px] text-fg-muted">{folderOf(f.path)}</span>
                   <span class="num block truncate text-[12px] text-fg-2 2xl:hidden">

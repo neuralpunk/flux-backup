@@ -16,6 +16,7 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import Snapshots from "./lib/components/Snapshots.svelte";
   import Toasts from "./lib/components/Toasts.svelte";
+  import ShutdownBanner from "./lib/components/ShutdownBanner.svelte";
   import MenuHost from "./lib/components/MenuHost.svelte";
   import DeleteProfileDialog from "./lib/components/DeleteProfileDialog.svelte";
   import RecoveryKitDialog from "./lib/components/RecoveryKitDialog.svelte";
@@ -85,6 +86,9 @@
       if (next) app.open(next.id);
     } else if (!typing(e) && e.key === "?") {
       app.showShortcuts = true;
+    } else if (e.key === "F5" || (ctrl && e.key.toLowerCase() === "r")) {
+      // Not the webview's reload: in the file browser, check the folder again.
+      document.getElementById("browser-refresh")?.click();
     } else if (!typing(e) && e.key === "/" && document.getElementById("browser-filter")) {
       document.getElementById("browser-filter")?.focus();
     } else {
@@ -215,4 +219,5 @@
 {/if}
 
 <Toasts />
+<ShutdownBanner />
 <MenuHost />

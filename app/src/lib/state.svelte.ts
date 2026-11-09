@@ -1,7 +1,7 @@
 // Application state shared across components (Svelte 5 runes).
 
 import { api, listen, pickFile, type JobEventPayload } from "./api";
-import { ApiError, type BackupStatus, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type SystemStatus } from "./types";
+import { ApiError, type BackupStatus, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type Scheduler, type SystemStatus } from "./types";
 
 export interface Job {
   profile: string;
@@ -9,6 +9,8 @@ export interface Job {
   warnings: { path: string; message: string }[];
   finished: { status: RunStatus; error: string | null } | null;
   startedAt: number;
+  /** The computer shuts down when this backup ends. */
+  shutdownAfter?: boolean;
 }
 
 export type Theme = "dark" | "light" | "auto";
@@ -49,6 +51,8 @@ class AppState {
   statuses = $state<Record<string, BackupStatus>>({});
   private seenFailures = $state<Record<string, string>>(loadSeen());
   tab = $state<Tab>("overview");
+  /** A settings group the editor opens on next (e.g. "exclusions"), then forgets. */
+  settingsPage = $state<string | null>(null);
   /** The new-profile editor is open. */
   creating = $state(false);
   /** …for a system profile. */
@@ -65,6 +69,10 @@ class AppState {
   prefsOpen = $state(false);
   /** Scheduled backups are paused (until a moment, or until resumed). */
   pause = $state<Pause | null>(null);
+  /** When a shutdown scheduled after a backup happens (ms since the epoch). */
+  shutdownAt = $state<number | null>(null);
+  /** What runs scheduled backups (Preferences › Advanced). */
+  scheduler = $state<Scheduler>("systemd");
   /** Backups being started or stopped from the app (buttons show it). */
   starting = $state<Record<string, boolean>>({});
   stopping = $state<Record<string, boolean>>({});
@@ -75,6 +83,9 @@ class AppState {
   resolvedTheme = $derived<"dark" | "light">(this.theme === "auto" ? (this.systemDark ? "dark" : "light") : this.theme);
   /** Bumped when a profile's snapshots change, so views reload. */
   revision = $state(0);
+  /** Bumped after a restore writes files, so views that mark what's on the computer
+   * ("Deleted") check again. */
+  diskRevision = $state(0);
   toasts = $state<{ id: number; kind: "ok" | "bad" | "info"; text: string }[]>([]);
 
   selected = $derived(this.profiles.find((p) => p.id === this.selectedId) ?? null);
@@ -146,7 +157,9 @@ class AppState {
 
   async loadPause() {
     try {
-      this.pause = (await api.preferences()).pause;
+      const p = await api.preferences();
+      this.pause = p.pause;
+      this.scheduler = p.scheduler ?? "systemd";
     } catch {
       /* older backend */
     }
@@ -172,20 +185,75 @@ class AppState {
     this.markSeen(id);
   }
 
+  /** Open `id`'s settings at one group of them (a page of the editor). */
+  openSettings(id: string, page: string) {
+    this.settingsPage = page;
+    this.open(id, "settings");
+  }
+
   /** Start a backup of `id` (asks for the password first if it needs one). */
-  async backupNow(id: string) {
+  async backupNow(id: string, shutdown = false) {
     this.starting[id] = true;
+    const name = this.profiles.find((x) => x.id === id)?.name ?? id;
     try {
-      await api.backupNow(id);
+      const r = await api.backupNow(id, shutdown);
+      if (r && !r.running) {
+        // Over before its progress could be followed (nothing had changed, say).
+        this.toast("ok", `Backup of “${name}” finished.`);
+        await this.afterRun();
+        return;
+      }
       const p = this.profiles.find((x) => x.id === id);
       if (p) p.running = true;
+      this.watchStart(id);
     } catch (e) {
       if (e instanceof ApiError && e.code === "password_required") {
         this.open(id);
-        this.unlock = { id, retry: () => void this.backupNow(id) };
+        this.unlock = { id, retry: () => void this.backupNow(id, shutdown) };
+      } else if (e instanceof ApiError && e.code === "backup_failed") {
+        this.toast("bad", `Backup of “${name}” failed: ${e.message}`);
+        await this.afterRun();
       } else this.toast("bad", (e as Error).message);
     } finally {
       this.starting[id] = false;
+    }
+  }
+
+  /** Reload what a finished run changes: the list, statuses and the open views. */
+  private async afterRun() {
+    await this.refresh();
+    this.revision++;
+  }
+
+  /** Safety net: if a started backup never reports in (it ended before its progress could
+   * be followed), ask the backend whether it's still running instead of spinning forever. */
+  private watchStart(id: string) {
+    setTimeout(() => {
+      const p = this.profiles.find((x) => x.id === id);
+      if (p?.running && !this.jobs[id]) void this.afterRun();
+    }, 4000);
+  }
+
+  /** Shut the computer down when `id`'s running backup ends (or no longer). */
+  async setShutdownAfter(id: string, on: boolean) {
+    const job = this.jobs[id];
+    try {
+      await api.shutdownAfter(id, on);
+      if (job) job.shutdownAfter = on;
+      if (on) this.toast("info", "The computer shuts down a minute after this backup ends.");
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+    }
+  }
+
+  /** Cancel the shutdown scheduled after a backup. */
+  async cancelShutdown() {
+    try {
+      await api.cancelShutdown();
+      this.shutdownAt = null;
+      this.toast("ok", "Shutdown cancelled.");
+    } catch (e) {
+      this.toast("bad", `Couldn't cancel the shutdown: ${(e as Error).message}. Run shutdown -c in a terminal.`);
     }
   }
 
@@ -195,8 +263,13 @@ class AppState {
     try {
       await api.cancel(id);
     } catch (e) {
-      this.toast("bad", (e as Error).message);
       this.stopping[id] = false;
+      if (e instanceof ApiError && e.code === "not_running") {
+        // It had already ended; show how it went.
+        this.setRunning(id, false);
+        this.toast("info", "That backup had already stopped. Activity shows how it went.");
+        await this.afterRun();
+      } else this.toast("bad", (e as Error).message);
     }
   }
 
@@ -301,6 +374,7 @@ class AppState {
         return;
       case "progress":
         job.progress = message.progress;
+        job.shutdownAfter = message.shutdown_after ?? false;
         break;
       case "event": {
         const ev: JobEvent = message.event;
@@ -310,6 +384,7 @@ class AppState {
       case "finished": {
         job.finished = { status: message.status, error: message.error };
         this.setRunning(profile, false);
+        if (message.shutdown) this.shutdownAt = Date.now() + 60_000;
         const name = this.profiles.find((p) => p.id === profile)?.name ?? profile;
         if (message.status === "failed") this.toast("bad", `Backup of “${name}” failed: ${message.error ?? "unknown error"}`);
         else if (message.status === "completed" || message.status === "unchanged") this.toast("ok", `Backup of “${name}” finished.`);

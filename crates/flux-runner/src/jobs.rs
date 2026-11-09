@@ -6,7 +6,7 @@
 //! * `<id>.json`: [`JobInfo`] (pid, run id, socket path)
 //! * a Unix socket (path in the JSON) speaking JSON lines:
 //!   - server → client: [`Message`]s (`hello`, then `progress` about 5×/s, `event`s, `finished`)
-//!   - client → server: `{"cmd":"cancel"}`
+//!   - client → server: `{"cmd":"cancel"}`, `{"cmd":"shutdown_after","on":true}`
 //!
 //! The runtime directory is private to the user (`$XDG_RUNTIME_DIR` is mode 0700), and the
 //! socket and files are 0600.
@@ -55,6 +55,9 @@ pub enum Message {
     },
     Progress {
         progress: ProgressSnapshot,
+        /// The computer shuts down when this backup ends.
+        #[serde(default)]
+        shutdown_after: bool,
     },
     Event {
         event: Event,
@@ -62,6 +65,9 @@ pub enum Message {
     Finished {
         status: RunStatus,
         error: Option<String>,
+        /// A shutdown was scheduled (in a minute; `shutdown -c` cancels it).
+        #[serde(default)]
+        shutdown: bool,
     },
 }
 
@@ -69,6 +75,10 @@ pub enum Message {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     Cancel,
+    /// Shut the computer down when this backup ends (or not).
+    ShutdownAfter {
+        on: bool,
+    },
 }
 
 /// Held for the whole run; removes the info file on drop.
@@ -120,6 +130,29 @@ pub fn try_lock(paths: &Paths, id: &ProfileId) -> io::Result<Option<JobLock>> {
     unreachable!("the last attempt returns")
 }
 
+/// The scope's turn ("one backup at a time"), held for a whole run.
+#[derive(Debug)]
+pub struct Turn {
+    _file: File,
+}
+
+/// Take the scope's turn: `Ok(None)` while another backup has it.
+pub fn try_turn(paths: &Paths) -> io::Result<Option<Turn>> {
+    let dir = jobs_dir(paths);
+    private_dir(&dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(dir.join("turn.lock"))?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(Turn { _file: file })),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Socket path for a job. Unix socket paths are limited to ~107 bytes; if the runtime
 /// directory is too deep, use a short private directory under /tmp instead.
 fn socket_path(paths: &Paths, id: &ProfileId) -> io::Result<PathBuf> {
@@ -147,8 +180,9 @@ pub struct Shared<'a> {
     pub info: JobInfo,
     pub progress: &'a Progress,
     events: Mutex<Vec<Event>>,
-    finished: Mutex<Option<(RunStatus, Option<String>)>>,
+    finished: Mutex<Option<(RunStatus, Option<String>, bool)>>,
     stop: AtomicBool,
+    shutdown_after: AtomicBool,
 }
 
 impl<'a> Shared<'a> {
@@ -159,7 +193,17 @@ impl<'a> Shared<'a> {
             events: Mutex::new(Vec::new()),
             finished: Mutex::new(None),
             stop: AtomicBool::new(false),
+            shutdown_after: AtomicBool::new(false),
         }
+    }
+
+    /// Shut the computer down when this backup ends.
+    pub fn set_shutdown_after(&self, on: bool) {
+        self.shutdown_after.store(on, Relaxed);
+    }
+
+    pub fn shutdown_after(&self) -> bool {
+        self.shutdown_after.load(Relaxed)
     }
 
     pub fn push_event(&self, ev: &Event) {
@@ -170,9 +214,10 @@ impl<'a> Shared<'a> {
         }
     }
 
-    pub fn finish(&self, status: RunStatus, error: Option<String>) {
+    /// `shutdown`: a shutdown was scheduled.
+    pub fn finish(&self, status: RunStatus, error: Option<String>, shutdown: bool) {
         if let Ok(mut f) = self.finished.lock() {
-            *f = Some((status, error));
+            *f = Some((status, error, shutdown));
         }
     }
 
@@ -245,9 +290,16 @@ fn serve_client(stream: UnixStream, shared: &Shared<'_>) {
         s.spawn(|| {
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
-                if let Ok(Command::Cancel) = serde_json::from_str(&line) {
-                    tracing::info!("cancel requested through the status socket");
-                    shared.progress.cancel();
+                match serde_json::from_str(&line) {
+                    Ok(Command::Cancel) => {
+                        tracing::info!("cancel requested through the status socket");
+                        shared.progress.cancel();
+                    }
+                    Ok(Command::ShutdownAfter { on }) => {
+                        tracing::info!("shut down after this backup: {on}");
+                        shared.set_shutdown_after(on);
+                    }
+                    Err(_) => {}
                 }
             }
         });
@@ -278,11 +330,19 @@ fn serve_client(stream: UnixStream, shared: &Shared<'_>) {
                     &mut w,
                     &Message::Progress {
                         progress: shared.progress.snapshot(),
+                        shutdown_after: shared.shutdown_after(),
                     },
                 )?;
                 let finished = shared.finished.lock().ok().and_then(|f| f.clone());
-                if let Some((status, error)) = finished {
-                    send(&mut w, &Message::Finished { status, error })?;
+                if let Some((status, error, shutdown)) = finished {
+                    send(
+                        &mut w,
+                        &Message::Finished {
+                            status,
+                            error,
+                            shutdown,
+                        },
+                    )?;
                     w.flush()?;
                     return Ok(());
                 }
@@ -344,6 +404,14 @@ impl Client {
 
     pub fn cancel(&mut self) -> io::Result<()> {
         self.writer.write_all(b"{\"cmd\":\"cancel\"}\n")
+    }
+
+    /// Shut the computer down when the backup ends (or no longer).
+    pub fn shutdown_after(&mut self, on: bool) -> io::Result<()> {
+        let mut line =
+            serde_json::to_vec(&Command::ShutdownAfter { on }).map_err(io::Error::other)?;
+        line.push(b'\n');
+        self.writer.write_all(&line)
     }
 
     /// Next message; `None` when the job closed the connection.
@@ -418,7 +486,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
             assert!(progress.is_cancelled());
-            shared.finish(RunStatus::Cancelled, None);
+            shared.finish(RunStatus::Cancelled, None, false);
             let mut last = None;
             while let Some(m) = c.next_message().unwrap() {
                 last = Some(m);

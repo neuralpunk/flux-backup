@@ -31,7 +31,7 @@
 </script>
 
 {#snippet row(p: ProfileSummary)}
-  {@const s = protection(p, app.statuses[p.id], percent(p))}
+  {@const s = protection(p, app.statuses[p.id], percent(p), app.jobs[p.id]?.progress?.phase === "waiting")}
   {@const on = onBackup(p.id)}
   {@const fresh = app.unseenFailure(p)}
   <button

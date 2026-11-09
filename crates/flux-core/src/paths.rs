@@ -67,9 +67,11 @@ impl Paths {
                         .join(APP_DIR)
                 };
                 let state_dir = xdg("XDG_STATE_HOME", ".local/state");
+                // A cron job may name a runtime folder that only exists while you're logged
+                // in; then it's as if there were none.
                 let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
                     .map(PathBuf::from)
-                    .filter(|p| p.is_absolute())
+                    .filter(|p| p.is_absolute() && p.is_dir())
                     .map(|p| p.join(APP_DIR))
                     .unwrap_or_else(|| state_dir.join("run"));
                 Ok(Self {

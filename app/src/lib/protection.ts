@@ -16,8 +16,9 @@ export interface Protection {
   detail: string | null;
 }
 
-/** `percent`: a running backup's transfer, when known. */
-export function protection(p: ProfileSummary, s: BackupStatus | undefined, percent: number | null = null): Protection {
+/** `percent`: a running backup's transfer, when known; `waiting`: it waits for another
+ * backup to finish ("one backup at a time"). */
+export function protection(p: ProfileSummary, s: BackupStatus | undefined, percent: number | null = null, waiting = false): Protection {
   const r = p.last_run;
   const lastGood = s?.last_good ?? (r && r.status !== "failed" && r.status !== "cancelled" ? r.finished : null);
   const danger = s?.health.find((h) => h.level === "danger");
@@ -26,7 +27,7 @@ export function protection(p: ProfileSummary, s: BackupStatus | undefined, perce
     return {
       tone: "run",
       protected: lastGood != null,
-      short: percent != null ? `Backing up · ${percent}%` : "Backing up…",
+      short: waiting ? "Waiting for its turn…" : percent != null ? `Backing up · ${percent}%` : "Backing up…",
       detail: null,
     };
   }

@@ -64,7 +64,7 @@ system backups. Each is only needed for the feature that uses it.
 
 **In the app:** click **New backup** in the sidebar. A short guide asks one question per
 step: **What** to back up (your home folder by default), **Where** to keep it (a
-connected drive, a folder or an SSH server), **Protection** (plain folders, encrypted, or
+connected drive, each with a meter of how full it is; a folder; or an SSH server), **Protection** (plain folders, encrypted, or
 written by rsync or Borg so the backups never depend on Flux; an encrypted one asks for
 its password right there), and **When**. **Review** shows every answer with a way back to
 change it and the name it will have; **Create backup** sets it up and offers **Back up
@@ -77,7 +77,26 @@ that group in a dialog over the editor; **Done** closes it, and nothing is saved
 
 While you choose what to back up, Flux counts what it adds up to after the exclusions
 ("About 32 GiB in 51,900 files") and warns if that's more than the free space where it
-would go.
+would go. The ↻ button next to it counts again, after you change what's left out or the
+files themselves. On **When**, *What happens each time it backs up* explains in plain words
+what your choices add up to: when it runs, what it copies, what it keeps, and how to get
+files back.
+
+In *Settings › Performance and behaviour*, **Recommended defaults** puts every setting
+there back to what Flux recommends (nothing is saved until you click **Save**).
+
+**Coming from Back In Time?** If Back In Time is set up for you
+(`~/.config/backintime/config`), the first step offers each of its profiles: **Use these
+settings** fills in its folders, exclusions, schedule, what to keep and options (extra
+rsync options too, except the ones Flux sets itself). Each step
+can still be changed; on **Protection**, rsync is preselected because it makes the same
+kind of plain, hard-linked folders Back In Time did, and the other choices are right there
+(a profile Back In Time encrypted with EncFS becomes an encrypted Vault). Flux can't carry
+on Back In Time's own snapshots, so it starts a fresh set next to them. They stay where
+they are, untouched: keep Back In Time to restore from them, and turn off its schedule so
+both don't back up at once. In a terminal: `flux profile backintime` lists the profiles,
+`flux profile backintime 1` creates a Flux profile from the first (`--engine` to choose
+another way of storing it, `--id` to name it).
 
 **In a terminal:**
 
@@ -223,6 +242,10 @@ When you pick a drive in the app (or create a profile pointing at a mounted driv
 remembers the drive's **filesystem UUID**. If that drive isn't connected, Flux refuses to
 write into the empty mount point, so it never fills your system disk by mistake.
 
+The app tells you before that happens: a destination whose drive isn't plugged in is
+flagged while you set the backup up or edit it, and **Back up now** says at once that the
+drive isn't connected (and where it should be mounted) instead of starting.
+
 Backups go into a `flux-backup/` folder on the drive (Mirror) or `flux-vault/` (Vault).
 
 ### An SSH server
@@ -264,7 +287,8 @@ contain a marker file (`exclude_if_present = [".nobackup"]`), skip big files
 (`exclude_larger_than = "4GB"`), and stay on one filesystem (`one_file_system`).
 
 In the app, *What to back up* › **Leave some things out** suggests common exclusions
-(caches, trash, build output) with how much space each takes in your sources.
+(caches, trash, build output) with how much space each takes in your sources; the ones
+you've added are shown in green.
 
 ## Automatic backups
 
@@ -289,6 +313,20 @@ Scheduled backups run at low CPU and I/O priority (`options.nice`,
 `options.io_priority`), keep the computer from suspending while they run, and notify you
 if something went wrong (and, if you turn it on in **Preferences**, when they succeed).
 
+**Shut down when done.** For a backup you start before leaving: *Back up now, then shut
+down* in a backup's ⋯ menu, or tick *Shut down the computer when done* under a running
+backup's progress (`flux backup home --shutdown` in a terminal). A minute after the backup
+ends, the computer powers off; the app shows a countdown with **Cancel shutdown**, and
+`shutdown -c` cancels it too. A backup you stop doesn't shut the computer down; one that
+fails still does (its error is waiting in *Activity*).
+
+**One backup at a time.** With *Preferences › Advanced › Run one backup at a time*
+(`one_at_a_time = true` in `settings.toml`), a backup that starts while another is running
+waits for it to finish, so two backups don't compete for the same disk or connection. It
+shows as *Waiting for its turn…* and can be stopped while it waits. This covers every
+backup of one scope, whether started by hand, by its schedule or in a terminal; your own
+backups and system backups each take turns among themselves.
+
 **Pausing.** For a presentation, a slow connection or a full disk: *Pause all scheduled
 backups…* in any backup's menu, in **Preferences**, or in the tray, for an hour, until
 tomorrow morning (7:00) or until you resume them. The sidebar shows they're paused, with
@@ -310,25 +348,79 @@ removed, and this deletes the data only they used. Results appear in the run's l
 **Preferences** (bottom of the sidebar) also hold: start in the tray when you log in, the
 theme, and the exclusions new backups start with.
 
+### systemd timers or cron
+
+Scheduled backups run with systemd timers unless you choose cron instead: in the app,
+*Preferences › Advanced › What runs scheduled backups*; in a terminal,
+`flux schedule use cron` (`flux schedule use systemd` to go back). Switching moves every
+schedule over. The choice is per scope: yours, or the system's
+(`sudo flux --system schedule use cron`).
+
+With cron, Flux keeps one block in your crontab (`crontab -l` shows it, between
+`# BEGIN Flux Backup` and `# END Flux Backup`), or for system backups the file
+`/etc/cron.d/flux-backup`. Lines outside the block, such as Back In Time's, are never
+touched. Every line runs `flux backup <id> --scheduled --if-due`, and Flux decides whether
+a run is due:
+
+- A calendar schedule fires at its times. With `catch_up`, a check every 15 minutes runs a
+  backup whose time passed while the computer was off or asleep, once, as systemd's
+  `Persistent=` does. Without it, a run more than 10 minutes late is skipped.
+- An interval schedule is checked every few minutes, as with timers.
+- Calendar expressions are read by Flux, the same way systemd reads them, to the minute.
+  Time zones and `~` (last day of the month) aren't supported with cron.
+
+| | systemd timers | cron |
+|---|---|---|
+| Runs with the app closed | yes | yes |
+| Runs while you're logged out | with `loginctl enable-linger` | yes, but the keyring is locked then, so encrypted backups need a key file |
+| Catches up after the computer was off | yes | yes (checks every 15 minutes) |
+| Backs up when the drive is plugged in (`on_connect`) | yes | no |
+| Needs | systemd | a cron daemon (`cronie` on Fedora, with `crond` running) |
+
 ## Getting files back
 
 ### In the app
 
-Open **Snapshots**, pick a snapshot from the list, browse to what you need, select it,
-and **Restore**. You can restore:
+Open **Snapshots**, pick a snapshot from the list, browse to what you need, and restore
+just that: every file and folder has its own **Restore** button (it shows when you point
+at the row), or tick several, even in different folders, and click **Restore N items**.
+**Restore this whole folder** brings back everything in the folder you're in.
+
+Items that aren't on your computer any more are marked **Deleted**. When a folder has
+some, **Only deleted** shows just those, and **Restore N deleted items** brings back exactly
+what's missing and nothing else. Restoring something that was deleted goes back to its own
+place by default, since nothing is there to replace.
+
+What's marked is checked against your computer each time a folder is shown, again as soon
+as a restore finishes, and when you come back to Flux's window. If you've changed files
+some other way, the **refresh** button next to the filter (or F5) checks the folder again.
+
+You can restore:
 
 - **into another folder**: the safest choice; nothing on your computer changes;
 - **back to where it was**: identical files are skipped. Different files are kept as
   `name.flux-<snapshot>` unless you choose to replace them.
 
+**Exactly as it was.** Restoring a folder back to where it was normally only adds and
+replaces. Tick *Make the folders exactly as they were* to also remove what's in those
+folders now but wasn't in the snapshot, so they end up as they were then. The dialog lists
+what would be removed first. Removed items are moved out of the way as
+`name.flux-<snapshot>` (deleted only when you also choose to replace your current
+versions, or turned off *Keep files on restore*). What the backup never takes is never
+removed: excluded files, files over the size limit, cache folders, the backup drive, other
+mounted drives, and copies kept by earlier restores. In a terminal:
+`flux restore home ~/Documents --exact` (with `--dry-run` to list what it would remove).
+
 Before you restore, the dialog shows what would happen: how many items are added, which
 files differ from what's there now (and whether they'd be kept or replaced), and how many
-are already identical. Replacing files needs the red **Restore and replace** button.
+are already identical. *Show what will be added* lists the files. Replacing files needs the
+red **Restore and replace** button. If the snapshot has only empty folders where you're
+restoring (because its rules left the files out), the dialog says so before you start.
 
 **Don't know which snapshot?** Type part of the name in **Find in all snapshots** (above
 the snapshot list) and press Enter. Every file or folder with that in its name is listed,
-from all snapshots; files you've since deleted are marked *Deleted* with the last snapshot
-that had them. Click one to show it in its snapshot. `*` works as a wildcard (`*.pdf`), and
+from all snapshots; files that aren't on your computer now are marked *Deleted*, and files
+missing from the newest snapshot show the last snapshot that had them. Click one to show it in its snapshot. `*` works as a wildcard (`*.pdf`), and
 a `/` matches whole paths (`Documents/*.odt`). `flux find` matches the same way.
 
 The first search of a Vault, Borg, rsync or SSH backup reads every snapshot's listing;
@@ -339,8 +431,25 @@ and *Versions* are quick. Plain folders on a drive need none.
 click **Versions**) lists each different version with its date and size, and which
 snapshots hold it. Open one to look at it, or restore it.
 
+**Compare** on a version shows what changed between it and the file now (or any other
+version: pick both at the top), line by line with the changed lines highlighted and long
+unchanged stretches folded away. Text files up to 8 MB are compared in the app; for other
+files, and to merge changes by hand, **Open in Meld** (or Kompare, KDiff3, Diffuse: the
+first one installed) opens both in that program. *Preferences › Advanced › Compare file
+versions with* chooses the program, or only Flux's own view; `diff_tool = "meld --newtab"`
+in `settings.toml` takes any command (the two files are added after it). Files from
+system backups can't be compared this way; restore them to a folder first.
+
 **What changed** shows the differences from the previous snapshot; the ⋯ menu also compares with the files on
-disk now.
+disk now. Folders whose only change is their date (adding or removing a file inside a
+folder changes it) are hidden behind *N folder dates*. Point at a removed or changed file
+to restore it (or its older version) from the older snapshot, or click **Restore all
+removed**. Files larger than the backup's size limit are never compared: no backup holds
+them, and the comparison says how many there are.
+
+**Size limit.** *Settings › Leave some things out › Skip files larger than* takes a number
+and a unit (MB, GB, TB). A limit under 1 MB leaves out nearly every file, so Flux warns
+when you set one, and Overview and Snapshots say so while it's set.
 
 To just look at a file, double-click it (or right-click › **Open a copy**). Flux restores a
 read-only copy into a temporary folder and opens it with your usual app; nothing on your
@@ -357,6 +466,7 @@ flux history home ~/notes.md                   # every version of one file
 flux diff home --live                          # what changed since the newest snapshot
 flux restore home ~/Documents/report.odt --to ~/Restored
 flux restore home ~/Documents                   # back in place (asks first)
+flux restore home ~/Documents --exact           # …and remove what wasn't in the snapshot
 ```
 
 Snapshots are chosen by id, by a unique start of an id, by name, or as `latest`. Mirror
@@ -530,8 +640,10 @@ To set up a similar backup (the same folders to a second drive, say), use **Dupl
 the backup's menu or `flux profile duplicate home`: the copy is called "… (copy)" and opens
 in Settings.
 
-**Space.** For a backup on a drive, the Overview shows how full the drive has been over
-the last weeks and, once there are a few backups to go on, when it fills up at that rate
+**Space.** For a backup on a connected drive, the Overview has a meter of how full the
+drive is now (free space, size and percent; amber from 85% full, red from 95%). Below it,
+how full it has been over the last weeks and, once there are a few backups to go on, when
+it fills up at that rate
 ("full in about 3 months"), with the projection dashed on the chart. Hover the chart or
 use the arrow keys for exact values, or open *Show as a table*. Under a month left, it's
 also a warning at the top. Steady use (old snapshots removed as fast as new ones are added)
@@ -682,6 +794,7 @@ Durations are written like `90s`, `15min`, `4h`, `1day`, `2weeks`; sizes like `5
 | `FLUX_RSYNC` | `rsync` program to use |
 | `FLUX_SECRET_TOOL` | `secret-tool` program to use |
 | `FLUX_SYSTEMCTL`, `FLUX_SYSTEMD_UNIT_DIR` | where timers are written and how systemd is called |
+| `FLUX_CRONTAB`, `FLUX_CRON_DIR` | the `crontab` program and the `/etc/cron.d` folder used with cron |
 
 ## Troubleshooting
 

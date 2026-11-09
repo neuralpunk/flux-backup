@@ -80,6 +80,20 @@ pub enum ProfileCmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// List the profiles set up in Back In Time, or create a Flux profile from one of them
+    /// (its folders, exclusions, schedule and what to keep). Back In Time's snapshots are
+    /// left as they are; Flux makes its own.
+    Backintime {
+        /// The Back In Time profile to start from (its number in the list).
+        number: Option<u32>,
+        /// The new profile's id (default: from its name).
+        #[arg(long)]
+        id: Option<String>,
+        /// How the new backups are stored (default: rsync, plain folders like Back In
+        /// Time's; vault for profiles Back In Time encrypted).
+        #[arg(long, value_enum)]
+        engine: Option<EngineArg>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -154,10 +168,10 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
                 bail!("not confirmed (use --yes to delete without asking)");
             }
             store.delete(&id)?;
-            let sd = flux_runner::schedule::Systemd::new(&ctx.paths);
-            match flux_runner::schedule::remove(&sd, &id) {
-                Ok(a) if !a.removed.is_empty() && !ctx.json => println!("Removed its timer."),
-                Err(e) => eprintln!("warning: could not remove the timer: {e}"),
+            let sd = flux_runner::schedule::Scheduler::new(&ctx.paths);
+            match sd.remove(&id) {
+                Ok(a) if !a.removed.is_empty() && !ctx.json => println!("Removed its schedule."),
+                Err(e) => eprintln!("warning: could not remove the schedule: {e}"),
                 _ => {}
             }
             if !ctx.json {
@@ -216,6 +230,9 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        ProfileCmd::Backintime { number, id, engine } => {
+            backintime(ctx, &store, number, id, engine)
+        }
         ProfileCmd::Import { file, id } => {
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
@@ -245,6 +262,107 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn backintime(
+    ctx: &Ctx,
+    store: &ProfileStore,
+    number: Option<u32>,
+    id: Option<String>,
+    engine: Option<EngineArg>,
+) -> anyhow::Result<ExitCode> {
+    use flux_compat::backintime;
+    let home = flux_core::sys::home_dir().context("no home folder")?;
+    let config = home.join(backintime::CONFIG);
+    let base = Profile::new(
+        "",
+        Target::Local {
+            path: PathBuf::new(),
+            fs_uuid: None,
+        },
+        Vec::new(),
+    );
+    let found = backintime::read(&config, &base)
+        .with_context(|| format!("cannot read {}", config.display()))?;
+    let Some(number) = number else {
+        if ctx.json {
+            output::print_json(&found)?;
+        } else if found.is_empty() {
+            println!(
+                "No Back In Time profiles ({} doesn't exist).",
+                config.display()
+            );
+        } else {
+            for b in &found {
+                let to = match &b.profile.target {
+                    Target::Local { path, .. } => path.display().to_string(),
+                    Target::Ssh { host, path, .. } => format!("{host}:{}", path.display()),
+                };
+                println!(
+                    "{}  {}  ({} {}, to {to}, {} snapshots)",
+                    b.number,
+                    b.name,
+                    b.profile.sources.paths.len(),
+                    if b.profile.sources.paths.len() == 1 {
+                        "folder"
+                    } else {
+                        "folders"
+                    },
+                    b.snapshot_count
+                );
+            }
+            println!("\nCreate a Flux profile from one with `flux profile backintime NUMBER`.");
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    let b = found
+        .into_iter()
+        .find(|b| b.number == number)
+        .with_context(|| format!("Back In Time has no profile {number}"))?;
+    let mut p = b.profile;
+    match engine {
+        None => {}
+        Some(EngineArg::Mirror) => (p.engine, p.vault) = (Engine::Mirror, None),
+        Some(EngineArg::Rsync) => (p.engine, p.vault) = (Engine::Rsync, None),
+        Some(EngineArg::Vault) => {
+            p.engine = Engine::Vault;
+            p.vault.get_or_insert_with(VaultOptions::default);
+        }
+        Some(EngineArg::Borg) => {
+            (p.engine, p.vault) = (Engine::Borg, None);
+            p.borg = Some(flux_core::profile::BorgOptions::default());
+        }
+    }
+    let id = match id {
+        Some(i) => parse_id(&i)?,
+        None => ProfileId::slugify(&b.name).context("give the profile an id with --id")?,
+    };
+    if store.exists(&id) {
+        bail!("a profile “{id}” exists already; choose another id with --id");
+    }
+    let issues = p.validate_in(ctx.paths.scope);
+    report_issues(&id, &issues);
+    if has_errors(&issues) {
+        return Ok(ExitCode::from(EXIT_INVALID));
+    }
+    let path = store.create(&id, &p)?;
+    if ctx.json {
+        output::print_json(&serde_json::json!({ "id": id, "path": path, "notes": b.notes }))?;
+    } else {
+        println!(
+            "Created {id} from Back In Time's “{}” ({}).",
+            b.name,
+            path.display()
+        );
+        for n in &b.notes {
+            println!("  note: {n}");
+        }
+        println!(
+            "Back In Time's snapshots are left as they are. Turn off its schedule so both \
+             don't back up at once."
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn parse_id(s: &str) -> anyhow::Result<ProfileId> {
@@ -453,15 +571,18 @@ fn validate(ctx: &Ctx, store: &ProfileStore, ids: Vec<String>) -> anyhow::Result
 /// Keep the profile's timer in step after an edit (only if it has or needs one).
 fn sync_schedule(ctx: &Ctx, id: &ProfileId, p: &Profile) {
     use flux_runner::schedule;
-    let sd = schedule::Systemd::new(&ctx.paths);
+    let sd = schedule::Scheduler::new(&ctx.paths);
     let needs = p.schedule.trigger != flux_core::profile::Trigger::Manual || p.schedule.on_connect;
-    if !needs && !schedule::installed_ids(&sd).contains(id) {
+    if !needs && !sd.installed_ids().contains(id) {
         return;
     }
-    match schedule::apply(&sd, id, p, &schedule::UnitEnv::current(ctx.paths.scope)) {
-        Ok(a) if a.changed() => println!("Updated the timer ({}).", schedule::summary(p)),
+    match sd.apply(id, p, &schedule::UnitEnv::current(ctx.paths.scope)) {
+        Ok(a) if a.changed() => println!("Updated the schedule ({}).", schedule::summary(p)),
         Ok(_) => {}
-        Err(e) => eprintln!("warning: profile saved, but the timer could not be updated: {e}"),
+        Err(e) => eprintln!("warning: profile saved, but the schedule could not be updated: {e}"),
+    }
+    if let Some(w) = sd.unsupported(p) {
+        println!("Note: {w}");
     }
 }
 

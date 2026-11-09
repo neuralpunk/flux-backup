@@ -304,15 +304,19 @@ impl RsyncRepo {
         let stamp = format!("{}:{}", snap.finished, snap.stats.entries);
         let id = &snap.id;
         self.cache
-            .get(id, &stamp, || match &self.store {
-                Store::Local { .. } => {
-                    scan_local(&self.local_data_dir(id).expect("local store"), self.xattrs)
-                }
-                Store::Remote { pool, .. } => {
-                    scan_remote(pool.target(), &self.store.path(&data_rel(id)))
-                }
-            })
+            .get(id, &stamp, || self.scan(&data_rel(id)))
             .map_err(|e| CompatError::Failed(format!("listing snapshot {id}: {e}")))
+    }
+
+    /// The entries of folder `rel` of the repository (uncached).
+    fn scan(&self, rel: &str) -> std::io::Result<Vec<Entry>> {
+        match &self.store {
+            Store::Local { .. } => scan_local(
+                &self.store.local_path(rel).expect("local store"),
+                self.xattrs,
+            ),
+            Store::Remote { pool, .. } => scan_remote(pool.target(), &self.store.path(rel)),
+        }
     }
 
     /// Give snapshots made without Flux (by `flux-backup.sh` or by hand) a `meta.json`
@@ -625,6 +629,31 @@ pub fn never_paths(profile: &Profile) -> Vec<PathBuf> {
         Target::Local { path, .. } => vec![path.join(ROOT_DIR)],
         Target::Ssh { .. } => Vec::new(),
     }
+}
+
+/// `stats` with the counts and total size taken from what the snapshot holds (`listed`).
+fn recount(stats: &RsyncStats, listed: &[Entry]) -> RsyncStats {
+    let mut s = RsyncStats {
+        files: listed.len() as u64,
+        reg: 0,
+        dirs: 0,
+        links: 0,
+        specials: 0,
+        total_size: 0,
+        ..stats.clone()
+    };
+    for e in listed {
+        match e.kind {
+            Kind::File => {
+                s.reg += 1;
+                s.total_size += e.size;
+            }
+            Kind::Dir => s.dirs += 1,
+            Kind::Symlink => s.links += 1,
+            _ => s.specials += 1,
+        }
+    }
+    s
 }
 
 /// `rsync --stats` totals.
@@ -1024,6 +1053,32 @@ pub fn backup(
     let repo = repo.expect("created above");
 
     progress.set_phase(Phase::Finalizing);
+    // rsync counts files that `--max-size` skipped as if they were stored: count what the
+    // snapshot really holds instead, and say how many were left out.
+    let recounted;
+    let s = match p.sources.exclude_larger_than {
+        Some(max) => match repo.scan(&format!("{partial}/data")) {
+            Ok(listed) => {
+                recounted = recount(s, &listed);
+                let left_out = s.reg.saturating_sub(recounted.reg);
+                if left_out > 0 {
+                    report(Event::Info {
+                        message: if recounted.reg == 0 {
+                            format!(
+                                "no files were backed up: all {left_out} are larger than the \
+                                 size limit ({max}); only folders were saved"
+                            )
+                        } else {
+                            format!("left out {left_out} files larger than the size limit ({max})")
+                        },
+                    });
+                }
+                &recounted
+            }
+            Err(_) => s,
+        },
+        None => s,
+    };
     let unchanged = prev.as_ref().is_some_and(|prev| {
         prev.stats.entries > 0
             && s.seen

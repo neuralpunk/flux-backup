@@ -18,11 +18,20 @@ const MAX_HITS: usize = 500;
 
 #[derive(Debug, Serialize)]
 pub struct FindResult {
-    pub hits: Vec<Found>,
+    pub hits: Vec<Hit>,
     /// Matching paths in all, when more than `hits`.
     pub total: usize,
     /// Snapshots searched.
     pub snapshots: usize,
+}
+
+/// A path found in the snapshots, and whether it's on the computer now.
+#[derive(Debug, Serialize)]
+pub struct Hit {
+    #[serde(flatten)]
+    pub found: Found,
+    /// Checked on every search, so something restored since isn't shown as deleted.
+    pub on_disk: Option<bool>,
 }
 
 type Matcher = Box<dyn Fn(&[u8]) -> bool + Sync>;
@@ -91,6 +100,13 @@ pub fn find_impl(state: &Service, id: String, query: String) -> Result<FindResul
             .then_with(|| a.path.cmp(&b.path))
     });
     hits.truncate(MAX_HITS);
+    let hits = hits
+        .into_iter()
+        .map(|found| Hit {
+            on_disk: crate::views::on_disk(&found.path),
+            found,
+        })
+        .collect();
     Ok(FindResult {
         hits,
         total,
@@ -118,6 +134,7 @@ pub fn restore_preview_impl(
     paths: Vec<String>,
     to: Option<String>,
     overwrite: bool,
+    exact: bool,
 ) -> Result<RestorePreview> {
     let (pid, p) = state.load(&id)?;
     let repo = state.open(&pid, &p)?;
@@ -129,6 +146,10 @@ pub fn restore_preview_impl(
             "the destination must be an absolute path",
         ));
     }
+    let filter = exact
+        .then(|| flux_fs::scan::exact_filter(&p))
+        .transpose()
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
     let req = RestoreRequest {
         snapshot: &snap,
         paths: paths.into_iter().map(PathBuf::from).collect(),
@@ -140,6 +161,7 @@ pub fn restore_preview_impl(
             other: false,
         },
         links: LinkPolicy::for_process(),
+        exact: filter.as_ref(),
     };
     let entries = repo
         .entries(&snap)?

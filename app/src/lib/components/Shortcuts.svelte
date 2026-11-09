@@ -10,6 +10,7 @@
     ["Alt + ↑ / ↓", "Previous / next backup"],
     ["← / →", "Previous / next snapshot (timeline focused)"],
     ["/", "Filter the current folder"],
+    ["F5", "Check the current folder again (what's deleted, what's back)"],
     ["Esc", "Close a dialog"],
     ["?", "This list"],
   ];

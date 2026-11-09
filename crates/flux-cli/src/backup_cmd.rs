@@ -49,6 +49,10 @@ pub struct BackupArgs {
     /// successful backup.
     #[arg(long, hide = true, requires = "scheduled")]
     pub if_due: bool,
+    /// Shut the computer down a minute after the backup ends (not if it's stopped);
+    /// `shutdown -c` cancels it.
+    #[arg(long)]
+    pub shutdown: bool,
 }
 
 #[derive(Args)]
@@ -94,6 +98,11 @@ pub struct RestoreArgs {
     /// Overwrite differing files instead of keeping them as NAME.flux-<snapshot>.
     #[arg(long)]
     pub overwrite: bool,
+    /// Make restored folders exactly as in the snapshot: also remove what's in them now
+    /// but not in the snapshot (kept as NAME.flux-<snapshot> unless --overwrite). What the
+    /// backup never takes (exclusions, the size limit, caches) is left alone.
+    #[arg(long)]
+    pub exact: bool,
     /// Show what would be restored.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
@@ -241,6 +250,7 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
             prune: !args.no_prune,
             only_if_due: args.if_due,
             ask: (!args.scheduled).then_some(ASK),
+            shutdown_after: args.shutdown,
         },
         &progress,
         &report,
@@ -598,6 +608,60 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
         .map(absolutize)
         .collect::<anyhow::Result<Vec<_>>>()?;
     let to = args.to.map(absolutize).transpose()?;
+    let opts = &profile.options;
+    let keep_existing = opts.backup_before_restore && !args.overwrite;
+    let filter = args
+        .exact
+        .then(|| flux_fs::scan::exact_filter(&profile))
+        .transpose()?;
+    let request = |dry_run: bool, paths: Vec<std::path::PathBuf>| RestoreRequest {
+        snapshot: &snap,
+        paths,
+        to: to.clone(),
+        keep_existing,
+        dry_run,
+        xattrs: XattrPolicy {
+            acl: opts.preserve_acl,
+            other: opts.preserve_xattr,
+        },
+        links: flux_fs::safe::LinkPolicy::for_process(),
+        exact: filter.as_ref(),
+    };
+    // What an exact restore would remove, to ask about it (and list it in a dry run).
+    let removing = match &filter {
+        Some(_) => {
+            let entries = repo
+                .entries(&snap)?
+                .map(|e| e.map_err(|e| std::io::Error::other(e.to_string())));
+            Some(flux_fs::restore::preview(
+                entries,
+                &request(true, paths.clone()),
+            )?)
+        }
+        None => None,
+    };
+    let remove_n = removing.as_ref().map_or(0, |p| p.remove);
+    if remove_n > 0 && !args.dry_run && !args.yes {
+        let p = removing.as_ref().expect("counted");
+        for path in &p.remove_paths {
+            println!("  {}", path.display());
+        }
+        if p.remove > p.remove_paths.len() as u64 {
+            println!("  … and {} more", p.remove - p.remove_paths.len() as u64);
+        }
+        let how = if keep_existing {
+            "kept as NAME.flux-<snapshot>"
+        } else {
+            "deleted"
+        };
+        if !output::confirm(&format!(
+            "These {} items aren't in snapshot {} and will be removed ({how}). Continue?",
+            group(remove_n),
+            snap.id
+        ))? {
+            bail!("not confirmed (use --yes to restore without asking)");
+        }
+    }
 
     if to.is_none() && !args.dry_run && !args.yes {
         let list = paths
@@ -630,23 +694,7 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             live.println(format!("warning: {path}: {message}"));
         }
     };
-    let opts = &profile.options;
-    let out = repo.restore(
-        &RestoreRequest {
-            snapshot: &snap,
-            paths,
-            to,
-            keep_existing: opts.backup_before_restore && !args.overwrite,
-            dry_run: args.dry_run,
-            xattrs: XattrPolicy {
-                acl: opts.preserve_acl,
-                other: opts.preserve_xattr,
-            },
-            links: flux_fs::safe::LinkPolicy::for_process(),
-        },
-        &progress,
-        &report,
-    );
+    let out = repo.restore(&request(args.dry_run, paths), &progress, &report);
     drop(live);
     let out = match out {
         Err(RepoError::NotInSnapshot(path, sid)) => {
@@ -669,6 +717,20 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             out.would_write.len(),
             snap.id
         );
+        if let Some(p) = &removing {
+            for path in &p.remove_paths {
+                println!("remove {}", path.display());
+            }
+            println!(
+                "{} items not in the snapshot would be removed{}.",
+                group(p.remove),
+                if keep_existing {
+                    " (kept as NAME.flux-<snapshot>)"
+                } else {
+                    ""
+                }
+            );
+        }
     } else {
         println!(
             "✓ Restored {} items ({}) from {}; {} already identical.",
@@ -677,6 +739,13 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             snap.id,
             group(out.skipped_identical)
         );
+        if out.removed > 0 {
+            println!(
+                "  removed {} {} that weren't in the snapshot",
+                group(out.removed),
+                if out.removed == 1 { "item" } else { "items" }
+            );
+        }
         for p in &out.moved_aside {
             println!("  kept existing file as {}", p.display());
         }

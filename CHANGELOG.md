@@ -4,6 +4,144 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-09
+
+Restoring is easier and finer-grained, a size limit can no longer quietly leave a backup
+empty, comparing with your files explains what it shows, setup is clearer, a new backup
+can start from your Back In Time settings, and scheduled backups can run with cron. The
+app takes GNOME's own colours, and a backup's history is drawn as bars.
+
+### Added
+**Coming from Back In Time**
+- When you set up a new backup, Flux offers each profile it finds in
+  `~/.config/backintime/config` (however many there are). **Use these settings** fills in
+  the folders, exclusions, destination, schedule, what to keep and options. rsync is
+  preselected, since it makes the same plain, hard-linked folders Back In Time did, and
+  every other way of storing backups is still offered on the Protection step. Profiles
+  Back In Time encrypted with EncFS become an encrypted Vault.
+- Exclusions are rewritten in Flux's syntax with the same meaning (`.cache/*` becomes
+  `**/.cache/*`), and anything that didn't carry over exactly is listed.
+- Back In Time's own snapshots are never touched. Flux starts a fresh set next to them, and
+  says so: keep Back In Time to restore from the old ones, and turn off its schedule.
+- Extra rsync options set in Back In Time come over too (as `[rsync] extra_args`), except
+  those Flux sets itself, which are listed.
+- On the command line: `flux profile backintime` lists the profiles, and
+  `flux profile backintime 1 [--id …] [--engine …]` creates a Flux profile from one.
+
+**Running backups**
+- **Run one backup at a time** (*Preferences › Advanced*): a backup that starts while
+  another is running waits for it to finish instead of competing for the disk or the
+  network. It shows as *Waiting for its turn…*, says which backup it's waiting for, and
+  can be stopped while it waits.
+
+- **Shut down when done**: *Back up now, then shut down* in a backup's menu, a *Shut down
+  the computer when done* box under a running backup, or `flux backup --shutdown`. The
+  computer powers off a minute after the backup ends, with a countdown and **Cancel
+  shutdown** in the app (`shutdown -c` works too). Stopping the backup cancels it.
+
+**Scheduling with cron**
+- Scheduled backups can run with cron instead of systemd timers: *Preferences › Advanced ›
+  What runs scheduled backups*, or `flux schedule use cron` (`flux schedule use systemd`
+  to go back). systemd timers stay the default. Switching moves every scheduled backup
+  over, and is undone if the new scheduler can't be set up.
+- Flux keeps its own block in your crontab (or `/etc/cron.d/flux-backup` for system
+  backups) and never changes the lines around it, such as Back In Time's.
+- Missed backups are still caught up: with cron, Flux checks every 15 minutes whether a
+  scheduled time passed while the computer was off or asleep, and runs it once, as
+  systemd's `Persistent=` does.
+- Schedules are read by Flux the same way systemd reads them (checked against
+  `systemd-analyze`), so a schedule means the same under either. Backing up when a drive
+  is plugged in needs systemd; with cron, Flux says so where that's set.
+- `flux schedule status` says which scheduler is in use, and hints when no cron daemon
+  is running.
+
+**Restoring**
+- Every file and folder in the snapshot browser has its own **Restore** button.
+- Ticked items stay ticked while you move between folders, so files from several folders
+  can be restored together.
+- Items that are no longer on your computer are marked **Deleted**. **Only deleted** shows
+  just those, and **Restore N deleted items** brings back exactly what's missing.
+- Restoring something that was deleted goes back to its own place by default.
+- **Compare file versions**: *Compare* on any version of a file shows what changed between
+  it and the file now, or another version, line by line in the app, with long unchanged
+  stretches folded away. **Open in Meld** (or Kompare, KDiff3, Diffuse) opens both in a
+  comparison program, chosen in *Preferences › Advanced* or with `diff_tool` in
+  `settings.toml`.
+- **Exactly as it was**: restoring a folder in place can also remove what's in it now but
+  wasn't in the snapshot (*Make the folders exactly as they were*, or
+  `flux restore --exact`). The dialog lists what would go first; removed items are kept
+  as `name.flux-<snapshot>` unless you choose to replace your versions. What the backup
+  never takes (exclusions, the size limit, caches, other drives) is never removed.
+- The restore dialog lists what will be added, and warns before restoring when the
+  snapshot holds only empty folders there.
+- From **What changed**, restore a removed file, or the older version of a changed one,
+  straight from the list, or use **Restore all removed**.
+
+**Setup and settings**
+- **Skip files larger than** takes a number and a unit (MB, GB, TB), and warns when the
+  limit is so small that it leaves out almost every file.
+- While Flux backs up with a size limit, Snapshots says so (with a link to change it), and
+  Overview warns when the limit is tiny.
+- Step 1's size count has a refresh button, and its numbers stand out.
+- **Storage meters**: each drive offered on the *Where* step, and a backup's Overview
+  (*Space on …*, now shown whenever the drive is connected, not only once a forecast
+  exists), show how full the drive is: free space, size and percent, amber when it's
+  getting full and red when there's almost no room left.
+- Step 4 explains in plain words what happens each time the backup runs.
+- **Recommended defaults** in *Performance and behaviour* puts those settings back to
+  what Flux recommends.
+
+### Changed
+**A new look**
+- The app takes GNOME's own colours (Adwaita): neutral greys with no blue tint, and in the
+  dark theme a sidebar a step lighter than the rest of the window, as in GNOME Files and
+  Settings. The main button of each page is a deeper blue with white text, and so is a
+  switch that's on.
+- In the light theme, groups of rows sit on Adwaita's soft card shadow.
+- The last 30 days are drawn as a row of small bars instead of dots: a taller bar when a
+  day's backups copied more, a full red bar for a day that only failed, and a flat stub
+  for a day with nothing. On a backup's own page it is a small bar chart with the first
+  day and today named under it. Pointing at any day still says what happened.
+- The snapshot list marks each snapshot with the same kind of bar, on the same scale.
+- **Recent backups** on a backup's page keeps each backup's size next to its time.
+- Red text is a little brighter in the dark theme, so it stays easy to read on buttons.
+  Every colour was checked again for contrast (WCAG AA) in both themes.
+- The screenshots in the README and on the website show the new look.
+
+**Everything else**
+- Exclusion suggestions you've added ("Often left out") are shown in green.
+- Step 3's "What exactly Flux does" is an information block (still closed until clicked).
+- **What changed** hides folders whose only change is their date (shown with one click),
+  names what changed in words (contents, date, permissions…), and shows the size change
+  only when there is one.
+- Sizes in profiles are written the way they read best ("500MB", "2GiB").
+
+### Fixed
+- With a size limit, rsync backups recorded the files they skipped as if they were stored
+  (an empty backup could say "21 files, 252 MiB"). Snapshots now count what they hold,
+  and the run log says how many files the limit left out.
+- Comparing with your files on disk ignored the size limit's effect: files bigger than
+  the limit showed as removed when an older snapshot held them, or the comparison showed
+  next to nothing. Big files a snapshot holds are now compared, and the others are counted
+  and explained. Borg, which can't skip files by size, compares them all.
+- Restoring a folder together with something inside it failed with "not in snapshot".
+- **Back up now** with the backup drive unplugged left the app on "Backing up…" for good,
+  and **Stop** then said "no backup … is running": the backup had failed in its first
+  milliseconds, before the app could follow it. Now Flux checks the drive first and says
+  at once that it isn't connected and where it should be mounted. A backup that stops
+  straight away for any other reason reports its error instead of spinning, the app
+  double-checks a backup that never reports in, and **Stop** on a backup that already
+  ended shows how it went.
+- Setting up or editing a backup whose drive isn't plugged in now says so on the
+  destination step, and the final step offers **Done** instead of a first backup that
+  could only fail.
+- Files you'd just restored stayed marked **Deleted** in the snapshot browser until you
+  moved to another folder and back. The folder is now checked again as soon as a restore
+  finishes (and when you come back to the window), and a new **refresh** button next to
+  the filter (or F5) checks it again whenever you like. Search results now mark a file
+  **Deleted** only when it isn't on your computer now: before, anything missing from the
+  newest snapshot was, even right after you'd restored it.
+
 ## [0.2.0] - 2026-11-08
 
 The big additions: a new look for the app with an "am I protected?" start page and
@@ -163,5 +301,6 @@ compressed, encrypted) engines; local drives and SSH servers; systemd schedules
 hooks; the `flux` command line; the desktop app; system backups through a polkit helper;
 read-only mounts of snapshots (`flux mount`); man pages and packages.
 
+[0.3.0]: https://github.com/neuralpunk/flux-backup/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/neuralpunk/flux-backup/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/neuralpunk/flux-backup/releases/tag/v0.1.0

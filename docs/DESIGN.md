@@ -2,47 +2,51 @@
 name: Flux Backup
 description: Snapshot backups for the Linux desktop, at home next to GNOME's own apps.
 colors:
-  shell: "#15181d"
-  view: "#1c1e22"
-  group: "#25272c"
-  control: "#2f3238"
-  shell-hover: "#1f232a"
-  track: "#3a3d44"
-  sep: "#34373d"
-  selected: "#2b3038"
-  on-selected: "#eceef1"
-  fg: "#eceef1"
-  fg-2: "#b8bcc3"
-  fg-muted: "#949aa4"
-  primary: "#78b0f0"
+  shell: "#2e2e32"
+  view: "#222226"
+  group: "#343438"
+  control: "#3d3d42"
+  shell-hover: "#38383d"
+  track: "#4a4a4f"
+  sep: "#29292d"
+  selected: "#3b3b40"
+  on-selected: "#ffffff"
+  fg: "#f4f4f5"
+  fg-2: "#c4c4c8"
+  fg-muted: "#a8a8ad"
+  primary: "#78aeed"
   on-primary: "#0b1626"
+  accent: "#3170c8"
+  on-accent: "#ffffff"
   brand: "#7abdff"
   chart: "#6aa6ea"
   success: "#72c79a"
   warning: "#e7b65a"
-  danger: "#ef8576"
+  danger: "#f39488"
   group-edge: "transparent"
-  seg-on: "#4a4e56"
-  shell-light: "#e4e8ee"
-  view-light: "#f6f7f9"
+  seg-on: "#55555b"
+  shell-light: "#ebebed"
+  view-light: "#fafafb"
   group-light: "#ffffff"
-  control-light: "#e9ecf0"
-  shell-hover-light: "#d9dee6"
-  track-light: "#dde1e7"
-  sep-light: "#e2e5ea"
-  selected-light: "#d3dae4"
-  on-selected-light: "#17191d"
-  fg-light: "#17191d"
-  fg-2-light: "#3f444c"
-  fg-muted-light: "#555c66"
-  primary-light: "#2759a4"
+  control-light: "#e7e7e9"
+  shell-hover-light: "#e0e0e2"
+  track-light: "#d9d9dc"
+  sep-light: "#ebebed"
+  selected-light: "#dcdcdf"
+  on-selected-light: "#1e1e22"
+  fg-light: "#1e1e22"
+  fg-2-light: "#45454b"
+  fg-muted-light: "#5c5c63"
+  primary-light: "#185cb4"
   on-primary-light: "#ffffff"
-  brand-light: "#2759a4"
-  chart-light: "#2759a4"
+  accent-light: "#1c6dd0"
+  on-accent-light: "#ffffff"
+  brand-light: "#1c6dd0"
+  chart-light: "#1c6dd0"
   success-light: "#1b6e45"
   warning-light: "#7d5200"
   danger-light: "#b3321f"
-  group-edge-light: "rgb(0 0 6 / 0.09)"
+  group-edge-light: "rgb(0 0 6 / 0.03)"
   seg-on-light: "#ffffff"
 typography:
   display:
@@ -115,8 +119,8 @@ components:
   button-hover:
     backgroundColor: "{colors.track}"
   button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.on-accent}"
     rounded: "{rounded.control}"
     padding: "0 14px"
     height: "34px"
@@ -173,7 +177,7 @@ components:
     width: "44px"
     height: "24px"
   switch-on:
-    backgroundColor: "{colors.primary}"
+    backgroundColor: "{colors.accent}"
   sidebar-item-selected:
     backgroundColor: "{colors.selected}"
     textColor: "{colors.on-selected}"
@@ -201,8 +205,8 @@ Tailwind `--color-<name>`; the code names differ from the keys here for the surf
 **Creative North Star: "At home on the desktop"**
 
 Flux looks like it shipped with the user's Linux desktop. It follows the GNOME/Adwaita
-screen tradition in graphite and calm blue: a blue-graphite shell (titlebar and sidebar)
-around a flatter graphite view, and content set in grouped lists, one rounded group with
+screen tradition in Adwaita's own neutral greys and blue: a shell (titlebar and sidebar) a
+step lighter than the view, as in GNOME Files and Settings, and content set in grouped lists, one rounded group with
 rows split by hairlines, instead of a box per item. The app answers "am I protected?" in
 one sentence before anything else, and type carries the hierarchy; there are no stat
 boxes.
@@ -213,29 +217,32 @@ say the same thing. Where you are (the sidebar item, the chosen segment) is a ne
 lift, never blue. Machine data (paths, sizes, counts, times, shortcuts) is JetBrains Mono
 with tabular figures; everything else is Inter, the face Adwaita Sans is built on.
 
-The signature is the protection sentence over a 30-day history strip of dots on a fixed
+The signature is the protection sentence over a 30-day history strip of bars on a fixed
 magnitude ramp. The same grammar answers for all backups on the start page and for one
 backup on its own page, and the same ramp marks each snapshot.
 
 **Key Characteristics:**
-- Two-tone frame: blue-graphite shell, flatter graphite view with a 14px top-left corner.
+- Two-tone frame: a neutral grey shell a step lighter than the view, which has a 14px
+  top-left corner.
 - Grouped lists with hairline separators; interactive rows end in a chevron or a control.
 - One blue primary button per view; state colours never stand alone without words.
 - Selection is a neutral lift, in the sidebar and in segmented controls.
 - Inter for UI, JetBrains Mono for machine data, tabular numbers on everything that changes.
-- A fixed log-scale magnitude ramp (4 to 11px dots) for history and snapshots.
+- A fixed log-scale magnitude ramp (bar heights) for history and snapshots.
 
 ## Colors
 
-Graphite neutrals with a faint blue cast, one calm blue for action, and three status hues
-that are darker in the light theme so text stays AA.
+Adwaita's neutral greys (no blue cast), one blue for action, and three status hues that
+are darker in the light theme so text stays AA.
 
 ### Primary
-- **Calm Adwaita Blue** (`primary`): the single primary button of a view ("Back up all
-  now", "Back up now", "Stop", a dialog's confirm), progress fills, focus rings
-  (`2px solid`, offset 2px), the on switch, the caret, text selection (38% mix), the
-  running glyph, and the ring on the item whose context menu is open. Text on it is
-  `on-primary`.
+- **Adwaita Blue, as a fill** (`accent` / `on-accent`): the single primary button of a
+  view ("Back up all now", "Back up now", "Stop", a dialog's confirm) and the on switch. A
+  deeper blue than `primary` so white text on it stays AA (4.9:1 dark, 5.1:1 light).
+- **Adwaita Blue, as a line or text** (`primary`): progress fills, focus rings (`2px
+  solid`, offset 2px), the caret, text selection (38% mix), the running glyph, blue text,
+  and the ring on the item whose context menu is open. Text on a `primary` fill (a wizard
+  step, a chosen export) is `on-primary`.
 - **Brand Blue** (`brand`): the lit pill of the logo; reserved for the mark.
 - **Chart Blue** (`chart`): the one data series in the space chart (at least 3:1 on
   groups); area fill at 10% opacity, dashed projection line.
@@ -247,18 +254,20 @@ that are darker in the light theme so text stays AA.
   destructive menu items and the destructive dialog's confirm (`.btn-danger-filled`).
 
 ### Neutral
-- **Shell Graphite** (`shell`): titlebar and sidebar, the window's own colour.
-- **View Graphite** (`view`): the content area and dialogs.
-- **Group Graphite** (`group`): grouped lists and cards, one step up from the view.
-- **Control Graphite** (`control`): buttons, inputs, the segmented track, menus, toasts.
+- **Shell Grey** (`shell`): titlebar and sidebar, the window's own colour; a step lighter
+  than the view in dark, a step darker in light, as in libadwaita.
+- **View Grey** (`view`): the content area and dialogs.
+- **Group Grey** (`group`): grouped lists and cards, one step up from the view.
+- **Control Grey** (`control`): buttons, inputs, the segmented track, menus, toasts.
 - **Shell Hover** (`shell-hover`): hover on sidebar items.
 - **Track** (`track`): button hover, progress and switch tracks, scrollbars.
-- **Hairline** (`sep`): the 1px line between rows of a group.
+- **Hairline** (`sep`): the 1px line between rows of a group; darker than the group in
+  dark, as in Adwaita.
 - **Selected Lift** (`selected` / `on-selected`): the current sidebar item.
 - **Segment Lift** (`seg-on`): the chosen button of a segmented control.
 - **Group Edge** (`group-edge`): a 1px ring around groups, the view's top-left edge and
-  dialogs; transparent in dark, 9% near-black in light, where white groups on a near-white
-  view need it.
+  dialogs; transparent in dark, 3% near-black in light, under Adwaita's soft card shadow
+  (see Elevation).
 - **Ink ramp** (`fg`, `fg-2`, `fg-muted`): text, secondary text, labels and captions.
 
 ### Named Rules
@@ -274,11 +283,12 @@ the sentence. The failed row on All backups is tinted (`danger` at 7%) and its s
 is red text.
 
 ### Contrast (WCAG AA, measured from the tokens)
-Dark: `fg-muted` is 5.3:1 on groups and 4.5:1 on controls; `primary` text 6.6:1 on groups;
-status hues 5.9 to 8.0:1 on groups; `on-primary` on `primary` 8.0:1. Light: `fg-muted`
-5.0 to 6.0:1 on shell, groups and controls; status hues 5.0 to 6.8:1 on every surface;
-`on-primary` on `primary` 6.9:1; white on `danger` 6.2:1; `primary` as text 5.6:1 on the
-shell and 4.9:1 on the selected lift; `fg-muted` 4.8:1 on the selected lift.
+Dark: `fg-muted` is 5.2:1 on groups, 4.6:1 on controls and 4.7:1 on the selected lift;
+`primary` text 5.4:1 on groups; status hues 4.9 to 6.6:1 on groups and at least 4.3:1 on
+controls (red text on a button 4.8:1); white on `accent` 4.9:1; `on-primary` on `primary`
+7.8:1; `view` text on `danger` 7.1:1. Light: `fg-muted` 4.9 to 6.6:1 on every surface;
+status hues 4.5 to 6.8:1 on every surface; white on `accent` 5.1:1; white on `danger`
+6.2:1; `primary` as text 5.5:1 on the shell and 4.8:1 on the selected lift.
 
 ## Typography
 
@@ -341,13 +351,15 @@ opening a dialog focuses its first real control, not Close.
 
 ## Elevation & Depth
 
-Depth is tonal. Surfaces step up from shell to view to group to control, and the light
-theme adds a hairline `group-edge` ring where white groups need an edge. Shadows appear
-only on things that float above the window or on a chosen segment.
+Depth is tonal. Surfaces step up from view to group to control, and the light theme gives
+white groups Adwaita's card treatment: a near-invisible ring and a soft two-layer shadow.
+Other shadows appear only on things that float above the window or on a chosen segment.
 
 ### Shadow Vocabulary
-- **Group edge** (`box-shadow: 0 0 0 1px var(--c-group-edge)`): groups, lone rows, the
-  view's top-left edge (`-1px -1px 0`), dialogs and toasts.
+- **Group edge** (`box-shadow: 0 0 0 1px var(--c-group-edge), var(--group-shadow)`):
+  groups, lone rows, the view's top-left edge (`-1px -1px 0`, edge only), dialogs and
+  toasts. `--group-shadow` is none in dark and Adwaita's card shadow in light
+  (`0 1px 3px 1px rgb(0 0 6 / 0.07), 0 2px 6px 2px rgb(0 0 6 / 0.03)`).
 - **Dialog** (`box-shadow: 0 24px 64px -16px rgb(0 0 0 / 0.55), 0 0 0 1px var(--c-group-edge)`).
 - **Menu** (`box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.6)` plus a ring of `fg` at 8%).
 - **Toast** (`box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.5), 0 0 0 1px var(--c-group-edge)`).
@@ -356,14 +368,16 @@ only on things that float above the window or on a chosen segment.
 
 ### Named Rules
 **The Float-Only Shadow Rule.** Only what floats above the window (dialogs, menus, toasts)
-casts a shadow. Groups and rows sit on the view with tone and, in light, a hairline.
+casts a real shadow. Groups and rows sit on the view with tone; in light they carry only
+Adwaita's soft card shadow, never anything deeper.
 
 ## Shapes
 
 Corners shrink as things get smaller: the view's top-left corner and dialogs 14px, groups
 and cards and menus and toasts 12px, the segmented track 10px, controls and sidebar items
 8px, segments 7px, tags 6px. Round shapes are reserved for things that are round in
-Adwaita: window buttons, state glyphs, switches, progress bars and history dots. The
+Adwaita: window buttons, state glyphs, switches, progress bars and status dots; history
+and snapshot bars have 2px corners. The
 window itself stays square. Hairline separators run between rows inside a group; a group
 has no outline in dark.
 
@@ -374,7 +388,7 @@ Flat, quiet, Adwaita-proportioned.
 - **Shape:** gently rounded (8px), 34px tall, 14px side padding, icon gap 8px.
 - **Default:** `control` fill, `fg` text, 13.5px at 550. Hover moves to `track`; active
   dims to 94% brightness; disabled at 45% opacity.
-- **Primary:** `primary` fill, `on-primary` text, 650. Hover brightens to 108%. One per view.
+- **Primary:** `accent` fill, `on-accent` (white) text, 650. Hover brightens to 108%. One per view.
 - **Ghost:** transparent with `fg-2` text; hover fills with `control`. For secondary
   actions next to a default button ("Fix its settings").
 - **Icon:** 34px square, 8px radius (28px in the sidebar and toasts), `fg-2` glyph; hover
@@ -418,7 +432,7 @@ one choice of a few (theme, destination type, how often).
 - Uses `role="tab"` with `aria-selected`, or `role="radio"` with `aria-checked`.
 
 ### Switch
-- 44 by 24px, round, `track` off and `primary` on; an 18px `#f4f5f7` knob slides 20px over
+- 44 by 24px, round, `track` off and `accent` on; an 18px `#f4f5f7` knob slides 20px over
   150ms (`cubic-bezier(0.22, 1, 0.36, 1)`). `role="switch"`, disabled at 60%.
 
 ### State glyph
@@ -454,15 +468,19 @@ one choice of a few (theme, destination type, how often).
   protected."), one plain-words line about the backup that needs you (its name in its
   state colour) and a neutral button to open it. On a backup's page the same grammar runs
   at 22px with last backup, next run and snapshot count beneath.
-- **History strip:** the last 30 days, one 13px cell per day, 16px tall. A day that kept
-  a copy is a green dot whose diameter follows a fixed log ramp: 4px for up to 1 MiB (or
-  nothing changed) to 11px for 10 GiB or more, in whole pixels, never wider than the cell
-  minus 2px. A day with only failures is an 8px red dot; a day with nothing is a 4px hollow
-  `fg-muted` ring. The ramp is fixed, so marks compare across backups. On a backup's page
-  the strip spreads across a card with the first day and "Today" named under it. The
-  strip carries a sentence summary as its accessible name and a title per day.
-- **Snapshots** use the same ramp for each snapshot's mark (stored bytes for Vault and
-  Borg, copied bytes for Mirror and rsync).
+- **History strip:** the last 30 days, one bar per day. In a row each day is an 8px
+  column, 16px tall, holding a 5px bar with 2px corners; as a chart on a backup's page the
+  bars share the card's width with 4px gaps and stand up to 40px tall. A day that kept a
+  copy is a green bar whose height follows a fixed log ramp (`lib/ramp.ts`): 4px in a row
+  (8px as a chart) for up to 1 MiB or nothing changed, up to 16px (40px) for 10 GiB or
+  more. A day with only failures is a full-height red bar; a day with nothing is a 2px
+  stub of `fg` at 16% on the baseline, so the stubs read as the axis. The ramp is fixed,
+  so bars compare across backups. On a backup's page the first day and "Today" are named
+  under the chart. The strip carries a sentence summary as its accessible name, and each
+  day's whole column carries its title, so thin bars are easy to point at.
+- **Snapshots** use the same ramp for each snapshot's mark, a 5px bar 4 to 12px tall
+  standing on the text's baseline (stored bytes for Vault and Borg, copied bytes for
+  Mirror and rsync); amber when the snapshot finished with problems.
 
 ### Motion
 Colour and background transitions run 120ms (150ms on switches); progress width eases
@@ -477,7 +495,7 @@ animation and transition is off.
 - **Do** say the state in words next to every green, amber or red mark.
 - **Do** show where you are with the neutral `selected` or `seg-on` lift.
 - **Do** set machine data in JetBrains Mono with tabular figures.
-- **Do** mark history and snapshots on the fixed 4 to 11px log ramp in 13px cells.
+- **Do** mark history and snapshots as bars on the fixed log ramp (`lib/ramp.ts`).
 - **Do** put a dialog's close button last in the DOM.
 - **Do** keep the logo on its dark tile, in the light theme too.
 
@@ -485,7 +503,8 @@ animation and transition is off.
 - **Don't** use blue for selection, tabs or state; blue is for acting.
 - **Don't** wrap each item in its own box, nest groups inside groups, or build stat boxes.
 - **Don't** fill a tag; filled means button.
-- **Don't** scale the history ramp to each backup; marks must compare across backups.
+- **Don't** scale the history ramp to each backup; bars must compare across backups.
+- **Don't** go back to dots of different sizes for history; a row of them reads as noise.
 - **Don't** add shadows to groups or rows; only floating layers cast them.
 - **Don't** round the window; only the view's top-left corner carries the panel radius.
 
@@ -514,7 +533,7 @@ GNOME round window buttons, plus `?` for keyboard shortcuts).
       "minWidth": 900, "minHeight": 600,
       "decorations": false,
       "transparent": false,
-      "backgroundColor": "#15181d"   // avoids a white flash before the webview paints
+      "backgroundColor": "#2e2e32"   // the dark shell; avoids a white flash before the webview paints
     }]
   }
 }

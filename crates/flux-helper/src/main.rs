@@ -84,6 +84,7 @@ fn run_backup(paths: &Paths, id: &str) -> ExitCode {
                 prune: true,
                 only_if_due: false,
                 ask: None,
+                shutdown_after: false,
             },
             &Progress::new(),
             &silent,

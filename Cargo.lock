@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "flux-compat"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "flux-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "humantime",
  "ignore",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "flux-helper"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mirror"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mount"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-core",
  "flux-fs",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "flux-runner"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-compat",
  "flux-core",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "flux-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-compat",
  "flux-core",
@@ -1537,6 +1537,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "tracing",
  "zeroize",
@@ -1544,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "flux-transport"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flux-core",
  "getrandom 0.4.3",
@@ -1558,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -4023,6 +4024,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"

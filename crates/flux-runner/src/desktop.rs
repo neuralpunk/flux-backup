@@ -77,3 +77,41 @@ pub fn lower_priority(opts: &Options) {
         other => tracing::debug!("ionice failed: {other:?}"),
     }
 }
+
+/// The program that schedules and cancels shutdowns: `shutdown`, or `FLUX_SHUTDOWN` (for
+/// tests).
+fn shutdown_program() -> String {
+    std::env::var("FLUX_SHUTDOWN").unwrap_or_else(|_| "shutdown".into())
+}
+
+/// Power the computer off in a minute (`shutdown --poweroff +1`, through logind), leaving
+/// time to cancel it. `Err` says why it couldn't be scheduled.
+pub fn schedule_poweroff() -> Result<(), String> {
+    run_shutdown(&[
+        "--poweroff",
+        "+1",
+        "Flux Backup finished; shutting down in a minute (shutdown -c cancels it).",
+    ])
+}
+
+/// Cancel a scheduled shutdown (`shutdown -c`).
+pub fn cancel_poweroff() -> Result<(), String> {
+    run_shutdown(&["-c"])
+}
+
+fn run_shutdown(args: &[&str]) -> Result<(), String> {
+    let out = std::process::Command::new(shutdown_program())
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run shutdown: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        Err(if err.is_empty() {
+            format!("shutdown failed ({})", out.status)
+        } else {
+            err
+        })
+    }
+}

@@ -16,7 +16,7 @@
     return Math.min(100, Math.round((pr.bytes_done / pr.bytes_total) * 100));
   }
 
-  const rows = $derived(app.profiles.map((p) => ({ p, s: protection(p, app.statuses[p.id], percent(p)) })));
+  const rows = $derived(app.profiles.map((p) => ({ p, s: protection(p, app.statuses[p.id], percent(p), app.jobs[p.id]?.progress?.phase === "waiting") })));
   const mine = $derived(rows.filter((r) => r.p.scope !== "system"));
   const system = $derived(rows.filter((r) => r.p.scope === "system"));
   const total = $derived(rows.length);
@@ -145,7 +145,7 @@
     <section>
       <div class="flex items-baseline justify-between gap-4 px-0.5 pb-2">
         <h2 class="text-[13px] font-semibold text-fg-2">Your backups</h2>
-        <span class="text-[12.5px] text-fg-muted">Last 30 days · bigger marks copied more</span>
+        <span class="text-[12.5px] text-fg-muted">Last 30 days · taller bars copied more</span>
       </div>
       <div class="rows">
         {#each mine as r (r.p.id)}

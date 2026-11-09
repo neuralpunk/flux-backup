@@ -31,6 +31,15 @@ pub fn open_file_impl(
     snapshot: String,
     path: String,
 ) -> Result<String> {
+    Ok(copy_out(state, &id, &snapshot, &path)?
+        .display()
+        .to_string())
+}
+
+/// A read-only copy of file `path` from `snapshot`, in a private folder of the cache
+/// (cleaned up after a while).
+pub fn copy_out(state: &Service, id: &str, snapshot: &str, path: &str) -> Result<PathBuf> {
+    let (id, snapshot, path) = (id.to_owned(), snapshot.to_owned(), path.to_owned());
     if state.scope() == Scope::System {
         return Err(ApiError::new(
             "error",
@@ -77,6 +86,7 @@ pub fn open_file_impl(
             other: false,
         },
         links: LinkPolicy::for_process(),
+        exact: None,
     };
     repo.restore(&req, &Progress::new(), &silent)?;
     let name = Path::new(&path)
@@ -92,7 +102,7 @@ pub fn open_file_impl(
     // Read-only: it's a copy, changes to it wouldn't go anywhere.
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o444));
-    Ok(out.display().to_string())
+    Ok(out)
 }
 
 fn clean_old(base: &Path) {

@@ -53,6 +53,7 @@ impl Env {
                 prune: true,
                 only_if_due: false,
                 ask: None,
+                shutdown_after: false,
             },
             &Progress::new(),
             &silent,
@@ -155,6 +156,7 @@ fn dry_run_runs_no_hooks_and_writes_no_log() {
             prune: false,
             only_if_due: false,
             ask: None,
+            shutdown_after: false,
         },
         &Progress::new(),
         &silent,
@@ -175,6 +177,7 @@ fn scheduled(e: &Env, only_if_due: bool) -> flux_runner::RunResult {
             prune: true,
             only_if_due,
             ask: None,
+            shutdown_after: false,
         },
         &Progress::new(),
         &silent,
@@ -264,4 +267,84 @@ fn vault_space_is_reclaimed_weekly_after_scheduled_backups() {
         !saved.contains(&week_ago.to_string()),
         "the clock restarted"
     );
+}
+
+/// "One backup at a time": a backup that starts while another holds the turn waits for
+/// it (in the Waiting phase), then runs; stopped while waiting, it ends as cancelled.
+#[test]
+fn one_backup_at_a_time_waits_its_turn() {
+    use flux_core::progress::Phase;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let e = env();
+    let mut s = flux_runner::prefs::Settings::load(&e.paths);
+    s.one_at_a_time = true;
+    s.save(&e.paths).unwrap();
+    let job = |progress: &Progress| {
+        run_backup(
+            &BackupJob {
+                paths: &e.paths,
+                id: &e.id,
+                profile: &e.profile,
+                name: None,
+                dry_run: false,
+                trigger: Trigger::Manual,
+                prune: false,
+                only_if_due: false,
+                ask: None,
+                shutdown_after: false,
+            },
+            progress,
+            &silent,
+        )
+    };
+    let wait_for = |p: &Progress, phase: Phase| {
+        for _ in 0..100 {
+            if p.phase() == phase {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("never reached {phase:?}");
+    };
+
+    // Another backup has the turn: this one waits, then runs once it's free.
+    let other = flux_runner::jobs::try_turn(&e.paths).unwrap().unwrap();
+    let progress = Arc::new(Progress::new());
+    std::thread::scope(|sc| {
+        let p = progress.clone();
+        let h = sc.spawn(move || job(&p));
+        wait_for(&progress, Phase::Waiting);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(progress.phase(), Phase::Waiting, "still waiting");
+        drop(other);
+        let r = h.join().unwrap();
+        assert_eq!(
+            r.record.status,
+            RunStatus::Completed,
+            "{:?}",
+            r.outcome.err()
+        );
+    });
+
+    // Stopped while waiting.
+    let other = flux_runner::jobs::try_turn(&e.paths).unwrap().unwrap();
+    let progress = Arc::new(Progress::new());
+    std::thread::scope(|sc| {
+        let p = progress.clone();
+        let h = sc.spawn(move || job(&p));
+        wait_for(&progress, Phase::Waiting);
+        progress.cancel();
+        let r = h.join().unwrap();
+        assert_eq!(r.record.status, RunStatus::Cancelled);
+    });
+    drop(other);
+
+    // Off (the default): no waiting at all.
+    let mut s = flux_runner::prefs::Settings::load(&e.paths);
+    s.one_at_a_time = false;
+    s.save(&e.paths).unwrap();
+    let _other = flux_runner::jobs::try_turn(&e.paths).unwrap().unwrap();
+    assert!(job(&Progress::new()).outcome.is_ok());
 }

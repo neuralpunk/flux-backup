@@ -3,7 +3,7 @@
   // Changes save as they're made.
   import { api } from "../api";
   import { app, pauseUntil, type Theme } from "../state.svelte";
-  import type { Preferences } from "../types";
+  import type { Preferences, Scheduler } from "../types";
   import Icon from "./Icon.svelte";
   import Toggle from "./form/Toggle.svelte";
   import ListEditor from "./form/ListEditor.svelte";
@@ -27,9 +27,9 @@
     );
   });
 
-  async function save(notifySuccess: boolean, defaultExclude: string[] | null) {
+  async function save(notifySuccess: boolean, defaultExclude: string[] | null, oneAtATime?: boolean) {
     try {
-      prefs = await api.savePreferences(notifySuccess, defaultExclude);
+      prefs = await api.savePreferences(notifySuccess, defaultExclude, oneAtATime);
       excludes = [...prefs.default_exclude];
     } catch (e) {
       app.toast("bad", (e as Error).message);
@@ -52,6 +52,51 @@
       app.toast("bad", `Couldn't change that: ${(e as Error).message}`);
     }
   }
+
+  let switching = $state<Scheduler | null>(null);
+  async function setScheduler(to: Scheduler) {
+    if (!prefs || (prefs.scheduler ?? "systemd") === to || switching) return;
+    switching = to;
+    try {
+      prefs = await api.setScheduler(to);
+      app.scheduler = prefs.scheduler ?? to;
+      app.toast("ok", to === "cron" ? "Scheduled backups now run with cron." : "Scheduled backups now run with systemd timers.");
+    } catch (e) {
+      app.toast("bad", `Couldn't switch: ${(e as Error).message}`);
+    } finally {
+      switching = null;
+    }
+  }
+  const schedulers: { value: Scheduler; title: string; text: string; good: string[]; mind: string }[] = [
+    {
+      value: "systemd",
+      title: "systemd timers",
+      text: "Built into Linux. Recommended.",
+      good: ["Catches up on a backup missed while the computer was off", "Can back up as soon as a drive is plugged in"],
+      mind: "Runs while you're logged in (unless lingering is turned on).",
+    },
+    {
+      value: "cron",
+      title: "cron",
+      text: "The classic Unix scheduler, which Back In Time uses. Flux keeps its own lines in your crontab and leaves the rest alone.",
+      good: ["Also runs while you're logged out", "Catches up on a missed backup: Flux checks every 15 minutes"],
+      mind: "Can't start a backup when a drive is plugged in.",
+    },
+  ];
+
+  async function setDiffTool(value: string) {
+    if (!prefs) return;
+    try {
+      prefs = await api.setDiffTool(value === "auto" ? null : value);
+    } catch (e) {
+      app.toast("bad", (e as Error).message);
+    }
+  }
+  const diffChoice = $derived(prefs?.diff_tool == null ? "auto" : prefs.diff_tool);
+  /** A command typed into settings.toml that isn't one of the known programs. */
+  const customTool = $derived(
+    prefs?.diff_tool && !(prefs.diff_tools ?? []).some(([c]) => c === prefs?.diff_tool) ? prefs.diff_tool : null,
+  );
 
   const themes: { value: Theme; label: string; icon: "moon" | "sun" | "monitor" }[] = [
     { value: "dark", label: "Dark", icon: "moon" },
@@ -149,6 +194,76 @@
         </div>
         <ListEditor bind:items={excludes} placeholder="~/Downloads/  or  *.iso" icon="filter" label="Left out by new backups" />
         <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">New backups start with these exclusions; each backup can change its own. Existing backups aren't changed.</p>
+      </section>
+
+      <section class="flex flex-col">
+        <h2 class="group-title">Advanced</h2>
+        <div class="rows mb-5">
+          <Toggle
+            row
+            checked={prefs.one_at_a_time ?? false}
+            onchange={(on) => prefs && void save(prefs.notify_success, prefs.default_exclude_custom ? prefs.default_exclude : null, on)}
+            label="Run one backup at a time"
+            hint="A backup that starts while another is running waits for it to finish, so they don't compete for the disk or the network. Stopping still works while it waits."
+          />
+        </div>
+        <div class="px-0.5 pb-2">
+          <h3 class="text-[13px] font-semibold text-fg-2">What runs scheduled backups</h3>
+          <p class="text-[12.5px] text-fg-muted">Either way they run with the app closed. Switching moves every scheduled backup over.</p>
+        </div>
+        <div class="rows" role="radiogroup" aria-label="What runs scheduled backups">
+          {#each schedulers as o (o.value)}
+            {@const selected = (prefs.scheduler ?? "systemd") === o.value}
+            {@const blocked = o.value === "cron" && !!prefs.cron_problem && !selected}
+            <button
+              role="radio"
+              aria-checked={selected}
+              disabled={blocked || !!switching}
+              class="row row-link items-start py-3.5 disabled:cursor-not-allowed"
+              onclick={() => void setScheduler(o.value)}
+            >
+              <Icon name={o.value === "cron" ? "terminal" : "clock"} size={17} class="mt-0.5 shrink-0 text-fg-2" />
+              <span class="flex min-w-0 flex-1 flex-col gap-1">
+                <span class="font-semibold">{o.title}</span>
+                <span class="text-[13px] text-fg-2">{o.text}</span>
+                <span class="mt-0.5 flex flex-col gap-0.5 text-[12.5px]">
+                  {#each o.good as g (g)}<span class="flex items-start gap-1.5 text-fg-2"><Icon name="check" size={12} class="mt-[3px] shrink-0 text-success" /> {g}</span>{/each}
+                  <span class="flex items-start gap-1.5 text-fg-muted"><Icon name="alert" size={12} class="mt-[3px] shrink-0" /> {o.mind}</span>
+                </span>
+                {#if blocked}
+                  <span class="mt-1 text-[12.5px] text-warning">{prefs.cron_problem}</span>
+                {:else if o.value === "cron" && selected && prefs.cron_running === false}
+                  <span class="mt-1 text-[12.5px] text-warning">No cron daemon is running, so nothing will start. Start it with <code class="font-mono">sudo systemctl enable --now crond</code>.</span>
+                {/if}
+              </span>
+              <span class="grid size-5 shrink-0 place-items-center">
+                {#if switching === o.value}<Icon name="refresh" size={15} class="text-fg-muted motion-safe:animate-spin" />{:else if selected}<Icon name="check" size={18} class="text-fg" />{/if}
+              </span>
+            </button>
+          {/each}
+        </div>
+        <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">
+          This is for your own backups. System backups have their own setting: <code class="font-mono">sudo flux --system schedule use cron</code>.
+        </p>
+
+        <div class="rows mt-5">
+          <label class="row gap-3">
+            <Icon name="diff" size={17} class="shrink-0 text-fg-2" />
+            <span class="min-w-0 flex-1">
+              <span class="block font-medium">Compare file versions with</span>
+              <span class="block text-[12.5px] text-fg-muted">
+                Flux shows what changed in text files itself. A comparison program also handles other files, and is offered as “Open in …”.
+                {#if !(prefs.diff_tools ?? []).length}None is installed; Meld is a good one (on Fedora, the meld package).{/if}
+              </span>
+            </span>
+            <select class="input h-9 w-48 py-0" value={diffChoice} onchange={(e) => void setDiffTool(e.currentTarget.value)}>
+              <option value="auto">{(prefs.diff_tools ?? [])[0] ? `Automatic (${prefs.diff_tools![0]![1]})` : "Automatic"}</option>
+              {#each prefs.diff_tools ?? [] as [cmd, name] (cmd)}<option value={cmd}>{name}</option>{/each}
+              {#if customTool}<option value={customTool}>{customTool}</option>{/if}
+              <option value="">Only Flux's own view</option>
+            </select>
+          </label>
+        </div>
       </section>
     </div>
   {/if}

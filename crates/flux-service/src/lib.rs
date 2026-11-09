@@ -9,6 +9,7 @@ pub mod actions;
 pub mod client;
 pub mod edit;
 pub mod extras;
+pub mod filediff;
 pub mod find;
 pub mod prefs;
 pub mod protocol;

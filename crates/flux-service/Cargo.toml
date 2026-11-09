@@ -22,6 +22,7 @@ jiff.workspace = true
 rustix.workspace = true
 zeroize = "1.9"
 globset = "0.4"
+similar = "2.7"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -32,10 +32,13 @@ import {
   type TargetTest,
   type ToolStatus,
   type RestorePreview,
+  type BitProfile,
   type Version,
   type Estimate,
   type Pause,
   type Preferences,
+  type Scheduler,
+  type FileDiff,
 } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -72,13 +75,21 @@ export const api = {
    * (or check it opens the existing one) and keep it where the profile's password comes
    * from, so the first backup, even a scheduled one, needs nobody to type it. */
   setPassword: (id: string, password: string) => call<void>("set_password", { id, password }),
-  backupNow: (id: string) => call<void>("backup_now", { id }),
+  /** `running: false` when it was already over by the time the call returned. */
+  backupNow: (id: string, shutdown = false) => call<{ running: boolean } | null>("backup_now", { id, shutdown }),
+  /** Shut the computer down when this running backup ends (or no longer). */
+  shutdownAfter: (id: string, on: boolean) => call<void>("shutdown_after", { id, on }),
+  /** Cancel a shutdown scheduled after a backup. */
+  cancelShutdown: () => call<void>("cancel_shutdown"),
   cancel: (id: string) => call<void>("cancel", { id }),
-  restore: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean) =>
-    call<RestoreOutcome>("restore", { id, snapshot, paths, to, overwrite }),
+  /** `exact`: also remove what the restored folders hold that the snapshot doesn't. */
+  restore: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean, exact = false) =>
+    call<RestoreOutcome>("restore", { id, snapshot, paths, to, overwrite, exact }),
 
   getProfile: (id: string) => call<Editable>("get_profile", { id }),
   newProfile: (system = false) => call<Editable>("new_profile", { system }),
+  /** Back In Time's profiles on this computer (yours only), to start a new one from. */
+  backintimeProfiles: () => call<BitProfile[]>("backintime_profiles"),
   validateProfile: (profile: Profile, system = false) => call<Issue[]>("validate_profile", { profile, system }),
   saveProfile: (id: string, profile: Profile, create: boolean) => call<SaveResult>("save_profile", { id, profile, create }),
   deleteProfile: (id: string) => call<void>("delete_profile", { id }),
@@ -116,21 +127,30 @@ export const api = {
   saveRecoveryKit: (id: string, dir: string) => call<string[]>("save_recovery_kit", { id, dir }),
   /** Copy a file out of a snapshot and open it in its usual program; returns the copy. */
   openFile: (id: string, snapshot: string, path: string) => call<string>("open_snapshot_file", { id, snapshot, path }),
+  /** Compare `path` in snapshot `oldSnap` with `newSnap`, or with the file now (null). */
+  diffFile: (id: string, path: string, oldSnap: string, newSnap: string | null) => call<FileDiff>("diff_file", { id, path, old: oldSnap, new: newSnap }),
+  /** Open two files in the comparison program chosen in the preferences. */
+  openDiffTool: (left: string, right: string) => call<void>("open_diff_tool", { left, right }),
+  /** A command, "" for none, or null for the first one installed. */
+  setDiffTool: (tool: string | null) => call<Preferences>("set_diff_tool", { tool }),
   /** Copy a profile; returns the new id. */
   duplicateProfile: (id: string) => call<string>("duplicate_profile", { id }),
   /** Text for a bug report (secrets hidden). */
   diagnostics: (id: string) => call<string>("diagnostics", { id }),
   preferences: () => call<Preferences>("preferences"),
-  savePreferences: (notifySuccess: boolean, defaultExclude: string[] | null) =>
-    call<Preferences>("save_preferences", { notifySuccess, defaultExclude }),
+  /** `oneAtATime` left out: unchanged. */
+  savePreferences: (notifySuccess: boolean, defaultExclude: string[] | null, oneAtATime?: boolean) =>
+    call<Preferences>("save_preferences", { notifySuccess, defaultExclude, oneAtATime }),
   setPause: (pause: "hour" | "tomorrow" | "resumed" | "off") => call<Pause | null>("set_pause", { pause }),
+  /** Run scheduled backups with systemd timers or cron; every schedule moves over. */
+  setScheduler: (scheduler: Scheduler) => call<Preferences>("set_scheduler", { scheduler }),
   autostart: () => call<boolean>("autostart"),
   setAutostart: (on: boolean) => call<void>("set_autostart", { on }),
   find: (id: string, query: string) => call<FindResult>("find", { id, query }),
   versions: (id: string, path: string) => call<Version[]>("versions", { id, path }),
   estimate: (profile: Profile, system = false) => call<Estimate>("estimate", { profile, system }),
-  restorePreview: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean) =>
-    call<RestorePreview>("restore_preview", { id, snapshot, paths, to, overwrite }),
+  restorePreview: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean, exact = false) =>
+    call<RestorePreview>("restore_preview", { id, snapshot, paths, to, overwrite, exact }),
   exportFormats: () => call<ExportFormat[]>("export_formats"),
   exportProfile: (id: string, format: string) => call<ProfileExport>("export_profile", { id, format }),
   /** Save an export into a folder; returns the file written. */

@@ -17,7 +17,7 @@ use flux_fs::snapshot::SnapshotMeta;
 use flux_runner::jobs;
 use flux_runner::password;
 use flux_runner::runlog::{self, RunRecord};
-use flux_runner::schedule::{self, Systemd};
+use flux_runner::schedule;
 use flux_vault::VaultError;
 
 use crate::{ApiError, CACHE_SNAPSHOTS, Result, Service};
@@ -33,6 +33,9 @@ pub struct ProfileSummary {
     /// What it backs up, home shown as `~`.
     sources: Vec<String>,
     schedule: String,
+    /// Files larger than this are left out ("500MB"); `None` without a limit, and for
+    /// Borg, which ignores it.
+    size_limit: Option<String>,
     pub errors: Vec<String>,
     last_run: Option<RunRecord>,
     pub running: bool,
@@ -71,6 +74,11 @@ fn summary(
         remote: matches!(p.target, Target::Ssh { .. }),
         sources: p.sources.paths.iter().map(|s| tilde(s)).collect(),
         schedule: schedule::summary(p),
+        size_limit: p
+            .sources
+            .exclude_larger_than
+            .filter(|_| p.engine != Engine::Borg)
+            .map(|m| m.to_string()),
         errors: p
             .validate()
             .into_iter()
@@ -108,6 +116,7 @@ pub fn profiles_impl(state: &Service) -> Result<Vec<ProfileSummary>> {
                 remote: false,
                 sources: Vec::new(),
                 schedule: String::new(),
+                size_limit: None,
                 errors: vec![e.to_string()],
                 last_run: None,
                 running: false,
@@ -149,7 +158,7 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         Err(e) if e.code == "empty" => (Vec::new(), None),
         Err(e) => (Vec::new(), Some(e.message)),
     };
-    let st = schedule::status(&Systemd::new(&state.paths), &id, &p, &state.unit_env());
+    let st = schedule::Scheduler::new(&state.paths).status(&id, &p, &state.unit_env());
     let free_bytes = flux_runner::free_space(&p.target);
     let now = jiff::Timestamp::now();
     let runs = runlog::recent_runs(&state.paths, &id, 300);
@@ -204,7 +213,7 @@ pub const STATUS_DAYS: usize = 30;
 
 pub fn status_impl(state: &Service, id: String) -> Result<Status> {
     let (id, p) = state.load(&id)?;
-    let st = schedule::status(&Systemd::new(&state.paths), &id, &p, &state.unit_env());
+    let st = schedule::Scheduler::new(&state.paths).status(&id, &p, &state.unit_env());
     let now = jiff::Timestamp::now();
     let runs = runlog::recent_runs(&state.paths, &id, 300);
     let free = flux_runner::free_space(&p.target);
@@ -327,6 +336,18 @@ pub struct DirEntry {
     mode: u32,
     link: Option<String>,
     children: Option<usize>,
+    /// Whether the item exists at its original place now: `false` when it was deleted
+    /// or moved since (worth restoring), `None` when that can't be checked.
+    on_disk: Option<bool>,
+}
+
+/// Whether `path` exists now, without following a final symlink.
+pub(crate) fn on_disk(path: &str) -> Option<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -414,12 +435,14 @@ pub fn list_dir_impl(
         .iter()
         .map(|&i| {
             let e = &index.entries[i as usize];
+            let path = format!("/{}", String::from_utf8_lossy(&e.path));
             DirEntry {
+                on_disk: on_disk(&path),
                 name: String::from_utf8_lossy(
                     &e.path[parent_of(&e.path).len() + usize::from(!want.is_empty())..],
                 )
                 .into_owned(),
-                path: format!("/{}", String::from_utf8_lossy(&e.path)),
+                path,
                 kind: e.kind,
                 size: e.size,
                 mtime: e.mtime,
@@ -590,9 +613,58 @@ pub fn needs_password(state: &Service, id: &ProfileId, p: &Profile) -> bool {
     }
 }
 
+/// Why a local target can't be backed up to right now, in words for people, and whether
+/// plugging in a drive would fix it. `None` when it can (or isn't local).
+pub fn target_unreachable(p: &Profile) -> Option<(String, bool)> {
+    use flux_core::target_check::{TargetError, check_local_target};
+    let Target::Local { path, fs_uuid } = &p.target else {
+        return None;
+    };
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let err = check_local_target(path, fs_uuid.as_deref()).err()?;
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let at = path.display();
+    Some(match err {
+        TargetError::Missing(_) | TargetError::LooksUnmounted(_) => (
+            format!("{name} isn't connected: nothing is mounted at {at}."),
+            true,
+        ),
+        TargetError::WrongFilesystem { .. } => (
+            format!("Another drive is mounted at {at}, not the one this backup uses."),
+            true,
+        ),
+        TargetError::NotADirectory(_) => (format!("{at} is a file, not a folder."), false),
+    })
+}
+
+/// How a backup start went.
+#[derive(Debug, Serialize)]
+pub struct Started {
+    /// Still running: its progress follows through the job watcher. `false` when it was
+    /// already done by the time this returned.
+    pub running: bool,
+}
+
+/// How long to wait for a new backup to show up as a running job (or to end).
+const START_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Start a backup as a separate `flux backup` process, so it survives closing the window
 /// and shows up for every client (GUI, `flux watch`) through its status socket.
-pub fn backup_now_impl(state: &Service, id: String) -> Result<()> {
+///
+/// Returns once the job is running, or with its error if it stopped straight away: a backup
+/// that fails in its first milliseconds can be over before any watcher connects, and would
+/// otherwise look like it never finished.
+pub fn backup_now_impl(state: &Service, id: String) -> Result<Started> {
+    start_backup(state, id, false)
+}
+
+/// [`backup_now_impl`]; with `shutdown`, the computer shuts down a minute after it ends.
+pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Started> {
     let (pid, p) = state.load(&id)?;
     let issues = p.validate();
     if has_errors(&issues) {
@@ -610,6 +682,16 @@ pub fn backup_now_impl(state: &Service, id: String) -> Result<()> {
             "a backup of this profile is already running",
         ));
     }
+    if let Some((why, drive)) = target_unreachable(&p) {
+        return Err(ApiError::new(
+            "not_connected",
+            if drive {
+                format!("{why} Plug in the drive, then back up again.")
+            } else {
+                why
+            },
+        ));
+    }
     if needs_password(state, &pid, &p) {
         return Err(ApiError::new(
             "password_required",
@@ -621,39 +703,113 @@ pub fn backup_now_impl(state: &Service, id: String) -> Result<()> {
         .split_first()
         .ok_or_else(|| ApiError::new("error", "no backup command configured"))?;
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .arg(pid.as_str())
-        .stdin(Stdio::null())
+    cmd.args(args).arg(pid.as_str());
+    if shutdown {
+        cmd.arg("--shutdown");
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .process_group(0);
     if let Some(pw) = state.password(&pid) {
         cmd.env("FLUX_PASSWORD", pw.as_str());
     }
+    let since = jiff::Timestamp::now();
     let mut child = cmd.spawn().map_err(|e| {
         ApiError::new(
             "error",
             format!("cannot start {}: {e}", program.to_string_lossy()),
         )
     })?;
-    // Reap it in the background; the job's own socket reports progress and the outcome.
+    // Read stderr as it comes, so a chatty child never blocks on a full pipe.
     let stderr = child.stderr.take();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(mut s) = stderr {
             let _ = std::io::Read::read_to_string(&mut s, &mut text);
         }
-        let status = child.wait();
-        if !matches!(status, Ok(s) if s.success()) {
-            tracing::warn!("flux backup exited with {status:?}: {}", text.trim());
-        }
+        text
     });
+    let deadline = std::time::Instant::now() + START_WAIT;
+    let exited = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break Some(status);
+        }
+        if jobs::running(&state.paths)
+            .iter()
+            .any(|j| j.profile == pid.as_str() && j.pid == child.id())
+            || std::time::Instant::now() >= deadline
+        {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let Some(status) = exited else {
+        // Running: reap it in the background; its own socket reports progress and outcome.
+        std::thread::spawn(move || {
+            let status = child.wait();
+            let text = reader.join().unwrap_or_default();
+            if !matches!(status, Ok(s) if s.success()) {
+                tracing::warn!("flux backup exited with {status:?}: {}", text.trim());
+            }
+        });
+        return Ok(Started { running: true });
+    };
+    let text = reader.join().unwrap_or_default();
+    // The run log has the outcome in the same words as Activity; stderr is the fallback
+    // (a run that ended before it was recorded, such as an unreadable profile).
+    let run = runlog::recent_runs(&state.paths, &pid, 1)
+        .into_iter()
+        .next()
+        .filter(|r| r.started >= since);
+    match run {
+        Some(r) if r.status == runlog::RunStatus::Failed => Err(ApiError::new(
+            "backup_failed",
+            r.error.unwrap_or_else(|| "the backup stopped".into()),
+        )),
+        Some(_) => Ok(Started { running: false }),
+        None if status.success() => Ok(Started { running: false }),
+        None => {
+            let why = text
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .map(|l| l.trim_start_matches("Error: ").to_owned())
+                .unwrap_or_else(|| format!("the backup stopped right away ({status})"));
+            Err(ApiError::new("backup_failed", why))
+        }
+    }
+}
+
+/// Shut the computer down when a running backup ends (or no longer).
+pub fn shutdown_after_impl(state: &Service, id: String, on: bool) -> Result<()> {
+    let id = ProfileId::new(id)?;
+    let mut client = jobs::Client::connect(&state.paths, &id).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ApiError::new("not_running", "This backup isn't running any more.")
+        } else {
+            ApiError::from(e)
+        }
+    })?;
+    client.shutdown_after(on)?;
     Ok(())
+}
+
+/// Cancel a shutdown scheduled after a backup.
+pub fn cancel_shutdown_impl() -> Result<()> {
+    flux_runner::desktop::cancel_poweroff().map_err(|e| ApiError::new("error", e))
 }
 
 pub fn cancel_impl(state: &Service, id: String) -> Result<()> {
     let id = ProfileId::new(id)?;
-    jobs::Client::connect(&state.paths, &id)?.cancel()?;
+    let mut client = jobs::Client::connect(&state.paths, &id).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ApiError::new("not_running", "This backup isn't running any more.")
+        } else {
+            ApiError::from(e)
+        }
+    })?;
+    client.cancel()?;
     Ok(())
 }
 
@@ -756,6 +912,7 @@ mod tests {
                 prune: false,
                 only_if_due: false,
                 ask: Some(&ask),
+                shutdown_after: false,
             },
             &Progress::new(),
             &silent,
@@ -766,6 +923,250 @@ mod tests {
             state: Service::new(paths),
             src,
         }
+    }
+
+    /// A file's version in a snapshot compared with the file now: line by line, from a
+    /// read-only copy.
+    #[test]
+    fn compare_a_version_with_the_file_now() {
+        let e = env(Engine::Mirror);
+        let st = &e.state;
+        let id = ProfileId::new("t").unwrap();
+        let p = st.load("t").unwrap().1;
+        let snap = st.open(&id, &p).unwrap().snapshots().unwrap()[0].id.clone();
+        let a = e.src.join("docs/a.txt").display().to_string();
+        let d =
+            crate::filediff::diff_file_impl(st, "t".into(), a.clone(), snap.clone(), None).unwrap();
+        assert!(d.identical, "unchanged since the backup");
+
+        std::fs::write(e.src.join("docs/a.txt"), "alpha\nbeta\n").unwrap();
+        let d =
+            crate::filediff::diff_file_impl(st, "t".into(), a.clone(), snap.clone(), None).unwrap();
+        assert!(!d.identical && !d.binary);
+        assert!(d.added >= 1, "{:?}", d.lines);
+        assert!(
+            d.lines
+                .iter()
+                .any(|l| l.kind == "added" && l.text == "beta")
+        );
+        assert_eq!(d.new_file, a, "the file itself, not a copy");
+        assert!(
+            d.old_file.contains("opened"),
+            "a copy from the backup: {}",
+            d.old_file
+        );
+
+        std::fs::remove_file(e.src.join("docs/a.txt")).unwrap();
+        let err = crate::filediff::diff_file_impl(st, "t".into(), a, snap, None).unwrap_err();
+        assert!(err.message.contains("isn't on your computer now"));
+    }
+
+    /// Exact restore: what the snapshot doesn't have goes (moved aside by default), but
+    /// never what the backup doesn't take (exclusions, the size limit) or kept copies.
+    #[test]
+    fn exact_restore_removes_only_what_the_backup_would_have_taken() {
+        let e = env(Engine::Mirror);
+        let st = &e.state;
+        let src = &e.src;
+        let id = ProfileId::new("t").unwrap();
+        let mut p = st.load("t").unwrap().1;
+        p.sources.exclude = vec!["*.tmp".into()];
+        p.sources.exclude_larger_than = Some(flux_core::ByteSize(1000));
+        ProfileStore::new(&st.paths).save(&id, &p).unwrap();
+        let snap = Service::open(st, &id, &p).unwrap().snapshots().unwrap()[0]
+            .id
+            .clone();
+
+        std::fs::write(src.join("new.txt"), "n").unwrap();
+        std::fs::create_dir_all(src.join("docs/extra")).unwrap();
+        std::fs::write(src.join("docs/extra/inner.txt"), "i").unwrap();
+        std::fs::write(src.join("keep.tmp"), "excluded").unwrap();
+        std::fs::write(src.join("big.bin"), vec![0u8; 2000]).unwrap();
+        std::fs::remove_file(src.join("b.txt")).unwrap();
+        let all = vec![src.display().to_string()];
+
+        let pv = crate::find::restore_preview_impl(
+            st,
+            "t".into(),
+            snap.clone(),
+            all.clone(),
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(pv.remove, 2);
+        assert_eq!(
+            pv.remove_paths,
+            vec![src.join("docs/extra"), src.join("new.txt")]
+        );
+        // Not exact: nothing would be removed.
+        let pv = crate::find::restore_preview_impl(
+            st,
+            "t".into(),
+            snap.clone(),
+            all.clone(),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(pv.remove, 0);
+
+        // Keeping files on restore (the default): the extras are moved aside.
+        let r = crate::actions::restore_impl(
+            st,
+            "t".into(),
+            snap.clone(),
+            all.clone(),
+            None,
+            false,
+            true,
+            &|_| {},
+        )
+        .unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.removed, 2);
+        assert!(src.join("b.txt").is_file(), "restored");
+        assert!(!src.join("new.txt").exists() && !src.join("docs/extra").exists());
+        assert_eq!(r.moved_aside.len(), 2);
+        assert!(r.moved_aside.iter().all(|m| m.exists()));
+        assert!(
+            src.join("keep.tmp").exists(),
+            "excluded: never backed up, left alone"
+        );
+        assert!(
+            src.join("big.bin").exists(),
+            "over the size limit: left alone"
+        );
+
+        // Again, overwriting: the kept copies are the person's and stay.
+        let r = crate::actions::restore_impl(st, "t".into(), snap, all, None, true, true, &|_| {})
+            .unwrap();
+        assert_eq!(r.removed, 0);
+        assert!(r.moved_aside.is_empty());
+    }
+
+    /// With cron chosen, a profile that backs up when its drive is plugged in hears that
+    /// cron can't, and the preferences say which scheduler is in use. (Switching itself
+    /// is tested through the CLI, where the crontab can be a fake.)
+    #[test]
+    fn cron_preference_and_on_connect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path(), Scope::User);
+        let st = Service::new(paths.clone());
+        let mut p = Profile::new(
+            "T",
+            Target::Local {
+                path: tmp.path().to_owned(),
+                fs_uuid: Some("abcd".into()),
+            },
+            vec![tmp.path().join("src")],
+        );
+        p.schedule.on_connect = true;
+        let warned = |st: &Service| {
+            crate::edit::validate_profile_impl(st, serde_json::to_value(&p).unwrap())
+                .unwrap()
+                .iter()
+                .any(|i| i.field == "schedule.on_connect" && i.severity == Severity::Warning)
+        };
+        assert!(!warned(&st));
+        assert_eq!(
+            crate::prefs::preferences_impl(&st).unwrap().scheduler,
+            schedule::SchedulerKind::Systemd
+        );
+        let mut s = flux_runner::prefs::Settings::load(&paths);
+        s.scheduler = schedule::SchedulerKind::Cron;
+        s.save(&paths).unwrap();
+        assert!(warned(&st));
+        assert_eq!(
+            crate::prefs::preferences_impl(&st).unwrap().scheduler,
+            schedule::SchedulerKind::Cron
+        );
+        // Saving the other preferences keeps the choice.
+        crate::prefs::save_preferences_impl(&st, true, None, None).unwrap();
+        assert_eq!(
+            flux_runner::prefs::Settings::load(&paths).scheduler,
+            schedule::SchedulerKind::Cron
+        );
+    }
+
+    /// A backup that can't start says why at once, instead of the app waiting on a job
+    /// that's already over.
+    #[test]
+    fn backup_now_reports_a_start_that_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path(), Scope::User);
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut p = Profile::new(
+            "T",
+            Target::Local {
+                path: dest,
+                fs_uuid: None,
+            },
+            vec![tmp.path().join("src")],
+        );
+        p.options.notify = false;
+        ProfileStore::new(&paths)
+            .create(&ProfileId::new("t").unwrap(), &p)
+            .unwrap();
+        let with = |script: &str| {
+            Service::with_commands(
+                paths.clone(),
+                vec!["sh".into(), "-c".into(), script.into(), "sh".into()],
+                PathBuf::from("flux"),
+            )
+        };
+
+        // Ended at once with an error: the error comes back.
+        let e = backup_now_impl(
+            &with("echo 'Error: the disk said no' >&2; exit 1"),
+            "t".into(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("backup_failed", "the disk said no")
+        );
+        // Ended at once without one (nothing to do): not running.
+        assert!(
+            !backup_now_impl(&with("exit 0"), "t".into())
+                .unwrap()
+                .running
+        );
+        // Stop with nothing running says so in its own code.
+        assert_eq!(
+            cancel_impl(&with("true"), "t".into()).unwrap_err().code,
+            "not_running"
+        );
+
+        // A drive that isn't there is refused before anything starts.
+        let mut gone = p.clone();
+        gone.target = Target::Local {
+            path: PathBuf::from("/mnt/flux-test-no-such-drive"),
+            fs_uuid: None,
+        };
+        ProfileStore::new(&paths)
+            .create(&ProfileId::new("gone").unwrap(), &gone)
+            .unwrap();
+        let e = backup_now_impl(&with("exit 3"), "gone".into()).unwrap_err();
+        assert_eq!(e.code, "not_connected");
+        assert!(
+            e.message
+                .starts_with("flux-test-no-such-drive isn't connected"),
+            "{}",
+            e.message
+        );
+        let issues =
+            crate::edit::validate_profile_impl(&with("true"), serde_json::to_value(&gone).unwrap())
+                .unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "target.connected" && i.severity == Severity::Warning),
+            "{issues:?}"
+        );
     }
 
     #[test]
@@ -883,6 +1284,35 @@ mod tests {
             .map(|x| (x.name.as_str(), x.children))
             .collect();
         assert_eq!(names, [("b.txt", None), ("docs", Some(1))]);
+        assert!(l.entries.iter().all(|x| x.on_disk == Some(true)));
+        // Deleted since the backup: marked, so it's easy to find and bring back.
+        std::fs::remove_file(e.src.join("b.txt")).unwrap();
+        let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
+        let gone: Vec<_> = l
+            .entries
+            .iter()
+            .map(|x| (x.name.as_str(), x.on_disk))
+            .collect();
+        assert_eq!(gone, [("b.txt", Some(false)), ("docs", Some(true))]);
+        let found = crate::find::find_impl(&e.state, "t".into(), "b.txt".into()).unwrap();
+        assert_eq!(found.hits[0].on_disk, Some(false), "search says so too");
+        // Restored: the next look at the folder (and the next search) shows it back.
+        crate::actions::restore_impl(
+            &e.state,
+            "t".into(),
+            snap.id.clone(),
+            vec![format!("{src}/b.txt")],
+            None,
+            false,
+            false,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(e.src.join("b.txt")).unwrap(), "beta");
+        let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
+        assert!(l.entries.iter().all(|x| x.on_disk == Some(true)));
+        let found = crate::find::find_impl(&e.state, "t".into(), "b.txt".into()).unwrap();
+        assert_eq!(found.hits[0].on_disk, Some(true));
         assert!(
             list_dir_impl(
                 &e.state,
@@ -901,6 +1331,7 @@ mod tests {
             snap.id,
             vec![format!("{src}/docs")],
             Some(out.display().to_string()),
+            false,
             false,
             &|_| {},
         )
@@ -930,6 +1361,7 @@ mod tests {
                 prune: false,
                 only_if_due: false,
                 ask: None,
+                shutdown_after: false,
             },
             &Progress::new(),
             &silent,
@@ -945,10 +1377,11 @@ mod tests {
         let found = crate::find::find_impl(&e.state, "t".into(), "B.TXT".into()).unwrap();
         assert_eq!(found.snapshots, 2);
         assert_eq!(found.hits.len(), 1);
-        assert_eq!(found.hits[0].versions, 2);
-        assert_eq!(found.hits[0].latest_size, 12);
+        assert_eq!(found.hits[0].found.versions, 2);
+        assert_eq!(found.hits[0].found.latest_size, 12);
         let path = format!("{}/b.txt", e.src.display());
-        assert_eq!(found.hits[0].path, path);
+        assert_eq!(found.hits[0].found.path, path);
+        assert_eq!(found.hits[0].on_disk, Some(true));
 
         // The estimate follows the exclusions.
         let mut prof = serde_json::to_value(&p).unwrap();
@@ -970,6 +1403,7 @@ mod tests {
             snaps[0].id.clone(),
             vec![e.src.display().to_string()],
             None,
+            false,
             false,
         )
         .unwrap();
@@ -999,10 +1433,10 @@ mod tests {
         );
         // Searching again reads the index: the same answer.
         let again = crate::find::find_impl(&e.state, "t".into(), "a.txt".into()).unwrap();
-        assert_eq!(again.hits[0].path, found.hits[0].path);
+        assert_eq!(again.hits[0].found.path, found.hits[0].found.path);
         // A file for a snapshot that's gone is dropped.
         std::fs::write(idx.join("gone-1.idx"), b"x").unwrap();
-        crate::find::versions_impl(&e.state, "t".into(), found.hits[0].path.clone()).unwrap();
+        crate::find::versions_impl(&e.state, "t".into(), found.hits[0].found.path.clone()).unwrap();
         assert!(!idx.join("gone-1.idx").exists());
         // Deleting the profile removes its index.
         crate::edit::delete_profile_impl(&e.state, "t".into()).unwrap();
@@ -1149,6 +1583,27 @@ mod tests {
         std::fs::write(e.src.join("c.txt"), "new").unwrap();
         let c = actions::compare_impl(st, "t".into(), snap.id.clone(), None).unwrap();
         assert_eq!(c.added(), 1);
+        assert_eq!(c.left_out_by_size(), 0);
+        // With a size limit, a big new file isn't "added" (no backup will hold it) but
+        // counted; big files the snapshot already holds are still compared.
+        std::fs::write(e.src.join("big.bin"), vec![1u8; 4096]).unwrap();
+        let store = ProfileStore::new(&st.paths);
+        let id = ProfileId::new("t").unwrap();
+        let mut p = store.load(&id).unwrap();
+        p.sources.exclude_larger_than = Some(flux_core::ByteSize(3));
+        store.save(&id, &p).unwrap();
+        let c = actions::compare_impl(st, "t".into(), snap.id.clone(), None).unwrap();
+        assert_eq!(c.left_out_by_size(), 1, "big.bin");
+        assert_eq!(
+            c.added(),
+            1,
+            "c.txt (3 bytes) is within the limit; big.bin isn't"
+        );
+        assert_eq!(
+            c.removed(),
+            0,
+            "a.txt and b.txt are in the snapshot: still compared"
+        );
         assert_eq!(actions::runs_impl(st, "t".into(), 10).unwrap().len(), 1);
     }
 

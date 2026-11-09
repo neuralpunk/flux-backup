@@ -18,6 +18,17 @@ export function profileMenu(p: ProfileSummary): MenuEntry[] {
           hint: p.errors.length ? "This profile has problems; fix them in Settings first" : "",
           onselect: () => void app.backupNow(p.id),
         },
+    ...(p.running
+      ? []
+      : [
+          {
+            label: "Back up now, then shut down",
+            icon: "power" as const,
+            disabled: p.errors.length > 0,
+            hint: "The computer shuts down a minute after the backup ends",
+            onselect: () => void app.backupNow(p.id, true),
+          },
+        ]),
     "separator",
     { label: "Browse snapshots", icon: "history", onselect: () => app.open(p.id, "snapshots") },
     { label: "Activity", icon: "activity", onselect: () => app.open(p.id, "activity") },

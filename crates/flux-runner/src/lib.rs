@@ -8,6 +8,8 @@
 //!   → notification (failures; successes if asked) → run record + event log
 //! ```
 
+pub mod calendar;
+pub mod cron;
 pub mod desktop;
 pub mod index;
 pub mod jobs;
@@ -48,6 +50,9 @@ pub struct BackupJob<'a> {
     pub only_if_due: bool,
     /// How to ask for a Vault password if the configured source doesn't provide one.
     pub ask: Option<password::Ask<'a>>,
+    /// Shut the computer down when the backup ends (unless it's stopped). Can be changed
+    /// while it runs, through its status socket.
+    pub shutdown_after: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +141,9 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
     let shared = server
         .as_ref()
         .map(|(_, info)| jobs::Shared::new(info.clone(), progress));
+    if let Some(sh) = &shared {
+        sh.set_shutdown_after(job.shutdown_after);
+    }
     let tee = |ev: Event| {
         log.event(&ev);
         if let Some(sh) = &shared {
@@ -149,7 +157,11 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
             scope.spawn(move || srv.serve(scope, sh));
         }
         let mut hooks_run: Vec<HookRun> = Vec::new();
-        let outcome = run_inner(job, progress, &tee, &mut hooks_run);
+        let turn = wait_for_turn(job, progress, &tee);
+        let outcome = match &turn {
+            Err(()) => Err(RunError::Engine(MirrorError::Cancelled)),
+            Ok(_) => run_inner(job, progress, &tee, &mut hooks_run),
+        };
         if job.trigger == Trigger::Scheduled
             && !job.dry_run
             && matches!(
@@ -160,8 +172,16 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
             maintenance::after_backup(job.paths, job.id, job.profile, job.ask, progress, &tee);
         }
         let record = finish_run(job, started, &log.run_id, progress, &outcome, hooks_run);
+        drop(turn);
+        let wants = shared
+            .as_ref()
+            .map_or(job.shutdown_after, |s| s.shutdown_after());
+        let shutdown = wants
+            && !job.dry_run
+            && record.status != RunStatus::Cancelled
+            && power_off_soon(job, &tee);
         if let Some(sh) = &shared {
-            sh.finish(record.status, record.error.clone());
+            sh.finish(record.status, record.error.clone(), shutdown);
             sh.shutdown();
         }
         (outcome, record)
@@ -171,6 +191,94 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
     }
     drop(lock);
     RunResult { record, outcome }
+}
+
+/// "Shut down when done": schedule the poweroff in a minute, and say so. A backup that
+/// was stopped doesn't shut down (the caller checks).
+fn power_off_soon(job: &BackupJob<'_>, report: &dyn Fn(Event)) -> bool {
+    match desktop::schedule_poweroff() {
+        Ok(()) => {
+            report(Event::Info {
+                message: "shutting down in a minute, as asked (`shutdown -c` cancels it)".into(),
+            });
+            desktop::notify(
+                "Shutting down in a minute",
+                &format!(
+                    "The backup of \u{201c}{}\u{201d} finished. Cancel in Flux Backup, or run shutdown -c.",
+                    job.profile.name
+                ),
+                desktop::Urgency::Normal,
+            );
+            true
+        }
+        Err(e) => {
+            report(Event::Warning {
+                path: String::new(),
+                message: format!("couldn't shut down: {e}"),
+            });
+            false
+        }
+    }
+}
+
+/// With "one backup at a time" on, wait until no other backup of this scope runs. The
+/// job is already visible (and can be stopped) while it waits. `Err` if stopped meanwhile.
+fn wait_for_turn(
+    job: &BackupJob<'_>,
+    progress: &Progress,
+    report: &dyn Fn(Event),
+) -> Result<Option<jobs::Turn>, ()> {
+    if job.dry_run || !prefs::Settings::load(job.paths).one_at_a_time {
+        return Ok(None);
+    }
+    let mut told = false;
+    loop {
+        match jobs::try_turn(job.paths) {
+            Ok(Some(t)) => {
+                if told {
+                    progress.set_phase(flux_core::progress::Phase::Preparing);
+                    report(Event::Info {
+                        message: "the other backup finished; starting".into(),
+                    });
+                }
+                return Ok(Some(t));
+            }
+            Ok(None) if !told => {
+                told = true;
+                progress.set_phase(flux_core::progress::Phase::Waiting);
+                let store = flux_core::ProfileStore::new(job.paths);
+                let others: Vec<String> = jobs::running(job.paths)
+                    .into_iter()
+                    .filter(|j| j.profile != job.id.as_str())
+                    .map(|j| {
+                        flux_core::ProfileId::new(&j.profile)
+                            .ok()
+                            .and_then(|id| store.load(&id).ok())
+                            .map_or(j.profile.clone(), |p| format!("\u{201c}{}\u{201d}", p.name))
+                    })
+                    .collect();
+                report(Event::Info {
+                    message: if others.is_empty() {
+                        "waiting for another backup to finish (one backup at a time)".into()
+                    } else {
+                        format!(
+                            "waiting for {} to finish (one backup at a time)",
+                            others.join(" and ")
+                        )
+                    },
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("cannot take the turn lock, not waiting: {e}");
+                return Ok(None);
+            }
+        }
+        if progress.is_cancelled() {
+            return Err(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
 }
 
 fn status_of(outcome: &Result<BackupOutcome, RunError>) -> RunStatus {
@@ -232,7 +340,49 @@ fn quick_skip(job: &BackupJob<'_>, now: Timestamp) -> Option<String> {
     if p.schedule.skip_on_battery && power::on_battery() {
         return Some("running on battery".into());
     }
+    if job.only_if_due && p.schedule.trigger == flux_core::profile::Trigger::Calendar {
+        return calendar_not_due(job, now);
+    }
     None
+}
+
+/// For cron (`--if-due` on a calendar schedule): has one of its times come since the last
+/// check? Like systemd's `Persistent=`, a time missed while the computer was off runs once,
+/// late, when catch-up is on; when it's off, a run more than [`cron::ON_TIME`] late is
+/// skipped. A run is due at most once per time, whatever its outcome.
+fn calendar_not_due(job: &BackupJob<'_>, now: Timestamp) -> Option<String> {
+    let s = &job.profile.schedule;
+    let expr = s.on_calendar.as_deref().unwrap_or("daily");
+    let cal = match calendar::Calendar::parse(expr) {
+        Ok(c) => c,
+        Err(e) => return Some(format!("the schedule {expr:?} can't be read: {e}")),
+    };
+    let tz = jiff::tz::TimeZone::system();
+    let local = |t: Timestamp| {
+        t.to_zoned(tz.clone())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string()
+    };
+    let Some(last) = cron::last_check(job.paths, job.id) else {
+        // A schedule starts when it's set up; earlier times weren't missed.
+        cron::set_last_check(job.paths, job.id, now);
+        return Some("the schedule starts now".into());
+    };
+    match cal.next_after(last, &tz) {
+        Some(due) if due <= now => {
+            cron::set_last_check(job.paths, job.id, now);
+            let late = now.duration_since(due).unsigned_abs();
+            if !s.catch_up && late > cron::ON_TIME {
+                return Some(format!(
+                    "missed the run at {} (catching up is off)",
+                    local(due)
+                ));
+            }
+            None
+        }
+        Some(due) => Some(format!("not due until {}", local(due))),
+        None => Some(format!("the schedule {expr:?} never runs again")),
+    }
 }
 
 fn unrecorded(

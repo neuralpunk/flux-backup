@@ -85,7 +85,7 @@ function run(profile: string, s: SnapshotMeta | undefined, status: RunRecord["st
 }
 
 const profiles: ProfileSummary[] = [
-  { id: "home", sources: ["~"], scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "home", sources: ["~"], scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", size_limit: "4GB", errors: [], last_run: null, running: false },
   { id: "docs", sources: ["~/Documents"], scope: "user", name: "Documents → NAS", engine: "vault", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 4h", errors: [], last_run: null, running: false },
   { id: "photos", sources: ["~/Pictures"], scope: "user", name: "Photo library", engine: "vault", target: "/run/media/me/Archive", remote: false, schedule: "manual + when drive connected", errors: [], last_run: null, running: false },
   { id: "plain", sources: ["~/Projects"], scope: "user", name: "Projects (rsync)", engine: "rsync", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
@@ -102,7 +102,14 @@ profiles[5]!.last_run = run("system:etc", snapshots["system:etc"]!.at(-1), "comp
 /** Demo: system profiles need "authenticating" first. */
 let systemUnlocked = false;
 const FLUX_EXCLUDE = ["~/.cache/", "~/.local/share/Trash/", "node_modules/"];
-let prefs = { notify_success: false, default_exclude: null as string[] | null };
+let prefs = {
+  notify_success: false,
+  default_exclude: null as string[] | null,
+  scheduler: "systemd" as "systemd" | "cron",
+  one_at_a_time: false,
+  diff_tool: null as string | null,
+};
+const DIFF_TOOLS: [string, string][] = [["meld", "Meld"]];
 let pausedUntil: string | null | undefined =
   typeof location !== "undefined" && new URLSearchParams(location.search).get("paused") === "1" ? iso(Date.now() + 9 * 3_600_000) : undefined;
 let autostartOn = false;
@@ -111,6 +118,14 @@ const prefsView = () => ({
   default_exclude: prefs.default_exclude ?? FLUX_EXCLUDE,
   default_exclude_custom: prefs.default_exclude != null,
   pause: pausedUntil === undefined ? null : { until: pausedUntil },
+  scheduler: prefs.scheduler,
+  one_at_a_time: prefs.one_at_a_time,
+  // `?cron=0`: cron isn't installed here.
+  cron_problem: typeof location !== "undefined" && new URLSearchParams(location.search).get("cron") === "0" ? "cron isn't installed. Install it (on Fedora, the cronie package) and start it, or keep systemd timers." : null,
+  cron_running: true,
+  diff_tool: prefs.diff_tool,
+  diff_tool_used: prefs.diff_tool === "" ? null : prefs.diff_tool ? ([prefs.diff_tool, DIFF_TOOLS.find(([c]) => c === prefs.diff_tool)?.[1] ?? prefs.diff_tool] as [string, string]) : DIFF_TOOLS[0]!,
+  diff_tools: DIFF_TOOLS,
 });
 
 /** Demo: `?first=1` gives "Home folder" a single snapshot (the first-backup card). */
@@ -329,6 +344,9 @@ function spaceFor(id: string): Overview["space"] {
   return { free, size, points, per_day: filling ? -9_500_000_000 : 120_000_000, days_left: filling ? 78 : null };
 }
 
+/** Deleted since the snapshots were made, so the browser marks them. */
+const deletedNow = new Set(["/home/me/Documents/Taxes", "/home/me/Documents/passport-scan.png", "/home/me/notes-old.md"]);
+
 function listing(path: string): Listing {
   const items = tree[path] ?? [];
   const entries: DirEntry[] = items.map(([name, kind, size], i) => {
@@ -342,6 +360,7 @@ function listing(path: string): Listing {
       mode: kind === "dir" ? 0o755 : 0o644,
       link: kind === "symlink" ? "Pictures/2026/IMG_2041.jpg" : null,
       children: kind === "dir" ? (tree[full]?.length ?? 0) : null,
+      on_disk: !deletedNow.has(full),
     };
   });
   return { path, entries };
@@ -355,7 +374,7 @@ function fullProfile(p: ProfileSummary): Profile {
     target: p.remote
       ? { kind: "ssh", host: "nas", user: "me", port: null, path: "/srv/flux", identity_file: "/home/me/.ssh/flux_backup_ed25519", bandwidth_limit: null }
       : { kind: "local", path: p.target, fs_uuid: "7A1C-22F0" },
-    sources: { paths: ["/home/me"], exclude: ["~/.cache/", "node_modules/", "*.tmp"], exclude_larger_than: null, exclude_caches: true, exclude_if_present: [".nobackup"], one_file_system: false },
+    sources: { paths: ["/home/me"], exclude: ["~/.cache/", "node_modules/", "*.tmp"], exclude_larger_than: p.size_limit ?? null, exclude_caches: true, exclude_if_present: [".nobackup"], one_file_system: false },
     retention: { enabled: true, keep_last: 1, keep_within: "1day", keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 12, keep_yearly: 5, max_age: null, keep_named: true, min_free_space: null },
     schedule: p.schedule.startsWith("every")
       ? { trigger: "interval", every: "4h", catch_up: true, skip_on_battery: true, on_connect: false }
@@ -439,7 +458,11 @@ function emit(event: string, payload: unknown) {
   listeners.get(event)?.forEach((h) => h(payload));
 }
 
-function simulateBackup(id: string) {
+/** Demo: backups that shut the "computer" down when done. */
+const shutdownAfter: Record<string, boolean> = {};
+
+function simulateBackup(id: string, shutdown = false) {
+  shutdownAfter[id] = shutdown;
   const p = profiles.find((x) => x.id === id)!;
   p.running = true;
   const total = 1_840_000_000;
@@ -466,6 +489,7 @@ function simulateBackup(id: string) {
         bytes_per_sec: done / Math.max(1, secs - 2),
         eta_secs: phase === "transferring" ? ((total - done) / total) * 10 : null,
       },
+      shutdown_after: shutdownAfter[id] ?? false,
     });
     if (tick === 21) send({ type: "event", event: { event: "warning", path: "/home/me/.cache/locked.db", message: "Permission denied (os error 13)" } });
     if (tick >= 52) {
@@ -474,7 +498,7 @@ function simulateBackup(id: string) {
       snapshots[id]!.push(s);
       p.running = false;
       p.last_run = run(id, s, "completed");
-      send({ type: "finished", status: "completed", error: null });
+      send({ type: "finished", status: "completed", error: null, shutdown: shutdownAfter[id] ?? false });
       emit("flux://changed", { profile: id });
     }
   }, 200);
@@ -570,15 +594,26 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return null;
     case "backup_now":
       if (profiles.find((x) => x.id === id)?.running) throw new ApiError("busy", "A backup is already running.");
-      simulateBackup(id);
+      if (id === "photos")
+        throw new ApiError("not_connected", "Archive isn't connected: nothing is mounted at /run/media/me/Archive. Plug in the drive, then back up again.");
+      simulateBackup(id, !!args.shutdown);
+      return { running: true };
+    case "shutdown_after":
+      if (!profiles.find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
+      shutdownAfter[id] = !!args.on;
+      return null;
+    case "cancel_shutdown":
       return null;
     case "cancel":
+      if (!profiles.find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
       return null;
     case "restore":
       for (let i = 1; i <= 8; i++) {
         await delay(150);
         emit("flux://restore", { profile: id, progress: { phase: "transferring", scanned: 0, entries_total: 120, entries_done: i * 15, bytes_total: 18_402_113, bytes_done: (18_402_113 * i) / 8, warnings: 0, elapsed_secs: i * 0.15, bytes_per_sec: 9_000_000, eta_secs: (8 - i) * 0.15 } });
       }
+      // Back in place: no longer missing.
+      if (args.to == null) for (const p of args.paths as string[]) for (const d of [...deletedNow]) if (d === p || d.startsWith(p + "/")) deletedNow.delete(d);
       return { restored: (args.paths as string[]).length * 12, bytes: 18_402_113, skipped_identical: 3, moved_aside: [], errors: [], would_write: [] };
     case "get_profile":
       return { id, profile: structuredClone(stored[id]!), issues: validate(stored[id]!) };
@@ -592,6 +627,26 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         p.options.notify = false;
       }
       return { id: "", profile: p, issues: [] };
+    }
+    case "backintime_profiles": {
+      // Demo: Back In Time is set up, with two profiles (?bit=0 hides them).
+      if (typeof location !== "undefined" && new URLSearchParams(location.search).get("bit") === "0") return [];
+      const base = fullProfile({ id: "", scope: "user", name: "Main profile", engine: "rsync", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false });
+      base.target = { kind: "local", path: "/run/media/me/BackupDisk", fs_uuid: null };
+      base.sources.paths = ["/home/me/Documents", "/home/me/Pictures", "/home/me/Music", "/home/me/.config"];
+      base.sources.exclude = ["**/.cache/*", "*.swp", "**/.local/share/[Tt]rash*", "\\#*#", "node_modules/"];
+      base.schedule = { ...base.schedule, trigger: "calendar", on_calendar: "*-*-* 07:00:00" };
+      base.retention = { ...base.retention, keep_within: "2days", keep_daily: 14, keep_weekly: 8, keep_monthly: 12, keep_yearly: 0, max_age: "2years" };
+      const second = structuredClone(base);
+      second.name = "Work laptop";
+      second.engine = "vault";
+      second.vault = fullProfile({ id: "", scope: "user", name: "", engine: "vault", target: "", remote: true, schedule: "daily", errors: [], last_run: null, running: false }).vault;
+      second.sources.paths = ["/home/me/Projects"];
+      second.target = { kind: "ssh", host: "nas", user: "me", port: null, path: "/srv/bit", identity_file: null, ssh_options: [], bandwidth_limit: null };
+      return [
+        { number: 1, name: "Main profile", mode: "local", profile: base, notes: ["Some exclusions are written differently in Flux, with the same meaning: .cache/* → **/.cache/*, #*# → \\#*#."], snapshots_dir: "/run/media/me/BackupDisk/backintime/laptop/me/1", snapshot_count: 41, latest: "20261108-070002-511", connected: true },
+        { number: 2, name: "Work laptop", mode: "ssh_encfs", profile: second, notes: ["Back In Time encrypted these backups with EncFS, which Flux doesn't use. They'll be an encrypted Vault instead: choose its password on the Protection step."], snapshots_dir: null, snapshot_count: 0, latest: null, connected: true },
+      ];
     }
     case "validate_profile":
       return validate(args.profile as Profile);
@@ -633,6 +688,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return [
         { mount_point: "/run/media/me/BackupDisk", label: "BackupDisk", fs_uuid: "7A1C-22F0", fs_type: "ext4", free: 742_000_000_000, total: 1_000_000_000_000 },
         { mount_point: "/run/media/me/Archive", label: "Archive", fs_uuid: "b3e1c0de-4f11-4a5e-9d2a-0c1d2e3f4a5b", fs_type: "btrfs", free: 3_100_000_000_000, total: 4_000_000_000_000 },
+        { mount_point: "/run/media/me/USB STICK", label: "USB STICK", fs_uuid: "5E2D-91AA", fs_type: "vfat", free: 1_300_000_000, total: 32_000_000_000 },
       ];
     case "test_target":
       await delay(600);
@@ -655,7 +711,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return {
         old: args.old,
         new: args.new ?? "now",
-        summary: { added: 3, removed: 1, modified: 4, type_changed: 0, bytes_delta: 2_340_112 },
+        summary: { added: 3, removed: 1, modified: 6, type_changed: 0, bytes_delta: 2_340_112 },
         truncated: false,
         changes: [
           { path: "/home/me/Documents/Thesis/thesis.tex", change: "modified", kind: "file", fields: ["content", "mtime"], old_size: 210_002, new_size: 214_881 },
@@ -666,7 +722,11 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
           { path: "/home/me/Pictures/2026/IMG_2042.jpg", change: "added", kind: "file", fields: [], old_size: null, new_size: 3_987_120 },
           { path: "/home/me/notes-old.md", change: "removed", kind: "file", fields: [], old_size: 7_441_870, new_size: null },
           { path: "/home/me/.bashrc", change: "modified", kind: "file", fields: ["mtime", "mode"], old_size: 3_771, new_size: 3_771 },
+          { path: "/home/me/Documents", change: "modified", kind: "dir", fields: ["mtime"], old_size: 0, new_size: 0 },
+          { path: "/home/me/Pictures/2026", change: "modified", kind: "dir", fields: ["mtime"], old_size: 0, new_size: 0 },
         ],
+        left_out_by_size: args.new ? 0 : 2,
+        size_limit: args.new ? null : "4GB",
       };
     case "runs": {
       const list = [...(snapshots[id] ?? [])].reverse().map((x, i) => (i === 2 ? { ...run(id, x, "unchanged"), stats: null } : run(id, x, x.status === "complete" ? "completed" : "completed_with_errors")));
@@ -714,12 +774,12 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
           if (!name.toLowerCase().includes(q)) continue;
           const path = dir === "/" ? `/${name}` : `${dir}/${name}`;
           const versions = kind === "dir" ? 1 : 1 + (name.length % 4);
-          hits.push({ path, kind, versions, snapshots: snaps.length, latest: snaps.at(-1)!.id, latest_size: size, latest_mtime: Math.floor((now - 3 * DAY) / 1000) });
+          hits.push({ path, kind, versions, snapshots: snaps.length, latest: snaps.at(-1)!.id, latest_size: size, latest_mtime: Math.floor((now - 3 * DAY) / 1000), on_disk: !deletedNow.has(path) });
         }
       }
       // A file that was deleted a while ago: only in older snapshots.
       if ("notes-old.md".includes(q) && snaps.length > 6) {
-        hits.push({ path: "/home/me/notes-old.md", kind: "file", versions: 2, snapshots: snaps.length - 5, latest: snaps.at(-6)!.id, latest_size: 7_441_870, latest_mtime: Math.floor((now - 9 * DAY) / 1000) });
+        hits.push({ path: "/home/me/notes-old.md", kind: "file", versions: 2, snapshots: snaps.length - 5, latest: snaps.at(-6)!.id, latest_size: 7_441_870, latest_mtime: Math.floor((now - 9 * DAY) / 1000), on_disk: !deletedNow.has("/home/me/notes-old.md") });
       }
       return { hits, total: hits.length, snapshots: snaps.length };
     }
@@ -737,8 +797,40 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     }
     case "preferences":
       return prefsView();
+    case "set_diff_tool":
+      prefs = { ...prefs, diff_tool: (args.tool as string | null) ?? null };
+      return prefsView();
+    case "open_diff_tool":
+      return null;
+    case "diff_file": {
+      await delay(300);
+      const lines = [
+        { kind: "skip", old: null, new: null, text: "", count: 12 },
+        { kind: "same", old: 13, new: 13, text: "## Groceries", count: 1 },
+        { kind: "same", old: 14, new: 14, text: "- oat milk", count: 1 },
+        { kind: "removed", old: 15, new: null, text: "- bread (the seeded one)", count: 1 },
+        { kind: "added", old: null, new: 15, text: "- bread", count: 1 },
+        { kind: "added", old: null, new: 16, text: "- coffee beans, 2 bags", count: 1 },
+        { kind: "same", old: 16, new: 17, text: "- apples", count: 1 },
+        { kind: "same", old: 17, new: 18, text: "", count: 1 },
+        { kind: "skip", old: null, new: null, text: "", count: 30 },
+        { kind: "same", old: 48, new: 49, text: "## Call back", count: 1 },
+        { kind: "removed", old: 49, new: null, text: "- the dentist (Tuesday)", count: 1 },
+        { kind: "same", old: 50, new: 50, text: "- Sam, about the trip", count: 1 },
+      ];
+      return { old_file: "/tmp/a", new_file: "/tmp/b", old_size: 1820, new_size: 1838, identical: args.old === args.new, binary: false, too_large: false, added: 2, removed: 2, lines: args.old === args.new ? [] : lines, truncated: 0 };
+    }
     case "save_preferences":
-      prefs = { notify_success: args.notifySuccess as boolean, default_exclude: (args.defaultExclude as string[] | null) ?? null };
+      prefs = {
+        ...prefs,
+        notify_success: args.notifySuccess as boolean,
+        default_exclude: (args.defaultExclude as string[] | null) ?? null,
+        one_at_a_time: (args.oneAtATime as boolean | undefined) ?? prefs.one_at_a_time,
+      };
+      return prefsView();
+    case "set_scheduler":
+      await delay(400);
+      prefs = { ...prefs, scheduler: args.scheduler as "systemd" | "cron" };
       return prefsView();
     case "set_pause": {
       const k = args.pause as string;
@@ -773,6 +865,8 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         differ_paths: differ,
         new_paths: ["/home/me/Pictures/2026/IMG_2041.jpg"],
         unsafe_paths: 0,
+        remove: args.exact ? 2 : 0,
+        remove_paths: args.exact ? ["/home/me/Documents/draft-copy.odt", "/home/me/Documents/scratch"] : [],
       };
     }
     case "diagnostics":

@@ -229,16 +229,21 @@ commands! {
         => Call::Unlock { id, password, create: create.unwrap_or(false) };
     save_key_file(id: String) => Call::SaveKeyFile { id };
     set_password(id: String, password: String) => Call::SetPassword { id, password };
-    backup_now(id: String) => Call::BackupNow { id };
+    backup_now(id: String, shutdown: Option<bool>) => Call::BackupNow { id, shutdown: shutdown.unwrap_or(false) };
+    shutdown_after(id: String, on: bool) => Call::ShutdownAfter { id, on };
+    cancel_shutdown() => Call::CancelShutdown;
+    diff_file(id: String, path: String, old: String, new: Option<String>) => Call::DiffFile { id, path, old, new };
+    set_diff_tool(tool: Option<String>) => Call::SetDiffTool { tool };
     cancel(id: String) => Call::Cancel { id };
-    restore(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool)
-        => Call::Restore { id, snapshot, paths, to, overwrite };
+    restore(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
+        => Call::Restore { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
     get_profile(id: String) => Call::GetProfile { id };
     save_profile(id: String, profile: Value, create: bool) => Call::SaveProfile { id, profile, create };
     delete_profile(id: String) => Call::DeleteProfile { id };
     retention_preview(id: String, retention: Value) => Call::RetentionPreview { id, retention };
     exclude_suggestions(sources: Vec<String>) => Call::ExcludeSuggestions { sources };
     drives() => Call::Drives;
+    backintime_profiles() => Call::BackInTime;
     update_snapshot(id: String, snapshot: String, name: Option<String>, set_name: bool, pinned: Option<bool>)
         => Call::UpdateSnapshot { id, snapshot, name, set_name, pinned };
     delete_snapshot(id: String, snapshot: String) => Call::DeleteSnapshot { id, snapshot };
@@ -253,12 +258,46 @@ commands! {
     diagnostics(id: String) => Call::Diagnostics { id };
     find(id: String, query: String) => Call::Find { id, query };
     preferences() => Call::Preferences;
-    save_preferences(notify_success: bool, default_exclude: Option<Vec<String>>)
-        => Call::SavePreferences { notify_success, default_exclude };
+    save_preferences(notify_success: bool, default_exclude: Option<Vec<String>>, one_at_a_time: Option<bool>)
+        => Call::SavePreferences { notify_success, default_exclude, one_at_a_time };
     set_pause(pause: String) => Call::SetPause { pause };
+    set_scheduler(scheduler: String) => Call::SetScheduler { scheduler };
     versions(id: String, path: String) => Call::Versions { id, path };
-    restore_preview(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool)
-        => Call::RestorePreview { id, snapshot, paths, to, overwrite };
+    restore_preview(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
+        => Call::RestorePreview { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
+}
+
+/// Open two files in the comparison program chosen in the preferences (the program comes
+/// from the settings, never from the page). Started by the app, as the user.
+#[tauri::command]
+pub async fn open_diff_tool(state: St<'_>, left: String, right: String) -> Result<()> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let tool = b.route(Call::DiffTool, false)?;
+        let cmd = tool
+            .get(0)
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| {
+                ApiError::new(
+                    "error",
+                    "No comparison program is set up; choose one in Preferences.",
+                )
+            })?
+            .to_owned();
+        let mut parts = cmd.split_whitespace();
+        let program = parts.next().unwrap_or_default();
+        std::process::Command::new(program)
+            .args(parts)
+            .arg(&left)
+            .arg(&right)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| ApiError::new("error", format!("couldn't start {program}: {e}")))?;
+        Ok(())
+    })
+    .await
 }
 
 /// Copy a file out of a snapshot (read-only, in a private temporary folder) and open it

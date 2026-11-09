@@ -9,9 +9,23 @@ use serde::{Deserialize, Serialize};
 
 use flux_core::profile::{PasswordSource, Retention, Target, has_errors};
 use flux_core::{Issue, Profile, ProfileId, ProfileStore, Scope, Severity, sys, target_check};
-use flux_runner::schedule::{self, Systemd};
+use flux_runner::schedule;
 
 use crate::{ApiError, Result, Service};
+
+/// Back In Time's profiles (from your `~/.config/backintime/config`), each as a new Flux
+/// profile to start from. None for system profiles: Back In Time's root setup is its own.
+pub fn backintime_impl(state: &Service) -> Result<Vec<flux_compat::backintime::BitProfile>> {
+    if state.scope() == Scope::System {
+        return Ok(Vec::new());
+    }
+    let Some(home) = sys::home_dir() else {
+        return Ok(Vec::new());
+    };
+    let base = new_profile_impl(state)?.profile;
+    flux_compat::backintime::read(&home.join(flux_compat::backintime::CONFIG), &base)
+        .map_err(|e| ApiError::new("error", format!("reading Back In Time's settings: {e}")))
+}
 
 #[derive(Serialize)]
 pub struct Editable {
@@ -30,7 +44,28 @@ pub fn get_profile_impl(state: &Service, id: String) -> Result<Editable> {
 }
 
 fn validate(state: &Service, p: &Profile) -> Vec<Issue> {
-    p.validate_in(state.scope())
+    let mut issues = p.validate_in(state.scope());
+    // Not an error (a drive that's unplugged today is fine), but say so before the first
+    // backup tries.
+    if let Some(why) = schedule::Scheduler::new(&state.paths).unsupported(p) {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            field: "schedule.on_connect".into(),
+            message: why,
+        });
+    }
+    if let Some((why, drive)) = crate::views::target_unreachable(p) {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            field: "target.connected".into(),
+            message: if drive {
+                format!("{why} Backups can't run until it's plugged in.")
+            } else {
+                why
+            },
+        });
+    }
+    issues
 }
 
 /// A starting point for a new profile: your home folder, or for system profiles the
@@ -148,7 +183,7 @@ pub fn save_profile_impl(
 /// Delete a profile and its timer. Backups already made stay where they are.
 pub fn delete_profile_impl(state: &Service, id: String) -> Result<()> {
     let id = ProfileId::new(id).map_err(|e| ApiError::new("error", e.to_string()))?;
-    let _ = schedule::remove(&Systemd::new(&state.paths), &id);
+    let _ = schedule::Scheduler::new(&state.paths).remove(&id);
     ProfileStore::new(&state.paths).delete(&id)?;
     flux_runner::index::remove(&state.paths, &id);
     state.forget_cached(&id);
@@ -554,13 +589,13 @@ pub fn test_target_impl(state: &Service, profile: serde_json::Value) -> Result<T
 /// Install, update or remove the profile's systemd timer to match its schedule. Returns
 /// what happened, for people (`None`: no timer involved).
 pub fn apply_timer(state: &Service, id: &ProfileId, p: &Profile) -> Option<String> {
-    let sd = Systemd::new(&state.paths);
+    let sd = schedule::Scheduler::new(&state.paths);
     let needs_timer =
         p.schedule.trigger != flux_core::profile::Trigger::Manual || p.schedule.on_connect;
-    if !needs_timer && !schedule::installed_ids(&sd).contains(id) {
+    if !needs_timer && !sd.installed_ids().contains(id) {
         return None;
     }
-    Some(match schedule::apply(&sd, id, p, &state.unit_env()) {
+    Some(match sd.apply(id, p, &state.unit_env()) {
         Ok(a) if a.changed() => format!("Timer updated: {}", schedule::summary(p)),
         Ok(_) => "Timer unchanged".into(),
         Err(e) => format!("Saved, but the timer couldn't be updated: {e}"),

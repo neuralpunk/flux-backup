@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import SpaceCard from "./SpaceCard.svelte";
   import HistoryStrip from "./HistoryStrip.svelte";
+  import SizeLimitNotice from "./SizeLimitNotice.svelte";
   import { nextRun, protection, type Tone } from "../protection";
 
   let { id, onLocked }: { id: string; onLocked: (retry: () => void) => void } = $props();
@@ -209,7 +210,7 @@
       <section>
         <div class="flex items-baseline justify-between gap-4 px-0.5 pb-2">
           <h2 class="text-[13px] font-semibold text-fg-2">Last 30 days</h2>
-          <span class="text-[12.5px] text-fg-muted">One mark a day · bigger marks copied more</span>
+          <span class="text-[12.5px] text-fg-muted">One bar a day · taller bars copied more</span>
         </div>
         <div class="card px-4 pt-3.5 pb-2.5"><HistoryStrip days={status.days} fill /></div>
       </section>
@@ -234,6 +235,8 @@
         </div>
       </section>
     {/if}
+
+    <SizeLimitNotice {id} onlyTiny />
 
     {#if data.repo_error || (data.health ?? []).length > 1}
       <div class="rows">
@@ -264,11 +267,13 @@
         {#each data.recent_runs.slice(0, 5) as r (r.run_id + r.started)}
           <li class="row min-h-11 py-2 text-sm" title={r.error ?? `${dateTime(r.started)} · ${r.trigger}`}>
             <span class="size-2 shrink-0 rounded-full {dot[r.status]}" aria-hidden="true"></span>
-            <span class="w-44 shrink-0 font-medium">{runStatusLabel[r.status]}</span>
-            <span class="num min-w-0 flex-1 truncate {r.error ? 'text-danger' : 'text-fg-2'}">
-              {#if r.error}{r.error}{:else if r.stats}{bytes(storedBytes ? r.stats.stored_bytes : r.stats.copied_bytes)} {storedBytes ? "stored" : "copied"}{/if}
-            </span>
-            <span class="num shrink-0 text-[13px] text-fg-muted">{ago(r.started)}</span>
+            <span class="shrink-0 font-medium">{runStatusLabel[r.status]}</span>
+            <!-- An error takes the middle; otherwise the size sits by the time, on the right. -->
+            <span class="num min-w-0 flex-1 truncate text-danger">{r.error ?? ""}</span>
+            {#if !r.error && r.stats}
+              <span class="num shrink-0 text-fg-2">{bytes(storedBytes ? r.stats.stored_bytes : r.stats.copied_bytes)} {storedBytes ? "stored" : "copied"}</span>
+            {/if}
+            <span class="num w-24 shrink-0 text-right text-[13px] text-fg-muted">{ago(r.started)}</span>
           </li>
         {:else}
           <li class="row text-sm text-fg-muted">No backups yet. They'll appear here.</li>
@@ -292,7 +297,7 @@
       </button>
     {/if}
 
-    {#if data.space && data.space.size && data.space.per_day != null}
+    {#if data.space && data.space.size}
       <SpaceCard space={data.space} target={data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target} />
     {/if}
 

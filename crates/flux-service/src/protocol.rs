@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::watch::Notice;
-use crate::{ApiError, Result, Service, actions, edit, extras, find, prefs, space, views};
+use crate::{
+    ApiError, Result, Service, actions, edit, extras, filediff, find, prefs, space, views,
+};
 
 /// Bumped on incompatible changes; the app refuses a helper that speaks another version.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -67,6 +69,30 @@ pub enum Call {
     },
     BackupNow {
         id: String,
+        /// Shut the computer down a minute after it ends.
+        #[serde(default)]
+        shutdown: bool,
+    },
+    /// Shut the computer down when this running backup ends (or no longer).
+    ShutdownAfter {
+        id: String,
+        on: bool,
+    },
+    /// Cancel a shutdown scheduled after a backup.
+    CancelShutdown,
+    /// Compare `path` in snapshot `old` with `new` (a snapshot, or `None`: the file now).
+    DiffFile {
+        id: String,
+        path: String,
+        old: String,
+        new: Option<String>,
+    },
+    /// The comparison program to offer, `[command, name]` or null.
+    DiffTool,
+    /// Choose the comparison program: a command, `""` for none, or null to pick the first
+    /// one installed.
+    SetDiffTool {
+        tool: Option<String>,
     },
     Cancel {
         id: String,
@@ -77,11 +103,16 @@ pub enum Call {
         paths: Vec<String>,
         to: Option<String>,
         overwrite: bool,
+        /// Also remove what the restored folders hold that the snapshot doesn't.
+        #[serde(default)]
+        exact: bool,
     },
     GetProfile {
         id: String,
     },
     NewProfile,
+    /// Back In Time's profiles on this computer, as new Flux profiles to start from.
+    BackInTime,
     ValidateProfile {
         profile: Value,
     },
@@ -179,6 +210,8 @@ pub enum Call {
         paths: Vec<String>,
         to: Option<String>,
         overwrite: bool,
+        #[serde(default)]
+        exact: bool,
     },
     /// What a profile being edited would back up (files, bytes).
     Estimate {
@@ -188,10 +221,17 @@ pub enum Call {
     SavePreferences {
         notify_success: bool,
         default_exclude: Option<Vec<String>>,
+        /// `None`: unchanged.
+        #[serde(default)]
+        one_at_a_time: Option<bool>,
     },
     /// `hour`, `tomorrow`, `resumed` (until resumed) or `off`.
     SetPause {
         pause: String,
+    },
+    /// `systemd` or `cron`: what runs scheduled backups.
+    SetScheduler {
+        scheduler: String,
     },
 }
 
@@ -207,7 +247,9 @@ impl Call {
             | Unlock { id, .. }
             | SetPassword { id, .. }
             | SaveKeyFile { id }
-            | BackupNow { id }
+            | BackupNow { id, .. }
+            | ShutdownAfter { id, .. }
+            | DiffFile { id, .. }
             | Cancel { id }
             | Restore { id, .. }
             | GetProfile { id }
@@ -231,6 +273,7 @@ impl Call {
             | RestorePreview { id, .. } => Some(id),
             Profiles
             | NewProfile
+            | BackInTime
             | ValidateProfile { .. }
             | SuggestId { .. }
             | ExcludeSuggestions { .. }
@@ -242,7 +285,11 @@ impl Call {
             | Estimate { .. }
             | Preferences
             | SavePreferences { .. }
-            | SetPause { .. } => None,
+            | SetPause { .. }
+            | SetScheduler { .. }
+            | CancelShutdown
+            | DiffTool
+            | SetDiffTool { .. } => None,
         }
     }
 
@@ -258,10 +305,16 @@ impl Call {
             SetPassword { .. } => "set_password",
             SaveKeyFile { .. } => "save_key_file",
             BackupNow { .. } => "backup_now",
+            ShutdownAfter { .. } => "shutdown_after",
+            CancelShutdown => "cancel_shutdown",
+            DiffFile { .. } => "diff_file",
+            DiffTool => "diff_tool",
+            SetDiffTool { .. } => "set_diff_tool",
             Cancel { .. } => "cancel",
             Restore { .. } => "restore",
             GetProfile { .. } => "get_profile",
             NewProfile => "new_profile",
+            BackInTime => "backintime_profiles",
             ValidateProfile { .. } => "validate_profile",
             SaveProfile { .. } => "save_profile",
             DeleteProfile { .. } => "delete_profile",
@@ -292,6 +345,7 @@ impl Call {
             Preferences => "preferences",
             SavePreferences { .. } => "save_preferences",
             SetPause { .. } => "set_pause",
+            SetScheduler { .. } => "set_scheduler",
         }
     }
 }
@@ -338,7 +392,14 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         } => json(views::unlock_impl(s, id, password, create)?),
         Call::SetPassword { id, password } => json(views::set_password_impl(s, id, password)?),
         Call::SaveKeyFile { id } => json(edit::save_key_file_impl(s, id)?),
-        Call::BackupNow { id } => json(views::backup_now_impl(s, id)?),
+        Call::BackupNow { id, shutdown } => json(views::start_backup(s, id, shutdown)?),
+        Call::ShutdownAfter { id, on } => json(views::shutdown_after_impl(s, id, on)?),
+        Call::CancelShutdown => json(views::cancel_shutdown_impl()?),
+        Call::DiffFile { id, path, old, new } => {
+            json(filediff::diff_file_impl(s, id, path, old, new)?)
+        }
+        Call::DiffTool => json(filediff::diff_tool(s)),
+        Call::SetDiffTool { tool } => json(prefs::set_diff_tool_impl(s, tool)?),
         Call::Cancel { id } => json(views::cancel_impl(s, id)?),
         Call::Restore {
             id,
@@ -346,6 +407,7 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             paths,
             to,
             overwrite,
+            exact,
         } => {
             let profile = id.clone();
             let progress = move |progress| {
@@ -355,11 +417,12 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
                 })
             };
             json(actions::restore_impl(
-                s, id, snapshot, paths, to, overwrite, &progress,
+                s, id, snapshot, paths, to, overwrite, exact, &progress,
             )?)
         }
         Call::GetProfile { id } => json(edit::get_profile_impl(s, id)?),
         Call::NewProfile => json(edit::new_profile_impl(s)?),
+        Call::BackInTime => json(edit::backintime_impl(s)?),
         Call::ValidateProfile { profile } => json(edit::validate_profile_impl(s, profile)?),
         Call::SaveProfile {
             id,
@@ -409,20 +472,24 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             paths,
             to,
             overwrite,
+            exact,
         } => json(find::restore_preview_impl(
-            s, id, snapshot, paths, to, overwrite,
+            s, id, snapshot, paths, to, overwrite, exact,
         )?),
         Call::Estimate { profile } => json(space::estimate_impl(s, profile)?),
         Call::Preferences => json(prefs::preferences_impl(s)?),
         Call::SavePreferences {
             notify_success,
             default_exclude,
+            one_at_a_time,
         } => json(prefs::save_preferences_impl(
             s,
             notify_success,
             default_exclude,
+            one_at_a_time,
         )?),
         Call::SetPause { pause } => json(prefs::set_pause_impl(s, pause)?),
+        Call::SetScheduler { scheduler } => json(prefs::set_scheduler_impl(s, scheduler)?),
     }
 }
 
@@ -477,6 +544,7 @@ mod tests {
             paths: vec![],
             to: None,
             overwrite: false,
+            exact: false,
         };
         *c.profile_id_mut().unwrap() = "x".into();
         assert!(matches!(c, Call::Restore { ref id, .. } if id == "x"));

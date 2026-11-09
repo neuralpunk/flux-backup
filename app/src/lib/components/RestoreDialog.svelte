@@ -1,16 +1,35 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { api, listen, pickFolder } from "../api";
+  import { sizeLabel } from "../size";
   import { app } from "../state.svelte";
   import { bytes, count, dateTime } from "../format";
   import type { ProgressSnapshot, RestoreOutcome, RestorePreview, SnapshotMeta } from "../types";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
-  let { profile, snapshot, paths, onclose }: { profile: string; snapshot: SnapshotMeta; paths: string[]; onclose: () => void } = $props();
+  let {
+    profile,
+    snapshot,
+    paths,
+    missing = false,
+    onclose,
+  }: {
+    profile: string;
+    snapshot: SnapshotMeta;
+    paths: string[];
+    /** Everything picked is gone from disk: putting it back can't touch anything. */
+    missing?: boolean;
+    onclose: () => void;
+  } = $props();
 
-  let where = $state<"original" | "elsewhere">("elsewhere");
+  // Bringing back something deleted: its own place is the natural (and safe) choice.
+  // Otherwise another folder is safest.
+  let where = $state<"original" | "elsewhere">(untrack(() => (missing ? "original" : "elsewhere")));
   let folder = $state<string | null>(null);
   let overwrite = $state(false);
+  /** Also remove what's in the folders now but not in the snapshot. */
+  let exact = $state(false);
   let busy = $state(false);
   let result = $state<RestoreOutcome | null>(null);
   let error = $state<string | null>(null);
@@ -30,12 +49,13 @@
   $effect(() => {
     const to = where === "elsewhere" ? folder : null;
     const ow = where === "original" && overwrite;
+    const ex = where === "original" && exact;
     preview = null;
     previewError = null;
     if (where === "elsewhere" && !folder) return;
     let current = true;
     const t = setTimeout(() => {
-      api.restorePreview(profile, snapshot.id, paths, to, ow).then(
+      api.restorePreview(profile, snapshot.id, paths, to, ow, ex).then(
         (p) => current && (preview = p),
         (e) => current && (previewError = (e as Error).message),
       );
@@ -45,8 +65,15 @@
       clearTimeout(t);
     };
   });
-  const nothingToDo = $derived(preview != null && preview.new === 0 && preview.differ === 0 && preview.new_folders === 0);
+  const removes = $derived(where === "original" && exact ? (preview?.remove ?? 0) : 0);
+  const nothingToDo = $derived(preview != null && preview.new === 0 && preview.differ === 0 && preview.new_folders === 0 && removes === 0);
+  /** The snapshot holds folders here but not one file: say so before restoring. */
+  const onlyFolders = $derived(preview != null && preview.new === 0 && preview.differ === 0 && preview.identical === 0 && preview.new_folders > 0);
+  const sizeLimit = $derived(app.profiles.find((p) => p.id === profile)?.size_limit ?? null);
   const replaces = $derived(where === "original" && overwrite && (preview?.differ ?? 0) > 0);
+  /** Something on disk is deleted, not kept: replaced, or removed with nothing kept. */
+  const destructive = $derived(replaces || (removes > 0 && preview?.keep_existing === false));
+  const removeWord = (n: number) => `${count(n)} ${n === 1 ? "item" : "items"}`;
 
   async function choose() {
     const f = await pickFolder("Restore into…");
@@ -57,12 +84,14 @@
     busy = true;
     error = null;
     try {
-      result = await api.restore(profile, snapshot.id, paths, where === "elsewhere" ? folder : null, where === "original" && overwrite);
+      result = await api.restore(profile, snapshot.id, paths, where === "elsewhere" ? folder : null, where === "original" && overwrite, where === "original" && exact);
       if (result.errors.length === 0) app.toast("ok", `Restored ${count(result.restored)} items.`);
     } catch (e) {
       error = (e as Error).message;
     } finally {
       busy = false;
+      // Even a failed restore may have written some files: whatever shows them, check again.
+      app.diskRevision++;
     }
   }
 </script>
@@ -76,7 +105,9 @@
         </div>
         <div>
           <div class="font-medium">{result.errors.length ? "Restored with problems" : "Restored"}</div>
-          <div class="tabular text-sm text-fg-2">{count(result.restored)} items · {bytes(result.bytes)} · {count(result.skipped_identical)} already identical</div>
+          <div class="tabular text-sm text-fg-2">
+            {count(result.restored)} items · {bytes(result.bytes)} · {count(result.skipped_identical)} already identical{#if result.removed} · {removeWord(result.removed)} that weren't in the snapshot removed{/if}
+          </div>
         </div>
       </div>
       {#if result.moved_aside.length}
@@ -131,6 +162,13 @@
                 <input type="checkbox" class="accent-[var(--c-danger)]" bind:checked={overwrite} />
                 Replace my current versions instead of keeping them
               </label>
+              <label class="mt-1.5 flex items-start gap-2 text-sm">
+                <input type="checkbox" class="mt-[3px] accent-[var(--c-danger)]" bind:checked={exact} />
+                <span>
+                  Make the folders exactly as they were: remove what's been added since
+                  <span class="block text-[12.5px] text-fg-muted">What this backup leaves out (excluded files, the size limit, caches) is never removed.</span>
+                </span>
+              </label>
             {/if}
           </span>
         </label>
@@ -158,7 +196,34 @@
                 </li>
               {/if}
               {#if preview.identical}<li class="flex items-center gap-2"><Icon name="check" size={13} class="text-fg-muted" /> {count(preview.identical)} already identical, left alone</li>{/if}
+              {#if removes}
+                <li class="flex items-start gap-2 {preview.keep_existing ? '' : 'text-danger'}">
+                  <Icon name={preview.keep_existing ? "trash" : "alert"} size={13} class="mt-1 shrink-0 {preview.keep_existing ? 'text-warning' : ''}" />
+                  <span>
+                    {removeWord(removes)} that {removes === 1 ? "isn't" : "aren't"} in this snapshot {removes === 1 ? "is" : "are"}
+                    {preview.keep_existing ? "moved out of the way, renamed to “name.flux-…”." : "deleted."}
+                  </span>
+                </li>
+              {/if}
             </ul>
+            {#if removes && preview.remove_paths?.length}
+              <details class="mt-2" open>
+                <summary class="cursor-pointer text-[13px] text-fg-muted select-none">Show what will be removed</summary>
+                <ul class="mt-1.5 max-h-32 overflow-y-auto font-mono text-xs text-fg-2">
+                  {#each preview.remove_paths as p (p)}<li class="truncate" title={p}>{p}</li>{/each}
+                  {#if removes > preview.remove_paths.length}<li class="text-fg-muted">…and {count(removes - preview.remove_paths.length)} more</li>{/if}
+                </ul>
+              </details>
+            {/if}
+            {#if preview.new_paths.length}
+              <details class="mt-2">
+                <summary class="cursor-pointer text-[13px] text-fg-muted select-none">Show what will be added</summary>
+                <ul class="mt-1.5 max-h-32 overflow-y-auto font-mono text-xs text-fg-2">
+                  {#each preview.new_paths as p (p)}<li class="truncate" title={p}>{p}</li>{/each}
+                  {#if preview.new > preview.new_paths.length}<li class="text-fg-muted">…and {count(preview.new - preview.new_paths.length)} more</li>{/if}
+                </ul>
+              </details>
+            {/if}
             {#if preview.differ_paths.length}
               <details class="mt-2">
                 <summary class="cursor-pointer text-[13px] text-fg-muted select-none">Show the {preview.differ === 1 ? "file" : `${count(preview.differ)} files`} that differ</summary>
@@ -169,6 +234,18 @@
               </details>
             {/if}
           {/if}
+        </div>
+      {/if}
+
+      {#if onlyFolders}
+        <div class="flex gap-3 rounded-card bg-warning/10 px-4 py-3 text-sm" role="alert">
+          <Icon name="alert" size={15} class="mt-0.5 shrink-0 text-warning" />
+          <span>
+            <span class="font-medium">This snapshot has no files here, only empty folders.</span>
+            <span class="text-fg-2">
+              {#if sizeLimit}Files larger than {sizeLabel(sizeLimit)} were left out by this backup's size limit.{:else}The files may have been left out by this backup's rules, or deleted before it ran. An older snapshot may still have them.{/if}
+            </span>
+          </span>
         </div>
       {/if}
 
@@ -185,9 +262,15 @@
 
       <div class="flex justify-end gap-2">
         <button class="btn" onclick={onclose} disabled={busy}>Cancel</button>
-        <button class="btn {replaces ? 'btn-danger-filled' : 'btn-primary'}" onclick={run} disabled={busy || (where === "elsewhere" && !folder) || nothingToDo}>
+        <button class="btn {destructive ? 'btn-danger-filled' : 'btn-primary'}" onclick={run} disabled={busy || (where === "elsewhere" && !folder) || nothingToDo || (exact && where === "original" && !preview)}>
           <Icon name={busy ? "refresh" : "restore"} size={15} class={busy ? "animate-spin" : ""} />
-          {busy ? "Restoring…" : replaces ? `Restore and replace ${count(preview!.differ)} ${preview!.differ === 1 ? "file" : "files"}` : "Restore"}
+          {busy
+            ? "Restoring…"
+            : removes
+              ? `Restore and remove ${removeWord(removes)}`
+              : replaces
+                ? `Restore and replace ${count(preview!.differ)} ${preview!.differ === 1 ? "file" : "files"}`
+                : "Restore"}
         </button>
       </div>
     </div>

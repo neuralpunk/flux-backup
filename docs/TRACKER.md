@@ -28,6 +28,10 @@ Status legend: ☐ not started · ◐ in progress · ☑ done
 | 21 | Robustness | ☑ | see `git log` |
 | 22 | Release 0.2 | ☑ | see `git log` |
 | 23 | Website, guide and README for 0.2 | ☑ | see `git log` |
+| 39 | 0.3: Restore, compare and the size limit | ☑ | see `git log` |
+| 40 | 0.3: Setup wizard and settings polish | ☑ | see `git log` |
+| 41 | 0.3: Import from Back In Time | ☑ | see `git log` |
+| 42 | Release 0.3 | ☑ | see `git log` |
 
 ## Log
 
@@ -1122,3 +1126,297 @@ left as it was, see phase 37).
       on pushes to main that touch the site (or by hand); Pages turned on for the repo
 - [x] README links the website and the latest release near the top; the repo's About box
       links the website
+
+### Phase 39 — 0.3: Restore, compare and the size limit (2026-11-08)
+Reported: after deleting a folder and a file, "Restore this folder" brought back the
+folder with nothing in it, and not the file; comparing showed only a folder change and
+"0 bytes". Cause: the profile's size limit was `1` (a bare number is bytes), so the backup
+held folders and no files. The engines restore correctly (checked with rsync and Mirror).
+- [x] "Skip files larger than" is a number plus a unit (MB, GB, TB; another unit saved
+      earlier keeps it, so nothing is rounded); under 1 MB it says "That leaves out almost
+      every file"
+- [x] Validation warns about limits under 1 MiB (`TINY_SIZE_LIMIT`); test
+- [x] `ByteSize` prints the unit, binary or decimal, with the smallest exact number
+      ("500MB", not "500000000B"); still round-trips; test
+- [x] rsync: `--max-size` skips still counted in rsync's statistics, so a snapshot of empty
+      folders said "21 files, 252 MiB". With a size limit the snapshot is now counted from
+      what it holds, and the run says "left out N files larger than the size limit" (or
+      "no files were backed up…"). CLI test
+- [x] Notices: Snapshots says when a size limit is set (with "Change the limit", which opens
+      that settings group); Overview warns only about a tiny one; profile summaries carry
+      `size_limit` (not for Borg, which ignores it)
+- [x] File browser: each row has its own Restore button; the selection stays while moving
+      between folders ("N selected in other folders"); items no longer on disk are marked
+      *Deleted* (`on_disk` in listings; test), with an "Only deleted" filter and "Restore
+      N deleted items"; an empty folder says when the size limit may be why
+- [x] Restore dialog: goes back to the original place by default when everything picked
+      was deleted; "Show what will be added"; a warning when the snapshot has only empty
+      folders there
+- [x] Restore requests may name a folder and something inside it (now possible with the
+      kept selection): the outermost decides where things go. Used to fail with "not in
+      snapshot"; test
+- [x] Compare with now: scans without the size limit, keeps big files the snapshot holds
+      (they used to show as removed) and counts the rest (`left_out_by_size`), which the
+      dialog explains. Borg compares big files too (it ignores the limit). Test
+- [x] Compare dialog: folder-date-only changes hidden behind "N folder dates"; fields in
+      words (contents, date, permissions…); size shown only when it changed; restore a
+      removed file or the old version of a changed one from the row, or "Restore all
+      removed"
+- [x] USER_GUIDE: restoring single items and deleted ones, compare, the size limit
+
+### Phase 40 — 0.3: Setup wizard and settings polish (2026-11-08)
+- [x] "Often left out" suggestions that are added are green (the palette's success colour,
+      with a tinted background and edge), not the neutral selection lift
+- [x] Step 1's size count: a ↻ button counts again at once (after changing exclusions or
+      files on disk; edits still wait 700 ms for more typing); the size and file count are
+      in the brand blue so they stand out
+- [x] `InfoDetails`: an information block (tinted, info icon, chevron), closed until
+      clicked. Step 3's "What exactly Flux does" uses it
+- [x] Step 4: "What happens each time it backs up, in plain words", built from the answers
+      (when, what it copies and where, catching up and battery, what it keeps, how to get
+      files back); closed by default
+- [x] Performance and behaviour: "Recommended defaults" puts the page's settings back to
+      a new profile's (fetched from the backend for the profile's scope); says "Using the
+      recommended settings" when they already are
+- [x] USER_GUIDE updated
+
+### Phase 41 — 0.3: Import from Back In Time (2026-11-08)
+- [x] `flux_compat::backintime`: reads `~/.config/backintime/config` (format 6, any number
+      of profiles from `profiles=1:2:…`) into Flux profiles: folders and files,
+      exclusions, size limit, one file system, local or SSH destination (port, user, key,
+      bandwidth), schedule (every mode: daily/weekly/monthly at a time, custom hours,
+      hourly and 5 min–12 h intervals, anacron-style "repeatedly", at boot, on connect),
+      smart remove / remove older than / free space and inodes, and the options (ACLs,
+      xattrs, checksums, links, notifications, keep files on restore, ionice)
+- [x] rsync exclusion patterns become gitignore ones with the same meaning (`.cache/*` →
+      `**/.cache/*`, `#*#` → `\#*#`, `***` → `**`); every change is listed in the notes
+- [x] Engine: rsync (the same plain hard-linked folders); EncFS profiles become an
+      encrypted Vault. Snapshot folder, count, newest and whether the drive is connected
+      are reported; Back In Time's snapshots are never touched
+- [x] Durations read as written ("2years", not 730 days shown as "1year 11months…")
+- [x] Tests: a trimmed real config with a local and an SSH+EncFS profile, schedules, a
+      missing file; the converted profile validates. Checked against the real config on
+      the development machine (two profiles) with a scratch FLUX_HOME
+- [x] Service `backintime_profiles` (user scope only); app: the wizard's first step
+      offers each profile ("Use these settings", with folders → destination and its
+      snapshots); after using one it says what came over, what happens to the old
+      backups, and the notes, with "Start from scratch". A profile's own name is kept
+- [x] The offer has a background of its own (a blue-tinted gradient with a blue edge),
+      green-tinted once a profile is used; checked in dark and light
+- [x] CLI: `flux profile backintime [NUMBER] [--id] [--engine]`
+- [x] USER_GUIDE: "Coming from Back In Time?"
+
+### Phase 42 — Release 0.3 (2026-11-08)
+- [x] Version 0.3.0: Cargo workspace (`flux --version` says 0.3.0), `app/package.json` and
+      its lock file, `tauri.conf.json`; Cargo.lock updated
+- [x] CHANGELOG 0.3.0 (Added: Back In Time import, restoring, setup and settings;
+      Changed; Fixed: rsync stats with a size limit, compare and the size limit, nested
+      restore paths); compare link
+- [x] AppStream 0.3.0 release notes; `appstreamcli validate` passes
+- [x] README status says 0.3
+- [ ] Not done here: website text ("Version 0.2" tags on the site), new screenshots, tag
+      `v0.3.0` and the public sync; the release itself is the maintainer's call
+
+### Phase 43 — Unplugged drive and stuck "Backing up" (2026-11-08)
+Reported: an imported Back In Time profile pointing at an unmounted `/mnt/external_backup`
+showed "Backing up…" forever; Stop said "no backup of back-in-time is running"; only a
+restart showed the failure. Cause: the `flux backup` child failed in its first
+milliseconds (target check), so its status socket was gone before the job watcher
+connected; the app had marked the profile running and nothing ever unmarked it.
+- [x] `backup_now` checks a local target first (`not_connected`, in words: "external_backup
+      isn't connected: nothing is mounted at /mnt/external_backup. Plug in the drive, then
+      back up again."; another drive mounted there; a file, not a folder)
+- [x] `backup_now` waits (up to 5 s) until the job is registered or has ended; a run that
+      ended at once returns its error from the run log (or stderr) as `backup_failed`, or
+      `{running: false}`; stderr is read concurrently
+- [x] `cancel` with nothing running: `not_running`; the app then unmarks it, refreshes, and
+      says it had already stopped
+- [x] App safety net: a started backup with no `hello` within 4 s is re-checked with the
+      backend instead of spinning
+- [x] Validation warns (`target.connected`) when the drive isn't plugged in; shown on the
+      destination step, and the wizard's last step offers Done instead of Back up now
+- [x] Test: failing start, quick success, Stop with nothing running, unplugged drive
+      refused, validation warning. Demo: Photo library (Archive unplugged) shows the toast
+- [x] CHANGELOG 0.3.0 Fixed, AppStream 0.3.0 note, USER_GUIDE "An external drive"
+
+### Phase 44 — cron as an alternative scheduler: backend and CLI (2026-11-09)
+Asked: an advanced setting to run scheduled backups with systemd or crontab, systemd the
+default.
+- [x] `calendar.rs`: systemd calendar expressions read by Flux (shorthands, weekdays,
+      `[Y-]M-D`, `H:M[:S]`, lists, `a..b` ranges, `a/n` steps; refuses what systemd
+      refuses: backwards weekday ranges, `*/n`; no time zones or `~`); next run in a
+      zone (DST-safe); the cron fields for it. Cross-checked with
+      `systemd-analyze calendar --iterations=5 --base-time` for 18 expressions × 3 bases
+- [x] `cron.rs`: a block in the user's crontab (`crontab -l` / `crontab -`) or
+      `/etc/cron.d/flux-backup` for system profiles; lines outside it untouched. Lines run
+      `flux backup <id> --scheduled --if-due` with `XDG_RUNTIME_DIR` and the session bus
+      (keyring, notifications), `%` escaped. Calendar: its times plus `*/15` catch-up
+      when `catch_up`; interval: the timer's check period. Status: next run computed by
+      Flux, last check
+- [x] `--if-due` on calendar schedules: due when one of its times came since the last
+      check (`<state>/schedule/<id>.last`, set when the schedule is installed); with
+      catch-up off, a run over 10 minutes late is skipped; at most once per time
+- [x] `Scheduler` (systemd or cron, from `settings.toml` `scheduler = "cron"`) used by
+      the CLI and the service; `schedule::switch` sets the new one up first, undoes it on
+      failure, then removes the old entries and saves the choice. Saving other
+      preferences keeps it
+- [x] `on_connect` needs systemd: said by `flux schedule install/use` and on save
+- [x] Paths: an `XDG_RUNTIME_DIR` that doesn't exist (cron while logged out) is ignored
+- [x] CLI: `flux schedule use systemd|cron`; `flux schedule status` names the scheduler
+      (CRON column), hints when no cron daemon runs
+- [x] Tests: calendar (forms, steps, leap day, bad input, cron fields, zones, systemd
+      cross-check), crontab block round trip keeping other lines, lines per schedule kind,
+      quoting; CLI: switch to cron and back with Back In Time's line kept, not due, missed
+      run caught up once, catch-up off. CLI tests point `FLUX_CRONTAB`/`FLUX_CRON_DIR`
+      into the temp dir so the real crontab is never touched. A generated table passes
+      cronie's `crontab -T`
+- [x] USER_GUIDE "systemd timers or cron"
+- [x] Phase 45 follows: the app, service calls, CHANGELOG
+
+### Phase 45 — cron as an alternative scheduler: the app (2026-11-09)
+- [x] Service: `preferences` reports `scheduler`, `cron_problem` (why cron can't be used,
+      in words) and `cron_running`; `set_scheduler` moves every valid profile's schedule
+      (`schedule::switch`); validation warns on `schedule.on_connect` with cron
+- [x] Tauri command `set_scheduler`; `api.setScheduler`; demo (`?cron=0`: not installed)
+- [x] Preferences › Advanced › "What runs scheduled backups": systemd timers
+      (recommended) or cron, each with what it does and doesn't; cron disabled with the
+      reason when it isn't installed, a warning when no daemon runs; a spinner while
+      switching and a toast after; a note that system backups switch with
+      `sudo flux --system schedule use cron`. Checked in the demo (both states)
+- [x] Settings: "Also when this drive is plugged in" is disabled with cron (unless already
+      on, so it can be turned off), with the reason; its warning shows in warning colour
+- [x] Test: the preference, its warning, and saving other preferences keeping it
+- [x] CHANGELOG 0.3.0 "Scheduling with cron", AppStream note, USER_GUIDE points at the
+      preference
+
+### Phase 46 — Back In Time's rsync options; one backup at a time (2026-11-09)
+Asked: the features Back In Time has that Flux lacked, in phases (46: these two; 47 exact
+restore; 48 shut down afterwards; 49 compare versions in a diff tool).
+- [x] Import: `snapshots.rsync_options.value` is split like a shell would and becomes
+      `[rsync] extra_args`; arguments Flux reserves (`RSYNC_RESERVED_ARGS`) or that
+      aren't options are listed in the notes; EncFS profiles (Vault) say they're unused.
+      Test, including the converted profile validating
+- [x] `one_at_a_time` in `settings.toml`: after the job is registered (so it shows and can
+      be stopped), a backup takes the scope's turn (`jobs/turn.lock`, flock); while
+      another holds it, the new phase `Waiting` and an event naming the backup it waits
+      for; stopped while waiting ends as cancelled. Dry runs don't wait. Test: waits,
+      then runs; stopped while waiting; off means no waiting
+- [x] Service: `preferences.one_at_a_time`; `save_preferences` takes it (left out:
+      unchanged), keeping the scheduler. Test
+- [x] App: Preferences › Advanced › "Run one backup at a time"; sidebar and All backups
+      say "Waiting for its turn…"; the job panel says what it waits for. Checked in the
+      demo
+- [x] USER_GUIDE, CHANGELOG 0.3.0
+
+### Phase 47 — Exact restore (2026-11-09)
+- [x] `RestoreRequest.exact: Option<&Filter>`: after files are restored and before folder
+      dates are set, each restored folder is listed through a read-only descriptor; what
+      the snapshot doesn't have is removed with the existing set-aside rule (renamed
+      `name.flux-<snapshot>` with keep_existing, otherwise deleted). Left alone: what the
+      profile's filter excludes (patterns, hard excludes), files over the size limit,
+      contents of marker/cache folders, anything on another filesystem, what this or an
+      earlier restore set aside (`.flux-` in the name). `RestoreOutcome.removed`
+- [x] `restore::preview` with `exact`: `remove` and the first paths (`remove_paths`)
+- [x] `flux_fs::scan::exact_filter(profile)`: the profile's filter plus a local backup
+      drive. Service `restore`/`restore_preview` take `exact` (default false); Tauri too
+- [x] CLI `flux restore --exact`: lists and asks before removing (unless `-y`), dry run
+      lists `remove …`; says how many were removed
+- [x] App: "Make the folders exactly as they were" under "Back to where it was"; the
+      preview says how many go and how (moved aside or deleted) and lists them; the button
+      says "Restore and remove N items" (danger style when deleting). Checked in the demo
+- [x] Tests: service (Mirror) preview counts, set aside by default with excluded and
+      too-large files untouched, kept copies untouched on a second run; CLI dry run and
+      `--exact --overwrite -y`
+- [x] USER_GUIDE "Exactly as it was", CHANGELOG 0.3.0
+
+### Phase 48 — Shut down when done (2026-11-09)
+- [x] `BackupJob.shutdown_after`; the job socket takes `{"cmd":"shutdown_after","on":…}`
+      and reports it in every `progress` message; `finished` says `shutdown: true` when one
+      was scheduled. At the end, unless stopped or a dry run: `shutdown --poweroff +1`
+      (`desktop::schedule_poweroff`, `FLUX_SHUTDOWN` overrides the program), an event and
+      a notification; if refused, a warning and no shutdown
+- [x] CLI `flux backup --shutdown`; service `backup_now { shutdown }` (passes the flag),
+      `shutdown_after { id, on }`, `cancel_shutdown` (`shutdown -c`); Tauri commands
+- [x] App: "Back up now, then shut down" in the profile menu; "Shut down the computer when
+      done" under a running backup; a countdown banner with Cancel shutdown when it's
+      scheduled. Checked in the demo (menu, running, countdown)
+- [x] Test (CLI, fake `shutdown`): `--shutdown` schedules `--poweroff +1`, nothing without
+      it, a refused shutdown is a warning. Every CLI test points `FLUX_SHUTDOWN` at
+      `false`, so tests never shut a machine down. The real `shutdown` wasn't run here
+- [x] USER_GUIDE, CHANGELOG 0.3.0
+
+### Phase 49 — Compare file versions (2026-11-09)
+- [x] `filediff.rs`: compare two local files; text (no NUL near the start, UTF-8, up to
+      8 MB each) line by line with `similar` (3 lines of context, unchanged runs as `skip`
+      with a count, at most 5000 lines then counted); binary and too-large ones say only
+      whether they're identical. `diff_file_impl` compares a snapshot's copy (shared
+      `extras::copy_out`, read-only, in the cache) with another snapshot's or the file on
+      disk; refused for system backups
+- [x] Comparison programs: `diff_tool` in `settings.toml` (a command, `""` for none),
+      else the first installed of meld, kompare, kdiff3, diffuse. Service `diff_file`,
+      `diff_tool`, `set_diff_tool`; preferences list the installed ones and the one used.
+      Tauri `open_diff_tool(left, right)` takes the program from the settings, never the
+      page
+- [x] App: Compare on each version; the dialog widens to a comparison with From/To
+      pickers (versions, or "Now, on your computer"), +N −M, line numbers, colored
+      removed/added lines, folded runs, Open in <program>; Preferences › Advanced ›
+      "Compare file versions with". Checked in the demo
+- [x] Tests: context and folding, identical, binary, trailing folded run; service:
+      snapshot vs. disk identical, changed, file gone
+- [x] USER_GUIDE, CHANGELOG 0.3.0
+
+### Phase 50 — Storage meters (2026-11-09)
+Asked mid-way through phase 49: a visual indicator of how much space a drive has.
+- [x] `StorageMeter.svelte`: used against size, `role="meter"` with a spoken value; amber
+      from 85% full, red from 95%, with the words saying so too (never color alone);
+      full and compact (lists) forms
+- [x] Overview › "Space on …": the meter on top; shown whenever the drive is connected
+      (it used to wait for a forecast); the chart only once there are 3+ points
+- [x] Setup and Settings › Where: each drive with its mount point and a compact meter
+- [x] Demo: a nearly full USB stick. Checked in the demo (Overview, Where)
+- [x] USER_GUIDE, CHANGELOG 0.3.0
+
+### Phase 51 — Restored files no longer marked Deleted (2026-11-09)
+Files just restored stayed marked Deleted in the snapshot browser: the service checks the
+disk on every listing, but the app didn't list the folder again.
+- [x] `app.diskRevision`, bumped when a restore ends (even with errors: some files may be
+      written). The file browser lists the folder again quietly (rows stay on screen),
+      search runs again, and a comparison with the files on disk compares again
+- [x] File browser: a refresh button next to the filter (F5 or Ctrl+R; listed in the
+      shortcuts); also re-checked when the window gets focus. Refreshes asked for say when
+      they fail; automatic ones are silent and never move to another folder
+- [x] Search: each hit carries `on_disk` (checked on every search); *Deleted* means not
+      on the computer now, falling back to "not in the newest snapshot" when it can't be
+      checked
+- [x] Test: delete, listing and search say so, restore, both show it back. Demo: restores
+      to the original place clear the mock's missing set; checked in the demo
+- [x] USER_GUIDE, CHANGELOG 0.3.0
+
+### Phase 52 — Style polish: bars for history, Adwaita colours (2026-11-09)
+The row of history dots read as noise, and the look could sit closer to GNOME. Directions
+were compared side by side in the real app (demo data, both themes); the owner chose bars
+and the Adwaita palette.
+- [x] History strip: one bar per day on the fixed log ramp (`lib/ramp.ts`, shared with the
+      snapshot list); failed days a full red bar, empty days a 2px baseline stub; each
+      day's whole column carries its title. A bar chart on a backup's page
+- [x] Snapshot list marks are bars on the same ramp, standing on the text's baseline
+- [x] Tokens: Adwaita neutral greys, shell lighter than the view in dark; `accent` /
+      `on-accent` for the primary button and on switch (white text, 4.9:1 dark, 5.1:1
+      light); `--group-shadow` gives light groups Adwaita's card shadow; dark `danger`
+      brightened to #f39488 (4.8:1 on controls). Every text pair re-measured for AA
+- [x] Recent backups rows: size moved next to the time instead of floating mid-row
+- [x] Window background colour before first paint matches the new shell
+- [x] All 16 screenshots retaken (demo data, 1200 × 780) in `docs/screenshots/` and
+      `site/assets/screenshots/`; captions still match
+- [x] DESIGN.md, CHANGELOG 0.3.0; svelte-check clean, build passes, design detector clean
+
+### Release 0.3.0 (2026-11-09)
+- [x] CHANGELOG and AppStream 0.3.0 dated 2026-11-09 (the fixes through Phase 51 and the
+      new look landed today); AppStream notes mention the new look; `appstreamcli
+      validate` passes
+- [x] Website says 0.3 (hero badge, caution card, the guide's tag); new hero heading;
+      screenshots retaken (Phase 52 and after)
+- [x] `cargo test --locked` passes; svelte-check and the app build pass
+- [x] Synced to `../FluxBackup-public` as one commit, "Flux Backup 0.3.0" (a mirror of this
+      repo's tracked files, as for 0.1.0 and 0.2.0), tagged `v0.3.0`, pushed over HTTPS
+      with `gh` as the credential helper; the Release workflow builds the draft release

@@ -9,6 +9,7 @@
   import { contextMenu, type MenuEntry } from "../menu.svelte";
   import { copyText } from "../clipboard";
   import { app } from "../state.svelte";
+  import { sizeLabel } from "../size";
 
   let {
     profile,
@@ -37,18 +38,32 @@
   let error = $state<string | null>(null);
   let filter = $state("");
   let selected = $state<Set<string>>(new Set());
-  let restoring = $state<{ snapshot: SnapshotMeta; paths: string[] } | null>(null);
+  let restoring = $state<{ snapshot: SnapshotMeta; paths: string[]; missing: boolean } | null>(null);
   let versionsOf = $state<string | null>(null);
-  const restore = (paths: string[]) => (restoring = { snapshot, paths });
+  /** Whether each item seen so far is still on disk (from the listings). */
+  const onDisk = new Map<string, boolean | null>();
+  const restore = (paths: string[]) => (restoring = { snapshot, paths, missing: paths.every((p) => onDisk.get(p) === false) });
+  /** Only items deleted (or moved) since this snapshot. */
+  let onlyMissing = $state(false);
+  const sizeLimit = $derived(app.profiles.find((p) => p.id === profile)?.size_limit ?? null);
 
-  function load(p: string) {
-    listing = null;
-    error = null;
-    api.listDir(profile, snapshot.id, p).then(
+  /**
+   * List folder `p`. "open": moving to it (placeholder rows until it's in). "again" and
+   * "auto": checking again what's on the computer, keeping the rows on screen; "again"
+   * was asked for, so it says when it can't, while "auto" (after a restore, or coming
+   * back to the window) fails quietly.
+   */
+  function load(p: string, how: "open" | "again" | "auto" = "open"): Promise<void> {
+    if (how === "open") {
+      listing = null;
+      error = null;
+    }
+    return api.listDir(profile, snapshot.id, p).then(
       (l) => {
         if (p !== path) return;
-        // An ancestor that isn't in the snapshot: fall back to the root.
+        error = null;
         listing = l;
+        for (const e of l.entries) onDisk.set(e.path, e.on_disk ?? null);
         if (highlight && l.entries.some((e) => e.path === highlight)) {
           selected = new Set([highlight]);
           const h = highlight;
@@ -57,18 +72,56 @@
         highlight = null;
       },
       (e) => {
-        if (e instanceof ApiError && e.code === "password_required") onLocked(() => load(p));
-        else if (p !== "/") {
-          path = "/";
-        } else error = (e as Error).message;
+        if (p !== path || how === "auto") return;
+        const locked = e instanceof ApiError && e.code === "password_required";
+        if (how === "again") {
+          if (locked) onLocked(() => void load(p, "again"));
+          else app.toast("bad", `Couldn't check this folder again: ${(e as Error).message}`);
+        } else if (locked) onLocked(() => void load(p));
+        // An ancestor that isn't in the snapshot: fall back to the root.
+        else if (p !== "/") path = "/";
+        else error = (e as Error).message;
       },
     );
   }
 
+  // The selection stays while moving between folders, so files from several folders
+  // can be restored together.
   $effect(() => {
-    selected = new Set();
     filter = "";
-    load(path);
+    void load(path);
+  });
+
+  // "Deleted" is checked against the computer each time a folder is listed, so after a
+  // restore (or on demand, or coming back to the window) the folder is listed again and
+  // what was just brought back isn't still marked.
+  let refreshing = $state(false);
+  let pending: "again" | "auto" | null = null;
+  async function refresh(how: "again" | "auto") {
+    if (!listing) return;
+    if (refreshing) {
+      // One more pass once this one's done: it may have started before the files changed.
+      pending = pending === "again" ? "again" : how;
+      return;
+    }
+    refreshing = true;
+    try {
+      // A refresh someone asked for spins long enough to be seen.
+      await Promise.all([load(path, how), how === "again" ? new Promise((r) => setTimeout(r, 400)) : null]);
+    } finally {
+      refreshing = false;
+    }
+    const next = pending;
+    pending = null;
+    if (next) void refresh(next);
+  }
+  let seenDisk = untrack(() => app.diskRevision);
+  $effect(() => {
+    const r = app.diskRevision;
+    if (r !== seenDisk) {
+      seenDisk = r;
+      untrack(() => void refresh("auto"));
+    }
   });
 
   const crumbs = $derived.by(() => {
@@ -80,7 +133,7 @@
     if (!listing) return [];
     const f = filter.trim().toLowerCase();
     return listing.entries
-      .filter((e) => !f || e.name.toLowerCase().includes(f))
+      .filter((e) => (!f || e.name.toLowerCase().includes(f)) && (!onlyMissing || e.on_disk === false))
       .sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.localeCompare(b.name));
   });
 
@@ -109,9 +162,23 @@
     selected = s;
   }
 
+  /** Items in this folder that aren't on disk any more. */
+  const missing = $derived(listing?.entries.filter((e) => e.on_disk === false) ?? []);
+  $effect(() => {
+    if (onlyMissing && listing && missing.length === 0) onlyMissing = false;
+  });
+  /** Selected items in other folders. */
+  const elsewhere = $derived([...selected].filter((p) => !listing?.entries.some((e) => e.path === p)).length);
+
   const allSelected = $derived(entries.length > 0 && entries.every((e) => selected.has(e.path)));
+  /** Select or unselect everything shown in this folder (the rest stays as it is). */
   function toggleAll() {
-    selected = allSelected ? new Set() : new Set(entries.map((e) => e.path));
+    const s = new Set(selected);
+    for (const e of entries) {
+      if (allSelected) s.delete(e.path);
+      else s.add(e.path);
+    }
+    selected = s;
   }
 
   /** Right-click on a file or folder (all of it is also on screen: double-click, the
@@ -150,6 +217,26 @@
         </button>
       {/each}
     </nav>
+    {#if missing.length}
+      <button
+        class="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[13px] transition-colors {onlyMissing ? 'bg-warning/15 font-medium text-warning' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
+        aria-pressed={onlyMissing}
+        title="Show only what was deleted or moved since this snapshot"
+        onclick={() => (onlyMissing = !onlyMissing)}
+      >
+        <Icon name="filter" size={13} /> Only deleted ({missing.length})
+      </button>
+    {/if}
+    <button
+      id="browser-refresh"
+      class="btn btn-ghost size-8 shrink-0 justify-center p-0"
+      aria-label="Check again what's on your computer"
+      title="Check again what's on your computer (F5)"
+      disabled={refreshing || !listing}
+      onclick={() => void refresh("again")}
+    >
+      <Icon name="refresh" size={15} class={refreshing ? "motion-safe:animate-spin" : ""} />
+    </button>
     <label class="relative w-56">
       <span class="sr-only">Filter this folder</span>
       <Icon name="search" size={15} class="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-fg-muted" />
@@ -172,6 +259,7 @@
             <th class="py-2 font-medium">Name</th>
             <th class="w-28 py-2 pr-4 text-right font-medium">Size</th>
             <th class="w-48 py-2 pr-4 font-medium">Modified</th>
+            <th class="w-24 py-2 pr-4"><span class="sr-only">Restore</span></th>
           </tr>
         </thead>
         <tbody>
@@ -184,13 +272,30 @@
                   <span class="truncate">{e.name}</span>
                   {#if opening === e.path}<span class="text-xs text-fg-muted">opening…</span>{/if}
                   {#if e.link}<span class="truncate text-xs text-fg-muted">→ {e.link}</span>{/if}
+                  {#if e.on_disk === false}<span class="tag shrink-0 bg-warning/15 text-warning" title="Not on your computer any more: deleted or moved since this snapshot">Deleted</span>{/if}
                 </button>
               </td>
-              <td class="py-1.5 pr-4 text-right font-mono text-[12.5px] text-fg-2">{e.kind === "dir" ? (e.children != null ? `${e.children} ${e.children === 1 ? "item" : "items"}` : "") : e.kind === "file" ? bytes(e.size) : ""}</td>
+              <td class="py-1.5 pr-4 text-right font-mono text-[12.5px] whitespace-nowrap text-fg-2">{e.kind === "dir" ? (e.children != null ? `${e.children} ${e.children === 1 ? "item" : "items"}` : "") : e.kind === "file" ? bytes(e.size) : ""}</td>
               <td class="py-1.5 pr-4 font-mono text-[12.5px] whitespace-nowrap text-fg-2" title={dateTime(e.mtime * 1000)}>{shortDateTime(e.mtime * 1000)}</td>
+              <td class="py-1 pr-3 text-right">
+                <button
+                  class="btn btn-ghost h-7 px-2 text-[12.5px] {e.on_disk === false ? '' : 'opacity-0 group-focus-within:opacity-100 group-hover:opacity-100'}"
+                  onclick={() => restore([e.path])}
+                  aria-label="Restore {e.name}"
+                  title="Restore just this {e.kind === 'dir' ? 'folder' : 'item'}"
+                ><Icon name="restore" size={13} /> Restore</button>
+              </td>
             </tr>
           {:else}
-            <tr><td colspan="4" class="p-8 text-center text-sm text-fg-muted">{filter ? "Nothing matches the filter." : "This folder is empty."}</td></tr>
+            <tr>
+              <td colspan="5" class="p-8 text-center text-sm text-fg-muted">
+                {#if filter}Nothing matches the filter.
+                {:else}
+                  This folder is empty in this snapshot.
+                  {#if sizeLimit}<span class="mt-1 block">Files larger than {sizeLabel(sizeLimit)} aren't in this backup (its size limit).</span>{/if}
+                {/if}
+              </td>
+            </tr>
           {/each}
         </tbody>
       </table>
@@ -199,6 +304,7 @@
 
   <div class="flex items-center justify-end gap-2 px-4 py-3">
     {#if selected.size}
+      {#if elsewhere}<span class="mr-auto text-[13px] text-fg-muted">{elsewhere} selected in other folders</span>{/if}
       <button class="btn btn-ghost" onclick={() => (selected = new Set())}>Clear selection</button>
       {#if selected.size === 1}
         {@const only = entries.find((e) => selected.has(e.path))}
@@ -206,15 +312,23 @@
       {/if}
       <button class="btn" onclick={() => restore([...selected])}>Restore {selected.size} {selected.size === 1 ? "item" : "items"}</button>
     {:else}
-      <button class="btn" onclick={() => restore([path])} title="Restore everything in this folder">Restore this folder</button>
+      <span class="mr-auto text-[13px] text-fg-muted">Tick files and folders to restore just those, even from several folders.</span>
+      <button class="btn" onclick={() => restore([path])} title="Restore everything in this folder; files that are already identical are skipped">Restore this whole folder</button>
+      {#if missing.length}
+        <button class="btn btn-primary" onclick={() => restore(missing.map((e) => e.path))} title="Bring back only what was deleted from this folder">
+          <Icon name="restore" size={14} /> Restore {missing.length} deleted {missing.length === 1 ? "item" : "items"}
+        </button>
+      {/if}
     {/if}
   </div>
 </div>
 
+<svelte:window onfocus={() => void refresh("auto")} />
+
 {#if restoring}
-  <RestoreDialog {profile} snapshot={restoring.snapshot} paths={restoring.paths} onclose={() => (restoring = null)} />
+  <RestoreDialog {profile} snapshot={restoring.snapshot} paths={restoring.paths} missing={restoring.missing} onclose={() => (restoring = null)} />
 {/if}
 {#if versionsOf}
   {@const p = versionsOf}
-  <VersionsDialog profile={profile} path={p} onclose={() => (versionsOf = null)} onrestore={(s) => ((restoring = { snapshot: s, paths: [p] }), (versionsOf = null))} />
+  <VersionsDialog profile={profile} path={p} onclose={() => (versionsOf = null)} onrestore={(s) => ((restoring = { snapshot: s, paths: [p], missing: onDisk.get(p) === false }), (versionsOf = null))} />
 {/if}

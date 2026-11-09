@@ -12,6 +12,11 @@ fn flux(home: &Path, args: &[&str]) -> Output {
         // Never touch the real systemd configuration from tests.
         .env("FLUX_SYSTEMD_UNIT_DIR", home.join("systemd-units"))
         .env("FLUX_SYSTEMCTL", "true")
+        // …nor the real crontab or /etc/cron.d.
+        .env("FLUX_CRONTAB", home.join("no-crontab"))
+        // Never shut the test machine down.
+        .env("FLUX_SHUTDOWN", "false")
+        .env("FLUX_CRON_DIR", home.join("cron.d"))
         .env_remove("FLUX_LOG")
         .output()
         .expect("run flux")
@@ -192,6 +197,28 @@ fn backup_browse_restore() {
         std::fs::read_to_string(out.join("src/docs/a.txt")).unwrap(),
         "alpha"
     );
+
+    // --exact: a file added since is listed in a dry run, then removed (overwriting:
+    // deleted, not kept).
+    std::fs::write(src.join("docs/new.txt"), "n").unwrap();
+    let docs = src.join("docs");
+    let d = docs.to_str().unwrap();
+    let o = flux(h, &["restore", "p", d, "--exact", "--dry-run"]);
+    assert!(
+        stdout(&o).contains(&format!("remove {}", docs.join("new.txt").display())),
+        "{}",
+        stdout(&o)
+    );
+    assert!(docs.join("new.txt").exists(), "a dry run changes nothing");
+    let o = flux(h, &["restore", "p", d, "--exact", "--overwrite", "-y"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        stdout(&o).contains("removed 1 item that weren't in the snapshot"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(!docs.join("new.txt").exists());
+    assert!(docs.join("a.txt").exists());
 }
 
 #[test]
@@ -298,6 +325,210 @@ fn lifecycle_commands() {
     assert_eq!(v[0]["status"], "completed");
 }
 
+/// Switching to cron and back: Flux's block in the crontab, other lines kept, and the
+/// "is it due?" check that catches up a missed run.
+#[test]
+fn schedule_with_cron() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let units = h.join("units");
+    let table = h.join("crontab.txt");
+    let fake_crontab = h.join("fake-crontab");
+    write_executable(
+        &fake_crontab,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  -l) if [ -f {t} ]; then cat {t}; else echo 'no crontab for me' >&2; exit 1; fi ;;\n  -) cat > {t} ;;\nesac\n",
+            t = table.display()
+        ),
+    );
+    let mine = "0 7 * * * /usr/bin/backintime backup --background >/dev/null\n";
+    std::fs::write(&table, mine).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("BORG_BASE_DIR", h.join("borg-base"))
+            .env("FLUX_SYSTEMD_UNIT_DIR", &units)
+            .env("FLUX_SYSTEMCTL", "true")
+            .env("FLUX_CRONTAB", &fake_crontab)
+            // Never shut the test machine down.
+            .env("FLUX_SHUTDOWN", "false")
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
+            .output()
+            .unwrap()
+    };
+    std::fs::create_dir_all(h.join("src")).unwrap();
+    std::fs::write(h.join("src/a.txt"), "a").unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    let o = run(&[
+        "profile",
+        "create",
+        "p",
+        "-t",
+        h.join("tgt").to_str().unwrap(),
+        "-s",
+        h.join("src").to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let f = h.join("config/profiles/p.toml");
+    let text = std::fs::read_to_string(&f).unwrap().replace(
+        "trigger = \"manual\"",
+        "trigger = \"calendar\"\non_calendar = \"*-*-* 07:00:00\"",
+    );
+    std::fs::write(&f, text).unwrap();
+    assert!(run(&["schedule", "sync"]).status.success());
+    assert!(units.join("flux-backup-p.timer").exists());
+
+    // To cron: the timer goes, the crontab gets Flux's block, Back In Time's line stays.
+    let o = run(&["schedule", "use", "cron"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("now run with cron instead of systemd timers"));
+    assert!(!units.join("flux-backup-p.timer").exists());
+    let tab = std::fs::read_to_string(&table).unwrap();
+    assert!(tab.starts_with(mine), "{tab}");
+    assert!(tab.contains("# profile p\n0 7 * * * "), "{tab}");
+    assert!(tab.contains("*/15 * * * * "), "catch-up check: {tab}");
+    assert!(
+        tab.contains(" backup p --scheduled --if-due >/dev/null 2>&1"),
+        "{tab}"
+    );
+    assert!(
+        std::fs::read_to_string(h.join("config/settings.toml"))
+            .unwrap()
+            .contains("scheduler = \"cron\"")
+    );
+    let o = run(&["schedule", "status"]);
+    assert!(
+        stdout(&o).contains("Scheduled backups run with cron"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(stdout(&o).contains("CRON"));
+
+    // Not due yet: the schedule started just now.
+    let o = run(&["backup", "p", "--scheduled", "--if-due"]);
+    assert!(
+        stdout(&o).contains("Skipped: not due until"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(!h.join("tgt/flux-backup").exists());
+
+    // A 07:00 missed while the computer was off runs once, late.
+    let stamp = h.join("state/schedule/p.last");
+    std::fs::write(&stamp, "2020-01-01T00:00:00Z").unwrap();
+    let o = run(&["backup", "p", "--scheduled", "--if-due"]);
+    assert!(
+        o.status.success(),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(!stdout(&o).contains("Skipped"), "{}", stdout(&o));
+    let o = run(&["backup", "p", "--scheduled", "--if-due"]);
+    assert!(
+        stdout(&o).contains("Skipped: not due until"),
+        "once: {}",
+        stdout(&o)
+    );
+
+    // With catching up off, a long-missed time is skipped instead (and only noted once).
+    let text = std::fs::read_to_string(&f).unwrap();
+    assert!(text.contains("catch_up = true"));
+    std::fs::write(&f, text.replace("catch_up = true", "catch_up = false")).unwrap();
+    assert!(run(&["schedule", "sync"]).status.success());
+    assert!(!std::fs::read_to_string(&table).unwrap().contains("*/15"));
+    std::fs::write(&stamp, "2020-01-01T00:00:00Z").unwrap();
+    let o = run(&["backup", "p", "--scheduled", "--if-due"]);
+    assert!(stdout(&o).contains("catching up is off"), "{}", stdout(&o));
+
+    // Back to systemd: the block goes, the rest of the crontab is as it was.
+    let o = run(&["schedule", "use", "systemd"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(std::fs::read_to_string(&table).unwrap(), mine);
+    assert!(units.join("flux-backup-p.timer").exists());
+    assert!(
+        !std::fs::read_to_string(h.join("config/settings.toml"))
+            .unwrap_or_default()
+            .contains("scheduler")
+    );
+}
+
+/// `--shutdown`: a minute after the backup ends, the computer powers off (here, a fake
+/// `shutdown` records the call); a failure to schedule it is a warning, not a failed backup.
+#[test]
+fn backup_then_shut_down() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("src")).unwrap();
+    std::fs::write(h.join("src/a"), "a").unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    let calls = h.join("shutdown.log");
+    let fake = h.join("fake-shutdown");
+    write_executable(
+        &fake,
+        &format!("#!/bin/sh\necho \"$@\" >> {}\n", calls.display()),
+    );
+    let run = |shutdown: &std::path::Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("BORG_BASE_DIR", h.join("borg-base"))
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("units"))
+            .env("FLUX_SYSTEMCTL", "true")
+            .env("FLUX_CRONTAB", h.join("no-crontab"))
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
+            .env("FLUX_SHUTDOWN", shutdown)
+            .output()
+            .unwrap()
+    };
+    let (s, t) = (h.join("src"), h.join("tgt"));
+    assert!(
+        run(
+            &fake,
+            &[
+                "profile",
+                "create",
+                "p",
+                "-t",
+                t.to_str().unwrap(),
+                "-s",
+                s.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+
+    let o = run(&fake, &["backup", "p", "--shutdown"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        std::fs::read_to_string(&calls)
+            .unwrap()
+            .starts_with("--poweroff +1 ")
+    );
+
+    // Without the flag: no shutdown.
+    std::fs::remove_file(&calls).unwrap();
+    std::fs::write(h.join("src/b"), "b").unwrap();
+    assert!(run(&fake, &["backup", "p"]).status.success());
+    assert!(!calls.exists());
+
+    // Shutdown refused: the backup still counts as done, with a warning.
+    std::fs::write(h.join("src/c"), "c").unwrap();
+    let o = run(
+        std::path::Path::new("false"),
+        &["backup", "p", "--shutdown"],
+    );
+    assert!(
+        o.status.success() || o.status.code() == Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let all = format!("{}{}", stdout(&o), String::from_utf8_lossy(&o.stderr));
+    assert!(all.contains("couldn't shut down"), "{all}");
+}
+
 #[test]
 fn schedule_install_sync_remove() {
     let home = tempfile::tempdir().unwrap();
@@ -317,6 +548,10 @@ fn schedule_install_sync_remove() {
             .env("BORG_BASE_DIR", h.join("borg-base"))
             .env("FLUX_SYSTEMD_UNIT_DIR", &units)
             .env("FLUX_SYSTEMCTL", &fake)
+            .env("FLUX_CRONTAB", h.join("no-crontab"))
+            // Never shut the test machine down.
+            .env("FLUX_SHUTDOWN", "false")
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
             .output()
             .unwrap()
     };
@@ -434,6 +669,10 @@ fn flux_pw(home: &Path, pw: &str, args: &[&str]) -> Output {
         .env("FLUX_PASSWORD", pw)
         .env("FLUX_SYSTEMD_UNIT_DIR", home.join("systemd-units"))
         .env("FLUX_SYSTEMCTL", "true")
+        .env("FLUX_CRONTAB", home.join("no-crontab"))
+        // Never shut the test machine down.
+        .env("FLUX_SHUTDOWN", "false")
+        .env("FLUX_CRON_DIR", home.join("cron.d"))
         .env("FLUX_SECRET_TOOL", "false")
         .output()
         .expect("run flux")
@@ -858,6 +1097,76 @@ fn rsync_compatibility_mode() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(glob_dirs(&target.join("flux-rsync"), "snapshots").len(), 2);
     assert!(flux(h, &["prune", "plain"]).status.success());
+}
+
+/// With a size limit, rsync still counts the files it skipped; the snapshot must show
+/// what it really holds, and the run must say what was left out.
+#[test]
+fn rsync_size_limit_counts_what_is_stored() {
+    if Command::new("rsync").arg("--version").output().is_err() {
+        eprintln!("skipping: no rsync");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(src.join("docs")).unwrap();
+    std::fs::write(src.join("small.txt"), "x").unwrap();
+    std::fs::write(src.join("docs/big.bin"), vec![7u8; 4096]).unwrap();
+    std::fs::write(src.join("big-root.bin"), vec![7u8; 4096]).unwrap();
+    let target = h.join("drive");
+    std::fs::create_dir(&target).unwrap();
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "p",
+            "-t",
+            target.to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+            "--engine",
+            "rsync",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let f = h.join("config/profiles/p.toml");
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("notify = true", "notify = false")
+        .replace("[sources]", "[sources]\nexclude_larger_than = \"1KiB\"");
+    std::fs::write(&f, text).unwrap();
+    // The tiny limit is legal, but validation warns about anything under 1 MiB.
+    let o = flux(h, &["profile", "validate", "p"]);
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains("almost every file")
+            || String::from_utf8_lossy(&o.stderr).contains("almost every file"),
+        "{o:?}"
+    );
+
+    let o = flux(h, &["-v", "backup", "p"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(all.contains("left out 2 files larger than"), "{all}");
+
+    let o = flux(h, &["--json", "snapshots", "p"]);
+    let snaps: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let stats = &snaps[0]["stats"];
+    assert_eq!(stats["files"], 1, "{stats}");
+    assert_eq!(stats["total_bytes"], 1, "{stats}");
+
+    // Restoring brings back exactly what the snapshot holds.
+    std::fs::remove_dir_all(src.join("docs")).unwrap();
+    std::fs::remove_file(src.join("small.txt")).unwrap();
+    let o = flux(h, &["restore", "p", src.to_str().unwrap(), "-y"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(std::fs::read(src.join("small.txt")).unwrap(), b"x");
+    assert!(src.join("docs").is_dir());
 }
 
 #[test]

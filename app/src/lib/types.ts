@@ -14,7 +14,7 @@ export type RunStatus =
   | "skipped"
   | "failed"
   | "cancelled";
-export type Phase = "preparing" | "scanning" | "planning" | "transferring" | "finalizing" | "done";
+export type Phase = "preparing" | "scanning" | "planning" | "transferring" | "finalizing" | "done" | "waiting";
 
 export interface SnapshotStats {
   entries: number;
@@ -82,6 +82,8 @@ export interface ProfileSummary {
   /** What it backs up, home shown as `~` (older helpers don't send it). */
   sources?: string[];
   schedule: string;
+  /** Files larger than this are left out ("500MB"); absent without a limit. */
+  size_limit?: string | null;
   /** Validation errors (empty when the profile is usable). */
   errors: string[];
   last_run: RunRecord | null;
@@ -165,6 +167,9 @@ export interface DirEntry {
   link: string | null;
   /** Number of direct children, for directories. */
   children: number | null;
+  /** Whether it's at its original place now: `false` when deleted or moved since the
+   * backup (null/absent: couldn't check). */
+  on_disk?: boolean | null;
 }
 
 export interface Listing {
@@ -192,9 +197,9 @@ export type JobEvent =
 
 export type JobMessage =
   | { type: "hello"; info: { profile: string; run_id: string; started: string; trigger: string } }
-  | { type: "progress"; progress: ProgressSnapshot }
+  | { type: "progress"; progress: ProgressSnapshot; shutdown_after?: boolean }
   | { type: "event"; event: JobEvent }
-  | { type: "finished"; status: RunStatus; error: string | null };
+  | { type: "finished"; status: RunStatus; error: string | null; shutdown?: boolean };
 
 export interface RestoreOutcome {
   restored: number;
@@ -203,6 +208,8 @@ export interface RestoreOutcome {
   moved_aside: string[];
   errors: FileError[];
   would_write: string[];
+  /** Exact restores: items not in the snapshot that were removed (or moved aside). */
+  removed?: number;
 }
 
 /** A path found in any snapshot. */
@@ -216,6 +223,8 @@ export interface Found {
   latest: string;
   latest_size: number;
   latest_mtime: number;
+  /** Whether it's at its place on the computer now (`null`: can't be checked). */
+  on_disk: boolean | null;
 }
 
 export interface FindResult {
@@ -245,6 +254,9 @@ export interface RestorePreview {
   differ_paths: string[];
   new_paths: string[];
   unsafe_paths: number;
+  /** Exact restores: items not in the snapshot that would be removed, and the first few. */
+  remove?: number;
+  remove_paths?: string[];
 }
 
 /** Scheduled backups paused until a moment, or until resumed (`until: null`). */
@@ -257,6 +269,47 @@ export interface Preferences {
   default_exclude: string[];
   default_exclude_custom: boolean;
   pause: Pause | null;
+  /** A backup that starts while another runs waits for it. */
+  one_at_a_time?: boolean;
+  /** What runs scheduled backups (absent from older backends: systemd). */
+  scheduler?: Scheduler;
+  /** Why cron can't be used here, in words (null: it can). */
+  cron_problem?: string | null;
+  /** Whether a cron daemon is running (null: can't tell). */
+  cron_running?: boolean | null;
+  /** The comparison program chosen: a command, "" for none, null for automatic. */
+  diff_tool?: string | null;
+  /** The one used now, [command, name], and the known ones installed. */
+  diff_tool_used?: [string, string] | null;
+  diff_tools?: [string, string][];
+}
+
+export type Scheduler = "systemd" | "cron";
+
+/** One line of a comparison: unchanged, removed or added, or a run of unchanged lines
+ * left out (`skip`, `count` of them). */
+export interface DiffLine {
+  kind: "same" | "removed" | "added" | "skip";
+  old: number | null;
+  new: number | null;
+  text: string;
+  count: number;
+}
+
+/** Two versions of a file compared. */
+export interface FileDiff {
+  old_file: string;
+  new_file: string;
+  old_size: number;
+  new_size: number;
+  identical: boolean;
+  /** Not text: only sizes and sameness are known. */
+  binary: boolean;
+  too_large: boolean;
+  added: number;
+  removed: number;
+  lines: DiffLine[];
+  truncated: number;
 }
 
 export type ApiErrorCode =
@@ -272,6 +325,12 @@ export type ApiErrorCode =
   | "helper_failed"
   | "bad_request"
   | "cancelled"
+  /** The backup drive isn't plugged in. */
+  | "not_connected"
+  /** The backup stopped right after it started (the message says why). */
+  | "backup_failed"
+  /** Stop: no backup of this profile is running. */
+  | "not_running"
   | "error";
 
 export interface SystemStatus {
@@ -483,6 +542,10 @@ export interface Comparison {
   summary: { added: number; removed: number; modified: number; type_changed: number; bytes_delta: number };
   changes: Change[];
   truncated: boolean;
+  /** Comparing with the files on disk: files there larger than the size limit, which
+   * the backups leave out (so they aren't compared). */
+  left_out_by_size?: number;
+  size_limit?: string | null;
 }
 
 export interface LoggedEvent {
@@ -508,4 +571,21 @@ export interface PruneSummary {
   space_floor_unmet: boolean;
   bytes_freed: number | null;
   dry_run: boolean;
+}
+
+/** A profile set up in Back In Time, as a new Flux profile to start from. */
+export interface BitProfile {
+  /** Back In Time's number for it. */
+  number: number;
+  name: string;
+  /** local, local_encfs, ssh or ssh_encfs. */
+  mode: string;
+  profile: Profile;
+  /** What didn't carry over exactly. */
+  notes: string[];
+  snapshots_dir: string | null;
+  snapshot_count: number;
+  latest: string | null;
+  /** Its destination is there now (a drive: connected). */
+  connected: boolean;
 }

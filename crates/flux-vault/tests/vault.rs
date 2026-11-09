@@ -120,6 +120,7 @@ impl Env {
                     other: true,
                 },
                 links: flux_fs::safe::LinkPolicy::for_process(),
+                exact: None,
             },
             &Progress::new(),
             &silent,

@@ -20,6 +20,8 @@ pub enum Phase {
     Transferring = 3,
     Finalizing = 4,
     Done = 5,
+    /// Waiting for another backup to finish ("one backup at a time").
+    Waiting = 6,
 }
 
 impl Phase {
@@ -30,6 +32,7 @@ impl Phase {
             3 => Phase::Transferring,
             4 => Phase::Finalizing,
             5 => Phase::Done,
+            6 => Phase::Waiting,
             _ => Phase::Preparing,
         }
     }
@@ -42,6 +45,7 @@ impl Phase {
             Phase::Transferring => "Copying",
             Phase::Finalizing => "Finalizing",
             Phase::Done => "Done",
+            Phase::Waiting => "Waiting",
         }
     }
 }

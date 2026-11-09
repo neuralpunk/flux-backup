@@ -418,6 +418,7 @@ fn restore_elsewhere_and_in_place() {
             other: true,
         },
         links: flux_fs::safe::LinkPolicy::for_process(),
+        exact: None,
     };
 
     // Whole source to another directory.
@@ -470,6 +471,26 @@ fn restore_elsewhere_and_in_place() {
         Err(MirrorError::NotInSnapshot(..))
     ));
 
+    // A folder and a file inside it, picked together: one restore, into the folder's place.
+    let nested = e.target.join("nested");
+    let r = restore(
+        &repo,
+        &req(
+            vec![e.src.join("docs/readme.txt"), e.src.join("docs")],
+            Some(nested.clone()),
+            true,
+        ),
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(
+        fs::read_to_string(nested.join("docs/readme.txt")).unwrap(),
+        "hello"
+    );
+    assert!(!nested.join("readme.txt").exists());
+
     let kinds: Vec<_> = ManifestReader::read_all(&repo.manifest_path(&s.id))
         .unwrap()
         .iter()
@@ -509,6 +530,7 @@ fn restore_is_not_redirected_by_planted_symlinks() {
             other: false,
         },
         links: strict.clone(),
+        exact: None,
     };
 
     // 1. A folder being restored is a link to somewhere else: the link is replaced by a

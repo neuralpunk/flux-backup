@@ -78,6 +78,7 @@ export const phaseLabel: Record<string, string> = {
   transferring: "Copying",
   finalizing: "Finishing",
   done: "Done",
+  waiting: "Waiting",
 };
 
 export const runStatusLabel: Record<string, string> = {

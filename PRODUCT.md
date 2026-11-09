@@ -98,8 +98,8 @@ All four claims are core and future work may lead with any of them:
 - Voice: plain, concrete words; say what happens and what stays ("The backups themselves
   stay on BackupDisk"); warnings say what to do next; no jargon in the app where a plain
   word works.
-- The app's visual system is "Graphite Tonal" (docs/DESIGN.md); how the interface behaves
-  is in docs/UX_PRINCIPLES.md.
+- The app's visual system is "At home on the desktop", in Adwaita's colours
+  (docs/DESIGN.md); how the interface behaves is in docs/UX_PRINCIPLES.md.
 
 ## Evidence on Hand
 

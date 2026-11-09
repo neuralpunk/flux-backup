@@ -97,7 +97,12 @@ fn system_profile_lifecycle_through_the_helper() {
     assert_eq!(list[0]["scope"], "system");
 
     // "Back up now" runs in the background (the helper starts itself with --run-backup).
-    client.call(Call::BackupNow { id: "conf".into() }).unwrap();
+    client
+        .call(Call::BackupNow {
+            id: "conf".into(),
+            shutdown: false,
+        })
+        .unwrap();
     let mut snaps = Value::Null;
     wait_for("the snapshot", || {
         // "empty" until the first snapshot is complete.
@@ -126,6 +131,7 @@ fn system_profile_lifecycle_through_the_helper() {
             paths: vec![src.join("conf").display().to_string()],
             to: Some(out.display().to_string()),
             overwrite: false,
+            exact: false,
         })
         .unwrap();
     assert_eq!(r["errors"], json!([]), "{r}");
@@ -141,6 +147,7 @@ fn system_profile_lifecycle_through_the_helper() {
             paths: vec![src.display().to_string()],
             to: Some("relative/dir".into()),
             overwrite: false,
+            exact: false,
         })
         .unwrap_err();
     assert!(e.message.contains("absolute"), "{e:?}");

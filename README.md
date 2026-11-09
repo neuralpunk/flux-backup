@@ -9,7 +9,7 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 0.2. See the [changelog](CHANGELOG.md) for what's new. Read the [user guide](docs/USER_GUIDE.md) to get
+> **Status:** 0.3. See the [changelog](CHANGELOG.md) for what's new. Read the [user guide](docs/USER_GUIDE.md) to get
 > started, and the [threat model](docs/THREAT_MODEL.md) for what Flux protects against.
 > [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md) show how it was built. As with
 > any new backup tool, keep another copy of anything precious until you trust it.
@@ -71,8 +71,8 @@ the other engines. See the
 | **Export to other tools** | **Size estimate** |
 | ![Export dialog](docs/screenshots/export-dark.png) | ![New backup, step one, with a size estimate](docs/screenshots/new-dark.png) |
 
-The app (Tauri 2, Svelte 5, Tailwind 4, the "Graphite Tonal" design in
-[docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
+The app (Tauri 2, Svelte 5, Tailwind 4, and the GNOME-style "At home on the desktop" design
+in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
 - **Overview:** the running backup's progress, last and next backup, snapshots, free space,
   recent backups, and maintenance (check, verify every byte, free up space). Warnings in
   words when something needs you (a drive not seen for days, repeated failures, little
