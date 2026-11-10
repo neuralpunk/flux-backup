@@ -20,10 +20,27 @@ pub struct CheckArgs {
     /// Also read every stored byte and verify it (slow; reads the whole backup).
     #[arg(long)]
     pub read_data: bool,
+    /// Vaults with repair data: read every stored byte, rebuild what is damaged from its
+    /// repair data, and add repair data to what lacks it (implies --read-data).
+    #[arg(long)]
+    pub repair: bool,
 }
 
-pub fn run_check(ctx: &Ctx, args: CheckArgs) -> anyhow::Result<ExitCode> {
+pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
+    args.read_data |= args.repair;
+    // What a Vault can't be opened without, first.
+    let mut repaired_first = Vec::new();
+    if args.repair {
+        let (_, p) = load_profile(ctx, &args.profile)?;
+        repaired_first = flux_runner::repo::repair_vault_basics(&ctx.paths, &p);
+    }
     let (_, _, repo) = repo_for(ctx, &args.profile)?;
+    if args.repair && repo.engine() != Engine::Vault {
+        bail!(
+            "--repair is for Vault backups, which can keep repair data (this one is {})",
+            repo.engine()
+        );
+    }
     let progress = Arc::new(Progress::new());
     crate::backup_cmd::install_ctrlc(&progress);
     let live = LiveProgress::start(
@@ -35,9 +52,10 @@ pub fn run_check(ctx: &Ctx, args: CheckArgs) -> anyhow::Result<ExitCode> {
             live.println(format!("warning: {path}: {message}"));
         }
     };
-    let r = repo.check(args.read_data, &progress, &report);
+    let r = repo.check_with(args.read_data, args.repair, &progress, &report);
     drop(live);
-    let r = r?;
+    let mut r = r?;
+    r.repaired.splice(0..0, repaired_first);
     if ctx.json {
         output::print_json(&r)?;
     } else {
@@ -46,6 +64,9 @@ pub fn run_check(ctx: &Ctx, args: CheckArgs) -> anyhow::Result<ExitCode> {
         }
         for w in &r.warnings {
             println!("note: {w}");
+        }
+        for fixed in &r.repaired {
+            println!("repaired: {fixed}");
         }
         let what = if repo.engine() == Engine::Vault {
             "blobs"
@@ -61,12 +82,29 @@ pub fn run_check(ctx: &Ctx, args: CheckArgs) -> anyhow::Result<ExitCode> {
             String::new()
         };
         let mark = if r.errors.is_empty() { "✓" } else { "✗" };
+        let repaired = match r.repaired.len() {
+            0 => String::new(),
+            n => format!(", {n} repaired"),
+        };
         println!(
-            "{mark} {} snapshots, {} {what} checked{read}: {} problems",
+            "{mark} {} snapshots, {} {what} checked{read}: {} problems{repaired}",
             group(r.snapshots),
             group(r.checked),
             r.errors.len()
         );
+        if r.parity_added > 0 {
+            println!(
+                "  repair data added to {} stored files that had none",
+                group(r.parity_added)
+            );
+        }
+        if r.repairable > 0 {
+            println!(
+                "  {} of them can be rebuilt from the repair data: flux check {} --repair",
+                group(r.repairable),
+                args.profile
+            );
+        }
         if !args.read_data && r.errors.is_empty() {
             println!("  (structure only; add --read-data to verify every byte)");
         }

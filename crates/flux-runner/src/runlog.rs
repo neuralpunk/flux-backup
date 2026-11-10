@@ -96,6 +96,12 @@ pub struct RunRecord {
     /// Unusual changes found in this backup (see [`crate::unusual`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unusual: Option<crate::unusual::UnusualReport>,
+    /// What Flux Sentry's look at this backup counted: files whose contents changed or
+    /// that were deleted, of how many. This, not the engine's own statistics, is what
+    /// Sentry learns from: the look and the history then measure the same thing (the
+    /// engine counts a changed permission, and Borg counts no deletions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sentry_seen: Option<crate::sentry::Run>,
     /// Where the time went (the performance inspector).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performance: Option<Performance>,
@@ -492,6 +498,7 @@ mod tests {
             sources_missing: Vec::new(),
             destinations: Vec::new(),
             unusual: None,
+            sentry_seen: None,
             performance: None,
         }
     }

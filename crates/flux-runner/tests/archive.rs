@@ -387,3 +387,33 @@ fn what_export_refuses() {
         "no staging or partial files left: {names:?}"
     );
 }
+
+/// The archive is made new in the chosen folder: a link someone left under the name of
+/// the unfinished archive (or of the checksum file's temporary one) is replaced, never
+/// written through. As root, in a folder of someone else's, that would overwrite any file.
+#[test]
+fn export_never_writes_through_a_planted_link() {
+    let e = env(Engine::Mirror);
+    let victim = e.root.join("victim");
+    fs::write(&victim, "precious").unwrap();
+    let out = e.root.join("out");
+    std::os::unix::fs::symlink(&victim, out.join(".x.zip.partial")).unwrap();
+    std::os::unix::fs::symlink(
+        &victim,
+        out.join(format!(".x.zip.sha256.tmp-{}", std::process::id())),
+    )
+    .unwrap();
+    let o = e
+        .export(Vec::new(), Format::Zip, "x.zip", Some(Checksums::Sha256))
+        .unwrap();
+    assert!(o.size > 0);
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+    assert!(!out.join("x.zip").is_symlink());
+    let mut names: Vec<_> = fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|f| f.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["x.zip", "x.zip.sha256"]);
+}

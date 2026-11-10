@@ -42,6 +42,9 @@ pub trait RestoreSource: Sync {
         copier: &Copier,
         progress: &Progress,
     ) -> io::Result<u64>;
+    /// Told before any file is written: the regular files this restore will ask for, in
+    /// path order. A source on a server gets ready to fetch the small ones in batches.
+    fn will_restore(&self, _files: &[&Entry]) {}
     /// Whether folder `e` is in the snapshot only as the way to something below it: its
     /// own permissions, owner and times were never backed up (Borg doesn't store the
     /// folders above the ones it's given). Such a folder is created when missing; one
@@ -309,6 +312,13 @@ pub fn restore(
     let non_dirs: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].0.kind != Kind::Dir)
         .collect();
+    source.will_restore(
+        &non_dirs
+            .iter()
+            .filter(|&&i| items[i].0.kind == Kind::File && follower_of[i].is_none())
+            .map(|&i| &items[i].0)
+            .collect::<Vec<_>>(),
+    );
     non_dirs
         .par_iter()
         .filter(|&&i| follower_of[i].is_none())
@@ -368,6 +378,8 @@ pub fn restore(
     }
 
     // Directory metadata last, deepest first, through descriptors of the directories.
+    // (One of them per filesystem is kept, to sync it at the end.)
+    let mut filesystems: HashMap<u64, rustix::fd::OwnedFd> = HashMap::new();
     for (e, dest) in items
         .iter()
         .rev()
@@ -383,11 +395,34 @@ pub fn restore(
             if e.mode & mode_mask != 0 {
                 setid_dropped.fetch_add(1, Relaxed);
             }
-            apply_metadata_fd(fd.as_fd(), e, &policy, mode_mask)
+            let done = apply_metadata_fd(fd.as_fd(), e, &policy, mode_mask);
+            if let Ok(st) = rustix::fs::fstat(&fd) {
+                filesystems.entry(st.st_dev).or_insert(fd);
+            }
+            done
         });
         if let Err(err) = r {
             warn(dest, &err);
         }
+    }
+
+    // What was restored is made durable once, here, for each filesystem it went to: not
+    // file by file as it is written (on a spinning disk that is an fsync's wait per
+    // file, hours for a million of them).
+    if let Some((_, dest)) = items.first()
+        && let Ok((dir, _)) = tree.parent(dest, false)
+        && let Ok(fd) = rustix::fs::openat(
+            &*dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        && let Ok(st) = rustix::fs::fstat(&fd)
+    {
+        filesystems.entry(st.st_dev).or_insert(fd);
+    }
+    for fd in filesystems.values() {
+        let _ = rustix::fs::syncfs(fd);
     }
 
     progress.set_phase(Phase::Done);
@@ -512,8 +547,14 @@ fn select(
     // Paths a sound snapshot never contains (`..`, absolute…): never read or written.
     let mut unsafe_paths: Vec<FileError> = Vec::new();
     let mut above = Above::new();
+    // Every link in the snapshot. A sound snapshot has nothing below one; a forged one
+    // might, to have the restore make the link and then write through it.
+    let mut links: HashSet<Vec<u8>> = HashSet::new();
     for e in entries {
         let e = e.map_err(io_err)?;
+        if e.kind == Kind::Symlink {
+            links.insert(e.path.clone());
+        }
         if !is_clean_path(&e.path) {
             unsafe_paths.push(FileError {
                 path: String::from_utf8_lossy(&e.path).into_owned(),
@@ -550,6 +591,24 @@ fn select(
             req.paths[i].clone(),
             req.snapshot.id.clone(),
         ));
+    }
+    if !links.is_empty() {
+        items.retain(|(e, _)| {
+            let below_link = e
+                .path
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'/')
+                .any(|(i, _)| links.contains(&e.path[..i]));
+            if below_link {
+                unsafe_paths.push(FileError {
+                    path: String::from_utf8_lossy(&e.path).into_owned(),
+                    message: "listed below a link in the snapshot (damaged or forged); skipped"
+                        .into(),
+                });
+            }
+            !below_link
+        });
     }
     Ok((items, unsafe_paths, above))
 }
@@ -957,6 +1016,90 @@ mod tests {
         assert!(!t.path().join("a/b/escaped.txt").exists());
         assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
         assert!(out.errors[0].message.contains("unsafe path"));
+    }
+
+    /// A forged snapshot that lists a link and then files "below" it: the restore would
+    /// make the link and then write through it, to wherever it points. Nothing below a
+    /// link is restored, hard-linked files (restored after everything else) included.
+    #[test]
+    fn forged_entries_below_a_link_are_skipped() {
+        struct Forged(Vec<Entry>);
+        impl RestoreSource for Forged {
+            fn entries(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<Entry>> + '_>> {
+                Ok(Box::new(self.0.iter().cloned().map(Ok)))
+            }
+            fn write_file(
+                &self,
+                _e: &Entry,
+                out: &File,
+                _copier: &Copier,
+                _progress: &Progress,
+            ) -> io::Result<u64> {
+                let mut out = out;
+                std::io::Write::write_all(&mut out, b"data")?;
+                Ok(4)
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let victim = t.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        let file = |path: &str, ino: u64| {
+            let mut e = entry(path, Kind::File);
+            e.size = 4;
+            e.mode = 0o644;
+            if ino != 0 {
+                e.nlink = 2;
+                e.dev = 7;
+                e.ino = ino;
+            }
+            e
+        };
+        let mut dir = entry("src", Kind::Dir);
+        dir.mode = 0o755;
+        let mut link = entry("src/x", Kind::Symlink);
+        link.link = Some(victim.as_os_str().as_encoded_bytes().to_vec());
+        let source = Forged(vec![
+            dir,
+            file("src/a", 9),
+            link,
+            file("src/x/planted", 0),
+            file("src/x/linked", 9),
+            file("src/x/deep/er", 0),
+        ]);
+        let snap = test_snapshot();
+        let to = t.path().join("dest");
+        let out = restore(
+            &source,
+            &RestoreRequest {
+                snapshot: &snap,
+                paths: vec![PathBuf::from("/src")],
+                to: Some(to.clone()),
+                keep_existing: false,
+                dry_run: false,
+                xattrs: XattrPolicy {
+                    acl: false,
+                    other: false,
+                },
+                links: LinkPolicy::FollowAll,
+                exact: None,
+            },
+            &Progress::new(),
+            &flux_core::progress::silent,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(to.join("src/a")).unwrap(), b"data");
+        assert!(to.join("src/x").is_symlink(), "the link itself is restored");
+        assert_eq!(
+            std::fs::read_dir(&victim).unwrap().count(),
+            0,
+            "nothing was written where the link points"
+        );
+        assert_eq!(out.errors.len(), 3, "{:?}", out.errors);
+        assert!(
+            out.errors
+                .iter()
+                .all(|e| e.message.contains("below a link"))
+        );
     }
 
     /// Entries with their destination under `to` (as a restore of `/` into `to` gives).

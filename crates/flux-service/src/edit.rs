@@ -185,7 +185,9 @@ pub fn delete_profile_impl(state: &Service, id: String) -> Result<()> {
     let id = ProfileId::new(id).map_err(|e| ApiError::new("error", e.to_string()))?;
     let _ = schedule::Scheduler::new(&state.paths).remove(&id);
     ProfileStore::new(&state.paths).delete(&id)?;
-    flux_runner::index::remove(&state.paths, &id);
+    // The tripwire files Flux Sentry planted for it go with it, and an open alarm is
+    // closed.
+    flux_runner::forget_profile(&state.paths, &id);
     state.forget_cached(&id);
     Ok(())
 }

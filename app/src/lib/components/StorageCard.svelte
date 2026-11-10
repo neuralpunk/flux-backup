@@ -34,6 +34,9 @@
       {#if s.stored_bytes != null}
         All {count(s.snapshots)} take <span class="font-semibold">{bytes(s.stored_bytes)}</span>{s.shared_with ? `, in a Vault shared with ${s.shared_with === 1 ? "another backup" : `${s.shared_with} other backups`}` : ""}, instead of {bytes(s.logical_bytes)} as full copies.
       {/if}
+      {#if s.repair_bytes}
+        {bytes(s.repair_bytes)} of that is repair data, {(s.packs_with_repair ?? 0) >= (s.packs ?? 0) ? "for everything stored" : `for ${count(s.packs_with_repair ?? 0)} of ${count(s.packs ?? 0)} stored files (Verify every byte adds the rest)`}.
+      {/if}
     </p>
     {#if parts}
       <div class="mt-2.5 flex h-2 overflow-hidden rounded-full bg-surface-3" role="img" aria-label="Space taken compared with full copies">

@@ -23,13 +23,16 @@ pub mod recover;
 pub mod repo;
 pub mod restore_test;
 pub mod runlog;
+pub mod sample;
 pub mod schedule;
+pub mod sentry;
 pub mod templates;
+pub mod tripwire;
 pub mod unusual;
 pub mod view;
 pub mod webhooks;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use jiff::Timestamp;
 
@@ -77,6 +80,10 @@ pub enum RunError {
     Hook(#[from] HookError),
     #[error("skipped: {0}")]
     Skipped(String),
+    /// Flux Sentry found unusual changes in the last backup, and they aren't settled:
+    /// no backup is made until they are.
+    #[error("{0}")]
+    Held(String),
     #[error("a backup of this profile is already running (watch it with `flux watch {0}`)")]
     Busy(String),
     #[error("{0}")]
@@ -128,6 +135,41 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
             RunStatus::Skipped,
             Err(RunError::Skipped(why)),
         );
+    }
+    // On hold: Flux Sentry found unusual changes in the last backup and nobody has said
+    // what they were. Nothing more is backed up, by schedule or by hand, until someone
+    // has: another backup could only store more of the damage, and pass it on to the
+    // other places.
+    if !job.dry_run
+        && job.profile.unusual_changes != flux_core::profile::Sensitivity::Off
+        && let Some(u) = sentry_hold(job.paths, job.id)
+    {
+        let why = format!(
+            "backups of “{}” are on hold: Flux Sentry found unusual changes in the last one ({}). Look at them, then say they were yours or that it's dealt with (on the backup's Overview, or `flux sentry {}`)",
+            job.profile.name,
+            u.signals.join("; "),
+            job.id
+        );
+        if job.trigger == Trigger::Scheduled {
+            webhooks::send(
+                job.paths,
+                job.id,
+                job.profile,
+                flux_core::webhook::HookEvent::Skipped,
+                format!("Backup of “{}” not made: {why}.", job.profile.name),
+                (Some("skipped".into()), None, None),
+            );
+            // Said again once a day for as long as it lasts: backups that silently
+            // stopped would be worse than what stopped them.
+            if job.profile.options.notify && hold_reminder_due(job.paths, job.id, started) {
+                desktop::notify(
+                    &format!("Backups of “{}” are on hold", job.profile.name),
+                    "Flux Sentry found unusual changes in the last backup, and no backup is made until you've looked. Open Flux Backup to see them.",
+                    desktop::Urgency::Critical,
+                );
+            }
+        }
+        return unrecorded(job, started, RunStatus::Skipped, Err(RunError::Held(why)));
     }
     let lock = if job.dry_run {
         None
@@ -196,9 +238,22 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
         if let (Some((srv, _)), Some(sh)) = (&server, &shared) {
             scope.spawn(move || srv.serve(scope, sh));
         }
+        // Whatever ends this run, a panic included, the status server is told to stop:
+        // the scope waits for it, and would wait for ever.
+        struct StopServer<'a, 'b>(Option<&'a jobs::Shared<'b>>);
+        impl Drop for StopServer<'_, '_> {
+            fn drop(&mut self) {
+                if let Some(sh) = self.0 {
+                    sh.shutdown();
+                }
+            }
+        }
+        let _stop_server = StopServer(shared.as_ref());
         let mut hooks_run: Vec<HookRun> = Vec::new();
         let mut sources_missing: Vec<std::path::PathBuf> = Vec::new();
         let mut destinations: Vec<runlog::DestinationRun> = Vec::new();
+        let mut unusual: Option<unusual::UnusualReport> = None;
+        let mut sentry_seen: Option<sentry::Run> = None;
         let turn = wait_for_turn(job, progress, &tee);
         let outcome = match &turn {
             Err(()) => Err(RunError::Engine(MirrorError::Cancelled)),
@@ -209,6 +264,8 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
                 &mut hooks_run,
                 &mut sources_missing,
                 &mut destinations,
+                &mut unusual,
+                &mut sentry_seen,
             ),
         };
         if job.trigger == Trigger::Scheduled
@@ -245,20 +302,9 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
                 .timings
                 .record_phase("Testing a restore", t.elapsed().as_secs_f64());
         }
-        // Unusual changes, judged against this backup's history.
-        let unusual = match &outcome {
-            Ok(BackupOutcome::Created { snapshot, .. }) if !job.dry_run => {
-                let t = std::time::Instant::now();
-                let found = check_unusual(job, &snapshot.id, &tee);
-                progress
-                    .timings
-                    .record_phase("Looking for unusual changes", t.elapsed().as_secs_f64());
-                found
-            }
-            _ => None,
-        };
         let mut record = finish_run(job, started, &log.run_id, progress, &outcome, hooks_run);
         record.unusual = unusual;
+        record.sentry_seen = sentry_seen;
         record.sources_missing = sources_missing;
         record.destinations = destinations;
         if !job.dry_run {
@@ -315,7 +361,7 @@ fn last_problem(job: &BackupJob<'_>) -> Option<String> {
     match last.status {
         RunStatus::Failed => Some("failed".into()),
         RunStatus::CompletedWithErrors => Some("couldn't back up some files".into()),
-        _ if last.unusual.is_some() && !unusual_dismissed(job.paths, job.id, &last) => {
+        _ if last.unusual.is_some() && !unusual_settled(job.paths, job.id, &last) => {
             Some("found unusual changes".into())
         }
         _ if !last.sources_missing.is_empty() => Some("missed a source's drive".into()),
@@ -452,6 +498,22 @@ fn tell_webhooks(job: &BackupJob<'_>, r: &RunRecord) -> Vec<(String, String)> {
                 .map(|d| format!("the copy on {} failed", d.name)),
         )
         .collect();
+    // A backup Flux Sentry stopped: that, and nothing about a backup.
+    if r.status == RunStatus::Skipped
+        && let Some(u) = &r.unusual
+    {
+        return webhooks::send(
+            job.paths,
+            job.id,
+            job.profile,
+            E::UnusualChanges,
+            format!(
+                "Flux Sentry stopped the backup of “{name}”: unusual changes in the files: {}. Backups are on hold.",
+                u.signals.join("; ")
+            ),
+            (Some("skipped".into()), None, None),
+        );
+    }
     let (event, message) = match r.status {
         RunStatus::Failed => (
             E::Failed,
@@ -534,9 +596,14 @@ fn tell_webhooks(job: &BackupJob<'_>, r: &RunRecord) -> Vec<(String, String)> {
 
 /// Look for unusual changes in snapshot `snapshot` against the one before. When found:
 /// tag it, pin the one before (with a note), say so and notify.
+/// `left_out`: sources that aren't in this snapshot because their drive isn't connected
+/// (and whose files weren't carried over): their absence is not a deletion.
+/// `seen`: what the look counted, when there was one.
 fn check_unusual(
     job: &BackupJob<'_>,
     snapshot: &str,
+    left_out: &[std::path::PathBuf],
+    seen: &mut Option<sentry::Run>,
     report: Reporter<'_>,
 ) -> Option<unusual::UnusualReport> {
     let sens = job.profile.unusual_changes;
@@ -546,43 +613,153 @@ fn check_unusual(
     let repo = repo::AnyRepo::open(job.paths, job.id, job.profile, job.ask).ok()?;
     let snaps = repo.snapshots().ok()?;
     let i = snaps.iter().position(|s| s.id == snapshot)?;
-    let prev = snaps[..i].last()?.clone();
+    // The snapshot to compare with is the newest one that isn't itself marked as
+    // unusual. After an alarm that was dealt with (the files restored), the snapshot
+    // right before this one is the one with the damage in it: against that, the clean
+    // backup would look like another attack, and the damaged one would be pinned as
+    // "the one from before". ("This was me" takes the mark off, and it counts again.)
+    let prev = snaps[..i]
+        .iter()
+        .rev()
+        .find(|s| !s.tags.iter().any(|t| t == UNUSUAL_TAG))?
+        .clone();
     let now = snaps[i].clone();
-    let entries = |s: &flux_fs::snapshot::SnapshotMeta| -> Option<Vec<flux_fs::entry::Entry>> {
-        repo.entries(s).ok()?.collect::<Result<Vec<_>, _>>().ok()
+    // Both lists streamed side by side (they are sorted by path): only what differs is
+    // kept, however many files there are.
+    let skip = roots_of(left_out);
+    let d = {
+        let failed = std::cell::Cell::new(false);
+        let files = |s: &flux_fs::snapshot::SnapshotMeta| {
+            let failed = &failed;
+            Some(
+                repo.entries(s)
+                    .ok()?
+                    .map_while(move |e| e.inspect_err(|_| failed.set(true)).ok()),
+            )
+        };
+        let before = files(&prev)?.filter(|e| !under(&e.path, &skip));
+        let d = match unusual::diff(before, files(&now)?) {
+            Some(d) => d,
+            // A listing that isn't in path order (another tool's): sorted first.
+            None => {
+                let sorted = |s: &flux_fs::snapshot::SnapshotMeta| {
+                    let mut v: Vec<flux_fs::entry::Entry> = files(s)?
+                        .filter(|e| e.kind == flux_fs::entry::Kind::File)
+                        .collect();
+                    v.sort_by(|a, b| a.path.cmp(&b.path));
+                    v.dedup_by(|a, b| a.path == b.path);
+                    Some(v)
+                };
+                let before = sorted(&prev)?
+                    .into_iter()
+                    .filter(|e| !under(&e.path, &skip));
+                unusual::diff(before, sorted(&now)?.into_iter())?
+            }
+        };
+        if failed.get() {
+            return None;
+        }
+        d
     };
-    let (before, after) = (entries(&prev)?, entries(&now)?);
-    let history = runlog::recent_runs(job.paths, job.id, 20);
-    let sample = |p: &std::path::Path| -> Option<Vec<u8>> {
-        use std::io::Read;
-        let mut buf = Vec::with_capacity(64 << 10);
-        std::fs::File::open(p)
-            .ok()?
-            .take(64 << 10)
-            .read_to_end(&mut buf)
-            .ok()?;
-        Some(buf)
-    };
-    let mut r = unusual::analyze(&before, &after, &history, sens, &sample)?;
+    let history = sentry_history(
+        job.paths,
+        job.id,
+        runlog::recent_runs(job.paths, job.id, SENTRY_READ),
+    );
+    let (counted, found) = unusual::analyze_diff(&d, &history, sens, &read_start);
+    *seen = counted;
+    let mut r = found?;
     r.snapshot = now.id.clone();
     r.before = Some(prev.id.clone());
-    let day = prev
-        .started
-        .to_zoned(jiff::tz::TimeZone::system())
-        .strftime("%Y-%m-%d %H:%M")
-        .to_string();
     // Mark the new snapshot; keep the one before for sure.
     let mut tags = now.tags.clone();
     tags.push(UNUSUAL_TAG.into());
-    let _ = repo.change(
+    if let Err(e) = repo.change(
         &now.id,
         &flux_fs::snapshot::SnapshotChange {
             tags: Some(tags),
             ..Default::default()
         },
-    );
-    if !prev.pinned {
-        let _ = repo.change(
+    ) {
+        report(Event::Warning {
+            path: String::new(),
+            message: format!(
+                "snapshot {} couldn't be marked as having unusual changes: {e}",
+                now.id
+            ),
+        });
+    }
+    (r.before_pinned, r.pinned_by_flux) = raise_alarm(job, Some((&repo, &prev)), &r, report);
+    Some(r)
+}
+
+/// `paths` as snapshot entries name them (no leading slash).
+fn roots_of(paths: &[std::path::PathBuf]) -> Vec<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    paths
+        .iter()
+        .map(|p| {
+            let b = p.as_os_str().as_bytes();
+            b.strip_prefix(b"/").unwrap_or(b).to_vec()
+        })
+        .collect()
+}
+
+/// Is `path` (a snapshot entry's) one of `roots` or below one?
+fn under(path: &[u8], roots: &[Vec<u8>]) -> bool {
+    roots.iter().any(|r| flux_fs::entry::is_within(path, r))
+}
+
+/// The start of a file as it is now (for the "looks encrypted" signal).
+fn read_start(p: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(64 << 10);
+    std::fs::File::open(p)
+        .ok()?
+        .take(64 << 10)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
+}
+
+/// Unusual changes were found: pin the snapshot from before them (with a note), say so
+/// in the log and by a notification. Returns whether that snapshot is pinned now, and
+/// whether Flux pinned it (it wasn't already).
+fn raise_alarm(
+    job: &BackupJob<'_>,
+    kept: Option<(&repo::AnyRepo, &flux_fs::snapshot::SnapshotMeta)>,
+    r: &unusual::UnusualReport,
+    report: Reporter<'_>,
+) -> (bool, bool) {
+    for s in &r.signals {
+        report(Event::Warning {
+            path: String::new(),
+            message: format!("unusual changes: {s}"),
+        });
+    }
+    let Some((repo, prev)) = kept else {
+        // No snapshot yet to keep.
+        if job.profile.options.notify {
+            desktop::notify(
+                &format!("Unusual changes in “{}”", job.profile.name),
+                &format!(
+                    "{}. The backup wasn't made, and backups are on hold. If you didn't make these changes, check your files.",
+                    r.signals.join("; ")
+                ),
+                desktop::Urgency::Critical,
+            );
+        }
+        return (false, false);
+    };
+    let day = prev
+        .started
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%Y-%m-%d %H:%M")
+        .to_string();
+    // Pinned, or said not to be: "kept for sure" must be true.
+    let mut by_flux = false;
+    let pinned = prev.pinned
+        || match repo.change(
             &prev.id,
             &flux_fs::snapshot::SnapshotChange {
                 pinned: Some(true),
@@ -592,31 +769,255 @@ fn check_unusual(
                     .then(|| Some(format!("{AUTO_PIN_NOTE} ({day})."))),
                 ..Default::default()
             },
-        );
-    }
-    for s in &r.signals {
-        report(Event::Warning {
-            path: String::new(),
-            message: format!("unusual changes: {s}"),
+        ) {
+            Ok(_) => {
+                by_flux = true;
+                true
+            }
+            Err(e) => {
+                report(Event::Warning {
+                    path: String::new(),
+                    message: format!(
+                        "snapshot {}, the last one before these changes, couldn't be pinned ({e}): pin it yourself so it isn't removed",
+                        prev.id
+                    ),
+                });
+                false
+            }
+        };
+    if pinned {
+        report(Event::Info {
+            message: format!(
+                "kept snapshot {} for sure (pinned): the last one before these changes",
+                prev.id
+            ),
         });
     }
-    report(Event::Info {
-        message: format!(
-            "kept snapshot {} for sure (pinned): the last one before these changes",
-            prev.id
-        ),
-    });
     if job.profile.options.notify {
         desktop::notify(
             &format!("Unusual changes in “{}”", job.profile.name),
             &format!(
-                "{}. The snapshot from {day}, before them, is kept. If you didn't make these changes, don't delete anything and check your files.",
-                r.signals.join("; ")
+                "{}. {} The snapshot from {day}, before them, {}. If you didn't make these changes, don't delete anything and check your files.",
+                r.signals.join("; "),
+                if r.stopped {
+                    "The backup wasn't made, and backups are on hold."
+                } else {
+                    "Backups are on hold."
+                },
+                if pinned {
+                    "is kept"
+                } else {
+                    "couldn't be pinned: open Flux and pin it"
+                }
             ),
             desktop::Urgency::Critical,
         );
     }
-    Some(r)
+    (pinned, by_flux)
+}
+
+/// What a look at the files before a backup found.
+enum Looked {
+    /// Nothing unusual: the backup can be written (and needn't be looked at after).
+    /// With what the look counted, unless the owner's word stood in for one.
+    /// And the scan it was made from, for the backup to use.
+    Fine(Option<sentry::Run>, Option<flux_fs::scan::ScanResult>),
+    /// Unusual changes: the backup isn't made.
+    Unusual(Box<unusual::UnusualReport>),
+    /// It couldn't be had (no snapshot to compare with, backups written by another
+    /// tool…): the backup is made and looked at afterwards. With the scan, if one was
+    /// made before that turned out.
+    CouldNot(Option<flux_fs::scan::ScanResult>),
+}
+
+/// The owner settled what stopped the last backup (the changes were theirs, or they've
+/// dealt with them), and no backup has been made since: this one is theirs to make,
+/// without being looked at again. It would be stopped for the very same changes, or for
+/// what an attack left lying about (renamed files, ransom notes) after the files were
+/// restored. The snapshot from before stays pinned either way.
+fn owner_cleared(paths: &flux_core::Paths, id: &flux_core::ProfileId) -> bool {
+    runlog::recent_runs(paths, id, 50)
+        .iter()
+        .find(|r| {
+            r.unusual.is_some()
+                || matches!(
+                    r.status,
+                    RunStatus::Completed | RunStatus::CompletedWithErrors | RunStatus::Unchanged
+                )
+        })
+        .is_some_and(|r| {
+            r.unusual.as_ref().is_some_and(|u| u.stopped) && unusual_settled(paths, id, r)
+        })
+}
+
+/// Look at the sources as they are now against the newest snapshot, before a backup is
+/// written. For Flux's own formats (Mirror and Vault), whose snapshots record files just
+/// as a scan sees them. `keep`: sources whose drive isn't there, kept as they were.
+fn look_before(
+    job: &BackupJob<'_>,
+    keep: &[std::path::PathBuf],
+    left_out: &[std::path::PathBuf],
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Looked {
+    let p = job.profile;
+    let sens = p.unusual_changes;
+    if sens == flux_core::profile::Sensitivity::Off {
+        return Looked::CouldNot(None);
+    }
+    if owner_cleared(job.paths, job.id) {
+        report(Event::Info {
+            message: "Flux Sentry: you settled the changes that stopped the last backup; backing up without another look".into(),
+        });
+        return Looked::Fine(None, None);
+    }
+    // The tripwires first: for a backup of any kind, and whatever else has changed.
+    let tripped = if p.tripwires {
+        tripwire::check(job.paths, job.id, &p.sources.paths)
+    } else {
+        Vec::new()
+    };
+    let repo = repo::AnyRepo::open(job.paths, job.id, p, job.ask).ok();
+    let prev = repo
+        .as_ref()
+        .and_then(|r| r.snapshots().ok())
+        .and_then(|mut s| s.pop());
+    // The files against the newest snapshot, where a scan can be compared with one.
+    // The scan is the backup's own, made here instead of there: the folders are walked
+    // (and, with checksums, the files read) once, for the look and the backup both.
+    let mut scan = None;
+    let compared = match (&repo, &prev) {
+        (Some(repo), Some(prev))
+            if matches!(p.engine, Engine::Mirror | Engine::Vault) && tripped.is_empty() =>
+        {
+            scan = scan_as_engine(job, progress, report);
+            scan.as_ref()
+                .and_then(|s| compare_with(job, repo, prev, &s.entries, keep, left_out))
+        }
+        // A tripwire has spoken: the backup is stopped whatever the files say, and they
+        // are looked at the way that costs nothing more.
+        (Some(repo), Some(prev)) if matches!(p.engine, Engine::Mirror | Engine::Vault) => {
+            scan_for_look(job).and_then(|s| compare_with(job, repo, prev, &s, keep, left_out))
+        }
+        _ => None,
+    };
+    let found = match &compared {
+        Some((_, found)) => unusual::with_tripwires(found.clone(), &tripped),
+        None => unusual::with_tripwires(None, &tripped),
+    };
+    let Some(mut r) = found else {
+        return match compared {
+            Some((seen, _)) => Looked::Fine(seen, scan),
+            None => Looked::CouldNot(scan),
+        };
+    };
+    r.stopped = true;
+    r.snapshot = format!("before:{}", Timestamp::now());
+    r.before = prev.as_ref().map(|s| s.id.clone());
+    report(Event::Warning {
+        path: String::new(),
+        message: "Flux Sentry stopped this backup before anything was written".into(),
+    });
+    (r.before_pinned, r.pinned_by_flux) =
+        raise_alarm(job, repo.as_ref().zip(prev.as_ref()), &r, report);
+    Looked::Unusual(Box::new(r))
+}
+
+/// The backup's scan of the sources, made before the backup starts: with the engine's
+/// own exclusions, counted in the run's progress, its warnings reported. `None` if the
+/// scan failed (the backup then scans for itself, and says why it can't) or this kind
+/// of backup doesn't scan.
+fn scan_as_engine(
+    job: &BackupJob<'_>,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Option<flux_fs::scan::ScanResult> {
+    let p = job.profile;
+    match p.engine {
+        Engine::Mirror if matches!(p.target, Target::Ssh { .. }) => {
+            flux_mirror::remote::scan_for_backup(p, progress, report).ok()
+        }
+        Engine::Mirror => flux_mirror::scan_for_backup(job.id, p, progress, report).ok(),
+        Engine::Vault => {
+            flux_vault::backup::scan_for_backup(p, &vault_never(p), progress, report).ok()
+        }
+        Engine::Rsync | Engine::Borg => None,
+    }
+}
+
+/// A scan of the sources for a look alone (no backup will use it): quietly.
+fn scan_for_look(job: &BackupJob<'_>) -> Option<Vec<flux_fs::entry::Entry>> {
+    let p = job.profile;
+    // The backups themselves are never backed up.
+    let never: Vec<std::path::PathBuf> = match &p.target {
+        Target::Local { path, .. } => vec![path.join("flux-backup"), path.join("flux-vault")],
+        Target::Ssh { .. } => Vec::new(),
+    };
+    let scanned = flux_fs::scan::thread_pool(p).ok()?.install(|| {
+        flux_fs::scan::scan_profile(p, &never, &Progress::new(), &flux_core::progress::silent)
+    });
+    Some(scanned.ok()?.entries)
+}
+
+/// What a Vault backup never scans: the Vault itself, and a plain-folder backup beside it.
+fn vault_never(p: &flux_core::Profile) -> Vec<std::path::PathBuf> {
+    match &p.target {
+        Target::Local { .. } => {
+            let root = repo::vault_root(p);
+            vec![root.clone(), root.with_file_name("flux-backup")]
+        }
+        Target::Ssh { .. } => Vec::new(),
+    }
+}
+
+/// The sources as scanned just now (`after`, sorted by path) against snapshot `prev`:
+/// `None` if the look couldn't be had; otherwise what it counted and, if anything is
+/// unusual, what. `keep`: sources whose drive is away and whose files the backup carries
+/// over from `prev`; `left_out`: those it leaves out of the snapshot instead (their
+/// absence is not a deletion).
+fn compare_with(
+    job: &BackupJob<'_>,
+    repo: &repo::AnyRepo,
+    prev: &flux_fs::snapshot::SnapshotMeta,
+    after: &[flux_fs::entry::Entry],
+    keep: &[std::path::PathBuf],
+    left_out: &[std::path::PathBuf],
+) -> Option<(Option<sentry::Run>, Option<unusual::UnusualReport>)> {
+    let p = job.profile;
+    // Sources whose drive is away are in neither list: the scan doesn't see them, and
+    // the snapshot's are passed over (carried over or left out, they aren't changes).
+    let mut away = roots_of(keep);
+    away.extend(roots_of(left_out));
+    // The snapshot's list streams by against the scan (both are sorted by path): only
+    // what differs is kept. A Vault's comes from the list the last backup left in the
+    // cache, when it is this snapshot's: reading it from the Vault is a read per
+    // folder, hours over a network.
+    let failed = std::cell::Cell::new(false);
+    let before = repo
+        .entries_for_look(job.paths, prev)
+        .ok()?
+        .map_while(|e| e.inspect_err(|_| failed.set(true)).ok())
+        .filter(|e| !under(&e.path, &away))
+        // A scan has no checksums: compare by size and time, as the scan can.
+        .map(|mut e| {
+            e.hash = None;
+            e
+        });
+    let d = unusual::diff(before, after.iter().cloned())?;
+    if failed.get() {
+        return None;
+    }
+    let history = sentry_history(
+        job.paths,
+        job.id,
+        runlog::recent_runs(job.paths, job.id, SENTRY_READ),
+    );
+    Some(unusual::analyze_diff(
+        &d,
+        &history,
+        p.unusual_changes,
+        &read_start,
+    ))
 }
 
 /// The tag a snapshot with unusual changes gets.
@@ -631,6 +1032,285 @@ fn unusual_state(paths: &flux_core::Paths, id: &flux_core::ProfileId) -> std::pa
         .join(format!("{id}.dismissed"))
 }
 
+/// How many of a backup's latest runs Flux Sentry learns from.
+pub const SENTRY_RUNS: usize = 60;
+/// How many run records are read to find them.
+pub const SENTRY_READ: usize = 300;
+
+/// The runs Flux Sentry learns a backup's normal from (`runs`: its latest, newest
+/// first): not those whose changes were found unusual, unless their owner said they were
+/// theirs. What looked like an attack isn't taken for a habit.
+pub fn sentry_history(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    runs: Vec<RunRecord>,
+) -> Vec<RunRecord> {
+    let dismissed = dismissed_unusual(paths, id);
+    // The last 60 that made a snapshot: failed, skipped and unchanged runs in between
+    // (a drive away for a few days of an hourly backup) don't push them out.
+    // The first backup after a stopped one that was *dealt with* is made without a look
+    // (see `owner_cleared`) and may hold whatever of the changes wasn't put back:
+    // "nothing is learned" covers it too.
+    let resolved = lines_of(&resolved_state(paths, id));
+    let makes = |r: &RunRecord| {
+        matches!(
+            r.status,
+            RunStatus::Completed | RunStatus::CompletedWithErrors | RunStatus::Unchanged
+        )
+    };
+    let unlooked: HashSet<String> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| makes(r) && r.unusual.is_none())
+        .filter(|(i, _)| {
+            runs[i + 1..]
+                .iter()
+                .find(|older| older.unusual.is_some() || makes(older))
+                .and_then(|older| older.unusual.as_ref())
+                .is_some_and(|u| {
+                    u.stopped && resolved.contains(&u.snapshot) && !dismissed.contains(&u.snapshot)
+                })
+        })
+        .map(|(_, r)| r.run_id.clone())
+        .collect();
+    let mut made = 0;
+    runs.into_iter()
+        .filter(|r| !unlooked.contains(&r.run_id))
+        .take_while(|r| {
+            let counts = matches!(
+                r.status,
+                RunStatus::Completed | RunStatus::CompletedWithErrors
+            );
+            made += usize::from(counts);
+            made <= SENTRY_RUNS
+        })
+        .filter(|r| {
+            r.unusual
+                .as_ref()
+                .is_none_or(|u| dismissed.contains(&u.snapshot))
+        })
+        .collect()
+}
+
+/// The snapshots whose unusual changes were dismissed, oldest first (the last 100).
+fn dismissed_unusual(paths: &flux_core::Paths, id: &flux_core::ProfileId) -> Vec<String> {
+    std::fs::read_to_string(unusual_state(paths, id))
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_owned())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn resolved_state(paths: &flux_core::Paths, id: &flux_core::ProfileId) -> std::path::PathBuf {
+    paths
+        .state_dir
+        .join("unusual")
+        .join(format!("{id}.resolved"))
+}
+
+fn lines_of(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_owned())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The person said the unusual changes in `snapshot` are dealt with (files restored, the
+/// computer cleaned): backups go on. Unlike [`dismiss_unusual`], the changes weren't
+/// theirs, so Flux Sentry learns nothing from that backup, and the snapshot before it
+/// stays pinned.
+pub fn resolve_unusual(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    snapshot: &str,
+) -> std::io::Result<()> {
+    let p = resolved_state(paths, id);
+    std::fs::create_dir_all(p.parent().expect("state folder"))?;
+    let mut all = lines_of(&p);
+    all.retain(|s| s != snapshot);
+    all.push(snapshot.to_owned());
+    let from = all.len().saturating_sub(100);
+    flux_core::store::write_atomic(&p, all[from..].join("\n").as_bytes(), 0o600)
+        .map_err(std::io::Error::other)
+}
+
+/// Were the unusual changes of this run settled: said to be the person's own, or dealt
+/// with?
+pub fn unusual_settled(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    run: &RunRecord,
+) -> bool {
+    unusual_dismissed(paths, id, run)
+        || run
+            .unusual
+            .as_ref()
+            .is_some_and(|u| lines_of(&resolved_state(paths, id)).contains(&u.snapshot))
+}
+
+/// The unusual changes that hold this backup: those of its latest flagged backup, while
+/// they aren't settled.
+pub fn sentry_hold(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+) -> Option<unusual::UnusualReport> {
+    open_unusual(paths, id, &runlog::recent_runs(paths, id, 300))
+}
+
+/// [`sentry_hold`], from runs already read (newest first).
+pub fn open_unusual(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    runs: &[RunRecord],
+) -> Option<unusual::UnusualReport> {
+    // The latest run that found something or made a backup. A backup made since an
+    // alarm (Flux Sentry was switched off for a while, say) means it is no longer what
+    // holds this backup: an old alarm doesn't come back when Sentry is switched on.
+    let run = runs.iter().find(|r| {
+        r.unusual.is_some()
+            || matches!(
+                r.status,
+                RunStatus::Completed | RunStatus::CompletedWithErrors | RunStatus::Unchanged
+            )
+    })?;
+    run.unusual.as_ref()?;
+    (!unusual_settled(paths, id, run))
+        .then(|| run.unusual.clone())
+        .flatten()
+}
+
+/// A profile was deleted: what Flux keeps for it outside its backups goes or is settled,
+/// so that nothing of it clings to a profile later made under the same id. Its tripwire
+/// files are removed (those still as planted), its file index is dropped, and an alarm
+/// still open is closed as dealt with (the new profile would start out on hold).
+/// The run history stays.
+pub fn forget_profile(paths: &flux_core::Paths, id: &flux_core::ProfileId) {
+    tripwire::remove(paths, id);
+    index::remove(paths, id);
+    if let Some(u) = sentry_hold(paths, id) {
+        let _ = resolve_unusual(paths, id, &u.snapshot);
+    }
+}
+
+/// Is it time to say again that this backup is on hold? Once a day; saying so counts.
+fn hold_reminder_due(paths: &flux_core::Paths, id: &flux_core::ProfileId, now: Timestamp) -> bool {
+    let stamp = paths
+        .state_dir
+        .join("unusual")
+        .join(format!("{id}.reminded"));
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<Timestamp>().ok());
+    // (A stamp from the future, after the clock was set back, doesn't silence it.)
+    if last.is_some_and(|l| (0..86_400).contains(&now.duration_since(l).as_secs())) {
+        return false;
+    }
+    // (The folder isn't there until something has been settled once: without it the
+    // stamp was never written, and the reminder came with every attempt.)
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = flux_core::store::write_atomic(&stamp, now.to_string().as_bytes(), 0o600);
+    true
+}
+
+/// Settle the unusual changes of `snapshot` and let backups go on. `mine`: they were the
+/// person's own ("This was me"): Flux Sentry counts that backup as normal from now on,
+/// its tag goes, and the snapshot before it is unpinned if Flux pinned it. Otherwise
+/// they are dealt with: nothing is learned, and the tag and the pin stay.
+pub fn settle_unusual(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    profile: &flux_core::Profile,
+    snapshot: &str,
+    mine: bool,
+    repo: Option<&repo::AnyRepo>,
+) -> std::io::Result<Settled> {
+    // Tripwires that were changed or removed are set again: what tripped them is
+    // settled, and they would only stop the next backup too.
+    if profile.tripwires {
+        tripwire::rearm(paths, id, profile);
+    }
+    if !mine {
+        resolve_unusual(paths, id, snapshot)?;
+        return Ok(Settled { marks_left: false });
+    }
+    dismiss_unusual(paths, id, snapshot)?;
+    let alarm = runlog::recent_runs(paths, id, 300)
+        .into_iter()
+        .find_map(|r| r.unusual.filter(|u| u.snapshot == snapshot));
+    // What "mine" takes off again: the tag on the snapshot with the changes (there is
+    // none when the backup was stopped before it was written), and the pin Flux put on
+    // the one before.
+    let tagged = alarm.as_ref().is_some_and(|u| !u.stopped);
+    let before = alarm.as_ref().and_then(|u| u.before.clone());
+    let Some(snaps) = repo.and_then(|r| r.snapshots().ok().map(|s| (r, s))) else {
+        // The backups can't be reached now: the tag and the pin stay as they are.
+        return Ok(Settled {
+            marks_left: tagged || before.is_some(),
+        });
+    };
+    let (repo, snaps) = snaps;
+    let mut marks_left = false;
+    if let Some(s) = snaps.iter().find(|s| s.id == snapshot)
+        && s.tags.iter().any(|t| t == UNUSUAL_TAG)
+    {
+        let tags: Vec<String> = s
+            .tags
+            .iter()
+            .filter(|t| *t != UNUSUAL_TAG)
+            .cloned()
+            .collect();
+        marks_left |= repo
+            .change(
+                &s.id,
+                &flux_fs::snapshot::SnapshotChange {
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            )
+            .is_err();
+    }
+    if let Some(s) = before.and_then(|b| snaps.iter().find(|s| s.id == b))
+        && s.pinned
+    {
+        // Flux's own note goes with its pin; a note of the owner's stays.
+        let auto_note = s
+            .note
+            .as_deref()
+            .is_some_and(|n| n.starts_with(AUTO_PIN_NOTE));
+        if alarm.as_ref().is_some_and(|u| u.pinned_by_flux) || auto_note {
+            marks_left |= repo
+                .change(
+                    &s.id,
+                    &flux_fs::snapshot::SnapshotChange {
+                        pinned: Some(false),
+                        note: auto_note.then_some(None),
+                        ..Default::default()
+                    },
+                )
+                .is_err();
+        }
+    }
+    Ok(Settled { marks_left })
+}
+
+/// How settling an alarm went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Settled {
+    /// "This was me" couldn't take the *unusual changes* tag or Flux's pin off the
+    /// snapshots (the backups can't be reached now, or the change failed): they stay
+    /// until taken off by hand.
+    pub marks_left: bool,
+}
+
 /// The person said the unusual changes in `snapshot` were theirs.
 pub fn dismiss_unusual(
     paths: &flux_core::Paths,
@@ -639,7 +1319,14 @@ pub fn dismiss_unusual(
 ) -> std::io::Result<()> {
     let p = unusual_state(paths, id);
     std::fs::create_dir_all(p.parent().expect("state folder"))?;
-    flux_core::store::write_atomic(&p, snapshot.as_bytes(), 0o600).map_err(std::io::Error::other)
+    // Every one is remembered (before 1.1, only the latest): Flux Sentry learns from
+    // the changes that were the owner's.
+    let mut all = dismissed_unusual(paths, id);
+    all.retain(|s| s != snapshot);
+    all.push(snapshot.to_owned());
+    let from = all.len().saturating_sub(100);
+    flux_core::store::write_atomic(&p, all[from..].join("\n").as_bytes(), 0o600)
+        .map_err(std::io::Error::other)
 }
 
 /// Were the unusual changes of this run dismissed ("This was me")?
@@ -648,9 +1335,9 @@ pub fn unusual_dismissed(
     id: &flux_core::ProfileId,
     run: &RunRecord,
 ) -> bool {
-    run.unusual.as_ref().is_some_and(|u| {
-        std::fs::read_to_string(unusual_state(paths, id)).is_ok_and(|s| s.trim() == u.snapshot)
-    })
+    run.unusual
+        .as_ref()
+        .is_some_and(|u| dismissed_unusual(paths, id).contains(&u.snapshot))
 }
 
 /// Run the profile's restore test after a backup: said in the run's log, and notified
@@ -800,7 +1487,7 @@ fn status_of(outcome: &Result<BackupOutcome, RunError>) -> RunStatus {
         },
         Ok(BackupOutcome::Unchanged { .. }) => RunStatus::Unchanged,
         Ok(BackupOutcome::DryRun { .. }) => RunStatus::DryRun,
-        Err(RunError::Skipped(_) | RunError::Busy(_)) => RunStatus::Skipped,
+        Err(RunError::Skipped(_) | RunError::Busy(_) | RunError::Held(_)) => RunStatus::Skipped,
         Err(e) if e.is_cancelled() => RunStatus::Cancelled,
         Err(_) => RunStatus::Failed,
     }
@@ -968,6 +1655,7 @@ fn unrecorded(
         sources_missing: Vec::new(),
         destinations: Vec::new(),
         unusual: None,
+        sentry_seen: None,
         performance: None,
     };
     RunResult { record, outcome }
@@ -1048,6 +1736,7 @@ fn finish_run(
         sources_missing: Vec::new(),
         destinations: Vec::new(),
         unusual: None,
+        sentry_seen: None,
         performance: {
             // The phase the engine was last in ends here.
             if progress.phase() != flux_core::progress::Phase::Done {
@@ -1078,6 +1767,7 @@ pub fn disk_size(target: &flux_core::profile::Target) -> Option<u64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_inner(
     job: &BackupJob<'_>,
     progress: &Progress,
@@ -1085,6 +1775,8 @@ fn run_inner(
     hooks_run: &mut Vec<HookRun>,
     sources_missing: &mut Vec<std::path::PathBuf>,
     destinations: &mut Vec<runlog::DestinationRun>,
+    unusual: &mut Option<unusual::UnusualReport>,
+    sentry_seen: &mut Option<sentry::Run>,
 ) -> Result<BackupOutcome, RunError> {
     // Sources whose drive isn't there: wait, fail, or back up the rest (see
     // `flux_core::source_check`). The engines see only the sources that are there.
@@ -1122,6 +1814,9 @@ fn run_inner(
     }
     let keep = if carries { missing.clone() } else { Vec::new() };
     let all_missing = missing.clone();
+    // Sources left out of this snapshot altogether (their drive is away, and this kind
+    // of backup doesn't carry their files over): not deletions, to Flux Sentry.
+    let left_out = if carries { Vec::new() } else { missing.clone() };
     *sources_missing = missing;
     // After a backup with problems, keep everything until one runs cleanly (a bad run
     // mustn't push good snapshots out).
@@ -1188,17 +1883,119 @@ fn run_inner(
         r
     };
 
+    // Flux Sentry looks at the files before anything is written: a backup of files that
+    // show the marks of an attack isn't made at all. (After the "before" hook, which may
+    // be what makes the backups reachable.)
+    let mut looked = false;
     let result = run_hook(HookEvent::PreBackup, &p.hooks.pre_backup, &env, hooks_run)
         .map_err(RunError::from)
-        .and_then(|()| engine_backup(job, saved, keep, progress, report));
+        .and_then(|()| {
+            let mut scanned = None;
+            if !job.dry_run {
+                // Tripwires where the profile asks for them and has none yet; none
+                // where it doesn't (any more). Before the scan, so the snapshot holds
+                // them. (A changed or removed one is never set again here: that is for
+                // the look, just below, to find.)
+                if p.tripwires && p.unusual_changes != flux_core::profile::Sensitivity::Off {
+                    let planted = tripwire::plant(job.paths, job.id, p);
+                    if planted > 0 {
+                        report(Event::Info {
+                            message: format!(
+                                "Flux Sentry planted {planted} tripwire files ({}) in the folders this backs up",
+                                tripwire::NAME
+                            ),
+                        });
+                    }
+                } else if !tripwire::load(job.paths, job.id).is_empty() {
+                    // (Those on a drive that's away are removed when it's back.)
+                    let removed = tripwire::remove(job.paths, job.id);
+                    if removed > 0 {
+                        report(Event::Info {
+                            message: format!("Flux Sentry removed its {removed} tripwire files"),
+                        });
+                    }
+                }
+                let t = std::time::Instant::now();
+                let seen = look_before(job, keep, &left_out, progress, report);
+                progress
+                    .timings
+                    .record_phase("Looking for unusual changes", t.elapsed().as_secs_f64());
+                match seen {
+                    Looked::Unusual(u) => {
+                        let why = format!(
+                            "not backed up: Flux Sentry found unusual changes in the files ({}). The backups are as they were, and on hold until you've looked",
+                            u.signals.join("; ")
+                        );
+                        *unusual = Some(*u);
+                        return Err(RunError::Held(why));
+                    }
+                    Looked::Fine(seen, scan) => {
+                        looked = true;
+                        *sentry_seen = seen;
+                        scanned = scan;
+                    }
+                    Looked::CouldNot(scan) => scanned = scan,
+                }
+            }
+            engine_backup(job, saved, keep, scanned, progress, report)
+        });
 
+    // Unusual changes, judged against this backup's history: before anything goes to the
+    // other places.
+    // (Only where the look before the backup couldn't be had: backups written by rsync or
+    // Borg, and a backup's first runs.)
+    if let Ok(BackupOutcome::Created { snapshot, .. }) = &result
+        && !job.dry_run
+        && !looked
+    {
+        let t = std::time::Instant::now();
+        *unusual = check_unusual(job, &snapshot.id, &left_out, sentry_seen, report);
+        progress
+            .timings
+            .record_phase("Looking for unusual changes", t.elapsed().as_secs_f64());
+    }
     // More destinations, each backed up from the sources in turn (independent copies: a
     // fault in one never reaches another). Not after a failed "before" hook or a stop.
     let hook_failed = matches!(result, Err(RunError::Hook(_)));
-    if !job.profile.destinations.is_empty() && !hook_failed {
+    if unusual.is_some() && !job.profile.destinations.is_empty() {
+        // What looks like an attack stays out of the other places: their copies are as
+        // they were before it, the ones kept elsewhere above all.
+        report(Event::Info {
+            message: "the other places weren't backed up to: they keep their copies from before the unusual changes".into(),
+        });
+        for d in &job.profile.destinations {
+            destinations.push(destination_run(
+                &d.name,
+                &Err(RunError::Skipped(
+                    "Flux Sentry found unusual changes: this place keeps its copy from before them"
+                        .into(),
+                )),
+            ));
+        }
+    } else if !job.profile.destinations.is_empty() && !hook_failed {
+        // The main backup failed before Flux Sentry had its look (its drive is away, its
+        // server unreachable): nothing has compared the files with a snapshot, and the
+        // other places must not take what looks like an attack unlooked-at. Each is
+        // looked at against its own newest snapshot: before it's written where that can
+        // be had (Flux's own formats), right after where it can't (rsync, Borg).
+        let mut unlooked = result.is_err()
+            && !looked
+            && !job.dry_run
+            && job.profile.unusual_changes != flux_core::profile::Sensitivity::Off;
         for d in &job.profile.destinations {
             if progress.is_cancelled() {
                 break;
+            }
+            if unusual.is_some() {
+                // Found while looking for an earlier place: the rest keep their copies.
+                destinations.push(destination_run(
+                    &d.name,
+                    &Err(RunError::Skipped(
+                        "Flux Sentry found unusual changes: this place keeps its copy from before them"
+                            .into(),
+                    )),
+                ));
+                continue;
             }
             let (Ok(did), Some(dp)) = (
                 job.id.with_destination(&d.name),
@@ -1224,6 +2021,14 @@ fn run_inner(
                 continue;
             }
             progress.set_phase(flux_core::progress::Phase::Preparing);
+            // Each place counts from nothing: what the main backup did isn't part of
+            // this one's progress (it showed as more than all of it).
+            progress
+                .entries_done
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            progress
+                .bytes_done
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             report(Event::Info {
                 message: format!("backing up to {}", d.label()),
             });
@@ -1248,7 +2053,71 @@ fn run_inner(
                     Vec::new()
                 };
                 let dsaved = saved.for_destination(&d.name).unwrap_or_else(|| dp.clone());
-                engine_backup(&djob, &dsaved, &dkeep, progress, report)
+                let mut look_after = unlooked;
+                if unlooked
+                    && matches!(dp.engine, Engine::Mirror | Engine::Vault)
+                    && let Ok(drepo) = repo::AnyRepo::open(djob.paths, djob.id, &dp, djob.ask)
+                    && let Some(dprev) = drepo.snapshots().ok().and_then(|mut s| s.pop())
+                {
+                    // The main backup's history, this place's files and folders.
+                    let look = BackupJob {
+                        paths: job.paths,
+                        id: job.id,
+                        profile: &dp,
+                        name: None,
+                        dry_run: false,
+                        trigger: job.trigger,
+                        prune: false,
+                        only_if_due: false,
+                        ask: job.ask,
+                        shutdown_after: false,
+                    };
+                    // (`dkeep` is every missing source when this place carries them
+                    // over, none when it leaves them out.)
+                    let dleft: &[std::path::PathBuf] =
+                        if dkeep.is_empty() { &all_missing } else { &[] };
+                    let compared = scan_for_look(&look)
+                        .and_then(|s| compare_with(&look, &drepo, &dprev, &s, &dkeep, dleft));
+                    match compared {
+                        Some((_, Some(mut u))) => {
+                            u.stopped = true;
+                            u.snapshot = format!("before:{}", Timestamp::now());
+                            u.before = Some(dprev.id.clone());
+                            report(Event::Warning {
+                                path: String::new(),
+                                message: format!(
+                                    "Flux Sentry stopped the backup to {} before anything was written",
+                                    d.label()
+                                ),
+                            });
+                            (u.before_pinned, u.pinned_by_flux) =
+                                raise_alarm(job, Some((&drepo, &dprev)), &u, report);
+                            *unusual = Some(u);
+                            destinations.push(destination_run(
+                                &d.name,
+                                &Err(RunError::Skipped(
+                                    "Flux Sentry found unusual changes: this place keeps its copy from before them"
+                                        .into(),
+                                )),
+                            ));
+                            continue;
+                        }
+                        // Nothing unusual in the files as they are: that holds for
+                        // every place.
+                        Some((_, None)) => {
+                            unlooked = false;
+                            look_after = false;
+                        }
+                        None => {}
+                    }
+                }
+                let r = engine_backup(&djob, &dsaved, &dkeep, None, progress, report);
+                if look_after && let Ok(BackupOutcome::Created { snapshot, .. }) = &r {
+                    let dleft: &[std::path::PathBuf] =
+                        if dkeep.is_empty() { &all_missing } else { &[] };
+                    *unusual = check_unusual(&djob, &snapshot.id, dleft, &mut None, report);
+                }
+                r
             };
             if let Err(RunError::Skipped(why)) = &r {
                 report(Event::Info {
@@ -1377,10 +2246,12 @@ fn borg_backup(
 
 /// Back up `job` with its engine. `keep`: sources whose drive is missing, kept from the
 /// previous snapshot (Mirror on a local target and Vault; empty for the others).
+/// `scanned`: the scan of the sources, when it was made already (for Flux Sentry's look).
 fn engine_backup(
     job: &BackupJob<'_>,
     saved: &Profile,
     keep: &[std::path::PathBuf],
+    scanned: Option<flux_fs::scan::ScanResult>,
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<BackupOutcome, RunError> {
@@ -1404,7 +2275,7 @@ fn engine_backup(
     let out = match p.engine {
         Engine::Mirror if matches!(p.target, Target::Ssh { .. }) => {
             let pool = repo::sftp_pool(job.paths, p, job.ask.is_none()).expect("ssh target");
-            flux_mirror::remote::backup(
+            flux_mirror::remote::backup_scanned(
                 pool,
                 &flux_mirror::remote::RemoteBackup {
                     id: job.id,
@@ -1414,12 +2285,13 @@ fn engine_backup(
                     prune: job.prune,
                     cache_dir: &job.paths.cache_dir,
                 },
+                scanned,
                 progress,
                 report,
             )
             .map_err(RunError::from)
         }
-        Engine::Mirror => flux_mirror::backup(
+        Engine::Mirror => flux_mirror::backup_scanned(
             &BackupRequest {
                 id: job.id,
                 profile: p,
@@ -1428,11 +2300,12 @@ fn engine_backup(
                 prune: job.prune,
                 keep: keep.clone(),
             },
+            scanned,
             progress,
             report,
         )
         .map_err(RunError::from),
-        Engine::Vault => vault_backup(job, saved, keep, progress, report),
+        Engine::Vault => vault_backup(job, saved, keep, scanned, progress, report),
         Engine::Borg => borg_backup(job, progress, report),
         Engine::Rsync => flux_compat::rsync::backup(
             &flux_compat::rsync::BackupRequest {
@@ -1589,20 +2462,15 @@ fn vault_backup(
     job: &BackupJob<'_>,
     saved: &Profile,
     keep: &[std::path::PathBuf],
+    scanned: Option<flux_fs::scan::ScanResult>,
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<BackupOutcome, RunError> {
     let p = job.profile;
     let repo = repo::open_vault(job.paths, job.id, p, !job.dry_run, job.ask)?;
     let owner = repo::owner_of(job.id, p);
-    let never = match &p.target {
-        Target::Local { .. } => {
-            let root = repo::vault_root(p);
-            vec![root.clone(), root.with_file_name("flux-backup")]
-        }
-        Target::Ssh { .. } => Vec::new(),
-    };
-    let out = flux_vault::backup::backup(
+    let never = vault_never(p);
+    let out = flux_vault::backup::backup_scanned(
         &repo,
         &flux_vault::backup::BackupRequest {
             owner: &owner,
@@ -1613,6 +2481,7 @@ fn vault_backup(
             cache_dir: Some(job.paths.cache_dir.join("vault")),
             keep: keep.to_vec(),
         },
+        scanned,
         progress,
         report,
     )?;

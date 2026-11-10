@@ -9,11 +9,36 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 1.0. See the [changelog](CHANGELOG.md) for what's new. Read the
+> **Status:** 1.1. See the [changelog](CHANGELOG.md) for what's new. Read the
 > [user guide](docs/USER_GUIDE.md) to get started, the [threat model](docs/THREAT_MODEL.md)
 > for what Flux protects against, and [FORMATS.md](docs/FORMATS.md) for how your backups
 > are stored (frozen for 1.x). [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md)
 > show how it was built.
+
+### What 1.1 refines
+
+- **Restore tests that leave nothing behind.** Files are read back and checked as they
+  stream; nothing is restored or written anywhere, so encrypted backups stay encrypted.
+- **Flux Sentry.** Unusual-change detection that learns each backup's own normal: a
+  quiet backup warns early, a busy one doesn't cry wolf. Setting up a backup asks how it
+  should watch, and a green tag on the backup's page says it does.
+- **Repair, not just detection.** A Vault can keep Reed–Solomon repair data (5% more
+  space, say): *Verify every byte* then rebuilds what a failing drive has damaged.
+- **Restore tests that state their confidence.** *Enough to be sure* tests as many random
+  files as it takes to say "if 1% or more of the files were damaged, this test would have
+  found it (99% certain)": 459 files, however big the backup.
+- **Settings at a glance.** Each backup's settings summed up on its Overview, and every
+  backup's side by side in a sortable table on *All backups*.
+- **A checklist you can act on.** Each line of *Could you recover it on another
+  computer?* has a button that does it.
+- **Fewer surprises.** A warning (with the fix) when a scheduled backup's password is set
+  to be asked for each time; times typed the way you write them, on a 12- or 24-hour
+  clock, and custom times previewed; *Exclude Files/Directories*; closing the window
+  keeps Flux in the tray.
+- **Clearer at a glance.** One count of what needs you, red only for what isn't
+  protected, statuses that say what's wrong; a calmer Overview; what each check proves;
+  plain words for durations and storage.
+- **Man pages with examples** for every command.
 
 ### What 1.0 adds
 
@@ -24,7 +49,8 @@ rebuilds it in Rust. The aims are more speed, more capability and a modern inter
 - **More than one copy.** A backup can go to several places, some kept elsewhere, each
   stored its own way, or copied from the first.
 - **Know it works.** Restore tests on a schedule, a recovery-readiness checklist, and a
-  warning (with the snapshot before kept safe) when a backup looks like ransomware's work.
+  warning from Flux Sentry (with the snapshot before kept safe) when a backup looks like
+  ransomware's work.
 - **Told where you are.** Webhooks to ntfy, Gotify, chats or healthchecks-style monitors.
 - **Easier to set up.** Templates, a rule tester that says why a file is or isn't backed
   up, network rules, a calendar of snapshots, and where each backup's space and time go.
@@ -90,11 +116,14 @@ the other engines. See the
 | ![Recovering an existing backup on a new computer](docs/screenshots/recover-dark.png) | ![Templates for a new backup](docs/screenshots/templates-dark.png) |
 | ![What's backed up, and the rule that leaves node_modules out](docs/screenshots/rules-dark.png) | ![The snapshot calendar](docs/screenshots/calendar-dark.png) |
 | ![Storage and recovery readiness](docs/screenshots/storage-dark.png) | ![Exporting a snapshot as an archive](docs/screenshots/archive-dark.png) |
+| ![A backup's settings at a glance](docs/screenshots/glance-dark.png) | ![Every backup's settings side by side](docs/screenshots/table-dark.png) |
+| ![Setting up a backup: should Flux Sentry keep watch?](docs/screenshots/sentry-dark.png) | |
 
 The app (Tauri 2, Svelte 5, Tailwind 4, and the GNOME-style "At home on the desktop" design
 in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
-- **Overview:** the running backup's progress, last and next backup, snapshots, free space,
-  recent backups, and maintenance (check, verify every byte, free up space). Warnings in
+- **Overview:** the running backup's progress, last and next backup, snapshots, its
+  settings at a glance, free space, recent backups, and maintenance (check, verify every
+  byte, free up space). Warnings in
   words when something needs you (a drive not seen for days, repeated failures, little
   space), and a chart of used space with a forecast of when the drive is full.
 - **Snapshots:** every snapshot with an instant file browser. "What changed" compares with the
@@ -117,7 +146,8 @@ in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
   to back it up, open its snapshots, activity or settings, duplicate, export or delete it,
   or pause all scheduled backups. Snapshots, files and runs have the same kind of menu.
 - **Preferences:** pause scheduled backups (an hour, until tomorrow, until resumed),
-  notifications for successful backups, start in the tray at login, theme, and the
+  notifications for successful backups, start in the tray at login, keep running in the
+  tray when the window closes, theme, 12- or 24-hour clock, and the
   exclusions new backups start with.
 - **Compatibility mode:** a **Usable without Flux** choice lets rsync or Borg write the
   backups in their own formats; the Overview's **Recovery guide** shows the kit kept next to
@@ -436,7 +466,9 @@ should rename it to the app ID with `rename-desktop-file` (and the icon with `re
 
 `flux completions <bash|zsh|fish>` prints a completion script. Every command has a man page:
 `man flux`, `man flux-restore` and so on, installed by the packages (74 pages) and by
-`install.sh`.
+`install.sh`. Each says what the command does and what it changes, with examples of basic
+use, its exit status and related pages; `flux <command> --help` ends with the same
+examples.
 
 ## License
 

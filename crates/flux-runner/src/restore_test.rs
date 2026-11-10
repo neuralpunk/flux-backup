@@ -1,17 +1,31 @@
-//! Restore tests: now and then, restore a sample of a snapshot into a private temporary
-//! folder and check every restored file against the backup's own record (and, if asked,
-//! against the file on disk now). A backup that was written isn't proof that it can be read
-//! back; this is.
+//! Restore tests: now and then, read a sample of a snapshot back the way a restore reads
+//! it, and check every file against the backup's own record (and, if asked, against the
+//! file on disk now). A backup that was written isn't proof that it can be read back; this
+//! is.
 //!
-//! Modes: some random files (10 by default), a percentage of the size, everything, or
-//! *rolling*: every file once per window (30 days by default). Rolling keeps one number,
-//! a position in the files' hash order, and each test moves it on by the share of the
+//! Nothing is restored anywhere. Each file streams out of the backup (decrypted and
+//! decompressed, for a Vault) through a small buffer, into a checksum, and the buffer is
+//! wiped after each piece: no copy lands on a disk or in a temporary folder, only a piece
+//! of one file is in memory at a time, so an encrypted backup's files stay encrypted at
+//! rest throughout, and memory use is the same for ten files as for every file. (Before
+//! 1.1 the sample was restored into a temporary folder; one left behind by a crash is
+//! removed.)
+//!
+//! Modes: some random files (10 by default), a percentage of the size, everything,
+//! *rolling*: every file once per window (30 days by default), or *confidence*: as many
+//! random files as it takes to catch damage to a given share of the files with a given
+//! certainty (the arithmetic is in [`crate::sample`]). Rolling keeps one number, a
+//! position in the files' hash order, and each test moves it on by the share of the
 //! window that has passed since the last test, testing the files in between.
+//!
+//! A test of a uniform random sample that passes says what it would have caught: its
+//! report carries a [`Guarantee`].
 
 use std::collections::HashMap;
-use std::os::unix::ffi::OsStrExt;
+use std::io::{self, Read};
+use std::ops::ControlFlow;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
@@ -19,12 +33,14 @@ use serde::{Deserialize, Serialize};
 
 use flux_core::profile::{Profile, RestoreTest, TestEvery, TestMode};
 use flux_core::progress::{Progress, Reporter};
-use flux_core::{Paths, ProfileId};
+use flux_core::{Paths, Percent, ProfileId};
 use flux_fs::entry::{Entry, Kind};
-use flux_fs::restore::RestoreRequest;
 use flux_fs::snapshot::SnapshotMeta;
+use flux_vault::format::Content;
+use zeroize::Zeroizing;
 
 use crate::repo::{AnyRepo, RepoError};
+use crate::sample;
 
 /// How a test ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,12 +57,13 @@ pub enum TestResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Problem {
-    /// The restore of it failed (unreadable or damaged data).
+    /// It couldn't be read back (unreadable or damaged data).
     CouldNotRestore,
     SizeDiffers,
     /// Its checksum isn't the one recorded.
     ContentDiffers,
-    /// Permissions or modification time not as recorded (a warning).
+    /// Permissions or modification time not as recorded (a warning). Only in reports from
+    /// before 1.1, which restored files to a folder; nothing is restored now.
     MetadataDiffers,
     /// Not the same as the file on disk now (a warning: the file may have changed since).
     DiffersFromSource,
@@ -79,6 +96,68 @@ pub struct FileProblem {
     pub detail: Option<String>,
 }
 
+/// What a test that passed proves: had `damaged` or more of the snapshot's `files` (a
+/// share `damage` or more) been damaged, it would have found at least one of them with
+/// probability `certainty` or better. Only said of a uniform random sample (or every
+/// file) read to the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guarantee {
+    /// Files in the snapshot (the sample was drawn from all of them).
+    pub files: u64,
+    pub damaged: u64,
+    pub damage: Percent,
+    pub certainty: Percent,
+}
+
+/// The certainty at which a plain random sample's worth is stated.
+fn stated_certainty() -> Percent {
+    Percent::from_millionths(990_000)
+}
+
+/// A share rounded up to a figure worth reading (37%, 4.6%, 0.05%). Up, so that "this
+/// share or more" never claims more than the files counted.
+fn round_up(p: Percent) -> Percent {
+    let m = p.millionths();
+    let step = match m {
+        100_000.. => 10_000,
+        10_000.. => 1_000,
+        _ => 100,
+    };
+    Percent::from_millionths(m.div_ceil(step) * step)
+}
+
+/// What a passing test of `tested` files out of `files` proves (see [`Guarantee`]).
+fn guarantee(t: &RestoreTest, files: u64, tested: u64) -> Option<Guarantee> {
+    if files == 0 || tested == 0 {
+        return None;
+    }
+    match t.mode {
+        // The sample was sized for exactly this.
+        TestMode::Confidence if tested >= sample::sample_size(files, t.damage, t.certainty) => {
+            Some(Guarantee {
+                files,
+                damaged: sample::damaged_at_least(files, t.damage),
+                damage: t.damage,
+                certainty: t.certainty,
+            })
+        }
+        // So many random files: what would they have caught, 99 times in 100?
+        TestMode::RandomFiles => {
+            let certainty = stated_certainty();
+            let damaged = sample::detectable(files, tested, certainty)?;
+            Some(Guarantee {
+                files,
+                damaged,
+                damage: round_up(sample::share(damaged, files)),
+                certainty,
+            })
+        }
+        // Percent stops by size and rolling goes in hash order: neither is a uniform
+        // sample of the files. Full has read every file, which needs no arithmetic.
+        _ => None,
+    }
+}
+
 /// A test's report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TestReport {
@@ -99,6 +178,9 @@ pub struct TestReport {
     /// When the test itself couldn't run (no snapshot, the drive missing…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What passing proves, when the sample allows saying so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarantee: Option<Guarantee>,
 }
 
 /// What's remembered between tests.
@@ -189,48 +271,32 @@ fn position(path: &[u8]) -> u64 {
     })
 }
 
-/// A private temporary folder, removed when dropped.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(base: &Path, name: &str) -> std::io::Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::create_dir_all(base)?;
-        let dir = base.join(format!(
-            "{name}-{}-{}",
-            std::process::id(),
-            Timestamp::now().as_millisecond()
-        ));
-        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        Ok(Self(dir))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = flux_fs::fsops::remove_force(&self.0);
-    }
-}
-
 /// Pick the files to test from a snapshot's files.
-fn pick(files: Vec<Entry>, t: &RestoreTest, state: &mut TestState, now: Timestamp) -> Vec<Entry> {
-    use rand_like::shuffle;
+fn pick(
+    files: Vec<Entry>,
+    t: &RestoreTest,
+    state: &mut TestState,
+    now: Timestamp,
+    rng: &mut sample::Rng,
+) -> Vec<Entry> {
+    // A uniform random sample of `n` files, in random order.
+    let take = |mut f: Vec<Entry>, n: usize, rng: &mut sample::Rng| {
+        sample::sample_to_front(&mut f, n, rng);
+        f.truncate(n);
+        f
+    };
     match t.mode {
-        TestMode::RandomFiles => {
-            let mut f = files;
-            shuffle(&mut f, now.as_nanosecond() as u64);
-            f.truncate(t.files.max(1) as usize);
-            f
+        TestMode::RandomFiles => take(files, t.files.max(1) as usize, rng),
+        TestMode::Confidence => {
+            let n = sample::sample_size(files.len() as u64, t.damage, t.certainty);
+            take(files, n as usize, rng)
         }
         TestMode::Percent => {
             let total: u64 = files.iter().map(|e| e.size).sum();
             let want = total * u64::from(t.percent.clamp(1, 100)) / 100;
             let mut f = files;
-            shuffle(&mut f, now.as_nanosecond() as u64);
+            let all = f.len();
+            sample::sample_to_front(&mut f, all, rng);
             let mut got = 0u64;
             let mut out = Vec::new();
             for e in f {
@@ -271,35 +337,22 @@ fn pick(files: Vec<Entry>, t: &RestoreTest, state: &mut TestState, now: Timestam
     }
 }
 
-/// Tiny deterministic shuffle (no dependency for a sample).
-mod rand_like {
-    pub fn shuffle<T>(v: &mut [T], seed: u64) {
-        let mut x = seed | 1;
-        for i in (1..v.len()).rev() {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            v.swap(i, (x % (i as u64 + 1)) as usize);
-        }
-    }
-}
-
 /// Run a restore test of the newest snapshot. `t`: what to test (the profile's settings,
-/// or other ones for a test by hand). Saves the report.
+/// or other ones for a test by hand); `progress` can cancel it. Saves the report.
+/// (`_profile` and `_report` are kept for callers; nothing is restored, so neither is
+/// needed any more.)
 pub fn run(
     paths: &Paths,
     id: &ProfileId,
-    profile: &Profile,
+    _profile: &Profile,
     t: &RestoreTest,
     repo: &AnyRepo,
     progress: &Progress,
-    report: Reporter<'_>,
+    _report: Reporter<'_>,
 ) -> TestReport {
     let started = Timestamp::now();
     let mut state = load_state(paths, id);
-    let rep = match run_inner(
-        paths, id, profile, t, repo, &mut state, started, progress, report,
-    ) {
+    let rep = match run_inner(paths, id, t, repo, &mut state, started, progress) {
         Ok(r) => r,
         Err(e) => TestReport {
             started,
@@ -314,6 +367,7 @@ pub fn run(
             problems: Vec::new(),
             problems_total: 0,
             error: Some(e.to_string()),
+            guarantee: None,
         },
     };
     state.last_tested = Some(rep.started);
@@ -329,160 +383,171 @@ pub fn run(
     rep
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How much of a file is read at a time: the most of it that's ever in memory at once
+/// (besides one Vault chunk being decoded).
+const PIECE: usize = 1 << 20;
+
+/// Read file `i` of a snapshot from start to end, the way a restore reads it, handing each
+/// piece to `f` (which may stop it early). Nothing is written anywhere: each piece is
+/// wiped once `f` has seen it.
+fn read_through(
+    repo: &AnyRepo,
+    snap: &SnapshotMeta,
+    entries: &[Entry],
+    blobs: &[Content],
+    i: usize,
+    f: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+) -> io::Result<()> {
+    if let AnyRepo::Borg(r) = repo {
+        // Borg's own reader for one file extracts it to a temporary file: stream instead.
+        let mut stream = r.stream_file(&snap.id, &entries[i])?;
+        let mut buf = Zeroizing::new(vec![0u8; PIECE]);
+        loop {
+            let n = match stream.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if n == 0 || f(&buf[..n]).is_break() {
+                return Ok(());
+            }
+        }
+    }
+    let mut file = crate::view::open_file(repo, snap, entries, blobs, i)?;
+    let mut offset = 0u64;
+    loop {
+        let piece = Zeroizing::new(file.read_at(offset, PIECE)?);
+        if piece.is_empty() || f(&piece).is_break() {
+            return Ok(());
+        }
+        offset += piece.len() as u64;
+    }
+}
+
 fn run_inner(
     paths: &Paths,
     id: &ProfileId,
-    profile: &Profile,
     t: &RestoreTest,
     repo: &AnyRepo,
     state: &mut TestState,
     started: Timestamp,
     progress: &Progress,
-    report: Reporter<'_>,
 ) -> Result<TestReport, String> {
+    // Restore tests before 1.1 restored their sample here; one a crash left holds plain
+    // copies of backed-up files.
+    let old = paths.cache_dir.join("restore-tests");
+    if old.exists() {
+        let _ = flux_fs::fsops::remove_force(&old);
+    }
     let snap: SnapshotMeta = repo
         .snapshots()
         .map_err(|e| e.to_string())?
         .pop()
         .ok_or_else(|| RepoError::Empty(id.to_string()).to_string())?;
-    let files: Vec<Entry> = repo
-        .entries(&snap)
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
+    // Reading a Vault: hold its shared lock, so upkeep can't remove data being read.
+    let _lock = match repo.vault() {
+        Some(v) => Some(v.lock(false).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let (entries, blobs) = crate::view::load_entries(repo, &snap).map_err(|e| e.to_string())?;
+    let files: Vec<Entry> = entries
+        .iter()
         .filter(|e| e.kind == Kind::File)
+        .cloned()
         .collect();
-    let picked = pick(files, t, state, started);
-    let tmp = TempDir::new(&paths.cache_dir.join("restore-tests"), id.as_str())
-        .map_err(|e| format!("can't make a temporary folder: {e}"))?;
+    let files_total = files.len() as u64;
+    let picked = pick(files, t, state, started, &mut sample::Rng::from_os());
+    let at: HashMap<&[u8], usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.path.as_slice(), i))
+        .collect();
     let deadline = t.max_runtime.map(|d| Instant::now() + d.as_duration());
     let max_bytes = t.max_read.map(|b| b.bytes());
-    let xattrs = flux_fs::scan::xattr_policy(profile);
-
-    // Batches whose files all have different names (each lands at <batch>/<its name>),
-    // small enough that limits are checked often.
-    let per_batch = if deadline.is_some() || max_bytes.is_some() {
-        5
-    } else {
-        25
-    };
-    let mut batches: Vec<Vec<&Entry>> = Vec::new();
-    for e in &picked {
-        let name = Path::new(std::ffi::OsStr::from_bytes(&e.path)).file_name();
-        match batches.iter_mut().find(|b| {
-            !b.iter()
-                .any(|x| Path::new(std::ffi::OsStr::from_bytes(&x.path)).file_name() == name)
-                && b.len() < per_batch
-        }) {
-            Some(b) => b.push(e),
-            None => batches.push(vec![e]),
-        }
-    }
+    let over_time = || progress.is_cancelled() || deadline.is_some_and(|d| Instant::now() > d);
 
     let mut problems: Vec<FileProblem> = Vec::new();
     let mut tested = 0u64;
     let mut bytes = 0u64;
     let mut stopped_early = false;
-    for (k, batch) in batches.iter().enumerate() {
-        if progress.is_cancelled()
-            || deadline.is_some_and(|d| Instant::now() > d)
-            || max_bytes.is_some_and(|m| bytes >= m)
-        {
+    for e in &picked {
+        if over_time() || max_bytes.is_some_and(|m| bytes >= m) {
             stopped_early = true;
             break;
         }
-        let to = tmp.path().join(format!("b{k}"));
-        let req = RestoreRequest {
-            snapshot: &snap,
-            paths: batch
-                .iter()
-                .map(|e| PathBuf::from("/").join(e.rel_path()))
-                .collect(),
-            to: Some(to.clone()),
-            keep_existing: true,
-            dry_run: false,
-            xattrs,
-            links: flux_fs::safe::LinkPolicy::for_process(),
-            exact: None,
+        let Some(&i) = at.get(e.path.as_slice()) else {
+            continue;
         };
-        let failed: HashMap<String, String> = match repo.restore(&req, progress, report) {
-            Ok(out) => out
-                .errors
-                .into_iter()
-                .map(|e| (e.path, e.message))
-                .collect(),
-            Err(e) if e.is_cancelled() => {
-                stopped_early = true;
-                break;
+        let mut hasher = blake3::Hasher::new();
+        let mut read = 0u64;
+        let mut stopped = false;
+        let outcome = read_through(repo, &snap, &entries, &blobs, i, &mut |piece| {
+            hasher.update(piece);
+            read += piece.len() as u64;
+            if over_time() {
+                stopped = true;
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
             }
-            Err(e) => batch
-                .iter()
-                .map(|x| (format!("/{}", x.rel_path().display()), e.to_string()))
-                .collect(),
+        });
+        if stopped {
+            // Cut short by a limit: this file wasn't checked, so it isn't counted.
+            stopped_early = true;
+            break;
+        }
+        tested += 1;
+        bytes += e.size;
+        let shown = format!("/{}", e.rel_path().display());
+        let mut add = |problem: Problem, detail: Option<String>| {
+            problems.push(FileProblem {
+                path: shown.clone(),
+                problem,
+                detail,
+            })
         };
-        for e in batch {
-            let name = e.rel_path().file_name().unwrap_or_default().to_owned();
-            let restored = to.join(&name);
-            let shown = format!("/{}", e.rel_path().display());
-            tested += 1;
-            bytes += e.size;
-            let mut add = |problem: Problem, detail: Option<String>| {
-                problems.push(FileProblem {
-                    path: shown.clone(),
-                    problem,
-                    detail,
-                })
-            };
-            let Ok(m) = std::fs::symlink_metadata(&restored) else {
-                let why = failed
-                    .iter()
-                    .find(|(p, _)| p.ends_with(&*name.to_string_lossy()))
-                    .map(|(_, m)| m.clone());
-                add(Problem::CouldNotRestore, why);
-                continue;
-            };
-            if m.len() != e.size {
-                add(
-                    Problem::SizeDiffers,
-                    Some(format!("{} bytes, recorded {}", m.len(), e.size)),
-                );
-                continue;
-            }
-            if let Some(h) = e.hash
-                && flux_fs::fsops::hash_file(&restored).ok() != Some(h)
+        if let Err(err) = outcome {
+            add(Problem::CouldNotRestore, Some(err.to_string()));
+            continue;
+        }
+        if read != e.size {
+            add(
+                Problem::SizeDiffers,
+                Some(format!("{read} bytes, recorded {}", e.size)),
+            );
+            continue;
+        }
+        let got = *hasher.finalize().as_bytes();
+        if e.hash.is_some_and(|h| h != got) {
+            add(Problem::ContentDiffers, None);
+            continue;
+        }
+        if t.compare_with_source {
+            let source = PathBuf::from("/").join(e.rel_path());
+            // Only a regular file there now (never through a link): it's compared by its
+            // checksum, and only "differs" is said about it.
+            if let Ok(sm) = std::fs::symlink_metadata(&source)
+                && sm.file_type().is_file()
             {
-                add(Problem::ContentDiffers, None);
-                continue;
-            }
-            if m.mode() & 0o777 != e.mode & 0o777 || m.mtime() != e.mtime {
-                add(Problem::MetadataDiffers, None);
-            }
-            if t.compare_with_source {
-                let source = PathBuf::from("/").join(e.rel_path());
-                if let Ok(sm) = std::fs::metadata(&source) {
-                    let same_stamp = sm.len() == e.size && sm.mtime() == e.mtime;
-                    let differs = if same_stamp {
-                        // Same size and time: the bytes must match too.
-                        flux_fs::fsops::hash_file(&source).ok()
-                            != flux_fs::fsops::hash_file(&restored).ok()
-                    } else {
-                        true
-                    };
-                    if differs {
-                        add(
-                            Problem::DiffersFromSource,
-                            Some(if same_stamp {
-                                "the same size and time, but different bytes".into()
-                            } else {
-                                "changed since this snapshot".into()
-                            }),
-                        );
-                    }
+                let same_stamp = sm.len() == e.size && sm.mtime() == e.mtime;
+                let differs = if same_stamp {
+                    // Same size and time: the bytes must match too.
+                    flux_fs::fsops::hash_file(&source).ok() != Some(got)
+                } else {
+                    true
+                };
+                if differs {
+                    add(
+                        Problem::DiffersFromSource,
+                        Some(if same_stamp {
+                            "the same size and time, but different bytes".into()
+                        } else {
+                            "changed since this snapshot".into()
+                        }),
+                    );
                 }
             }
         }
-        // Free the space as soon as a batch is checked.
-        let _ = flux_fs::fsops::remove_force(&to);
     }
     let failed = problems.iter().any(|p| p.problem.is_failure());
     let result = if failed {
@@ -492,6 +557,12 @@ fn run_inner(
     } else {
         TestResult::Passed
     };
+    // What passing proves: only said when nothing was wrong with the backup and the whole
+    // sample was read (one cut short by a limit is no longer a uniform sample: big files
+    // end it sooner).
+    let guarantee = (!failed && !stopped_early && tested == picked.len() as u64)
+        .then(|| guarantee(t, files_total, tested))
+        .flatten();
     let problems_total = problems.len() as u64;
     problems.sort_by_key(|p| !p.problem.is_failure());
     problems.truncate(KEEP_PROBLEMS);
@@ -508,11 +579,51 @@ fn run_inner(
         problems,
         problems_total,
         error: None,
+        guarantee,
     })
 }
 
-/// "Passed: 10 files, 4.2 MiB" (for logs and notifications).
+/// "if 1% or more of its 120,000 files were damaged, this test would have found it (99%
+/// certain)": a guarantee, in words.
+pub fn guarantee_words(g: &Guarantee) -> String {
+    let files = group(g.files);
+    if g.damaged <= 1 {
+        return format!(
+            "if even one of its {files} files were damaged, this test would have found it ({} certain)",
+            g.certainty
+        );
+    }
+    format!(
+        "if {} or more of its {files} files were damaged, this test would have found it ({} certain)",
+        g.damage, g.certainty
+    )
+}
+
+/// 120000 as "120,000".
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// "Passed: 10 files, 4.2 MiB", and what that proves (for logs and notifications).
 pub fn summary(r: &TestReport) -> String {
+    let proves = r
+        .guarantee
+        .as_ref()
+        .map(|g| format!(": {}", guarantee_words(g)))
+        .unwrap_or_default();
+    format!("{}{proves}", headline(r))
+}
+
+/// "Passed: 10 files, 4.2 MiB".
+pub fn headline(r: &TestReport) -> String {
     if let Some(e) = &r.error {
         return format!("restore test couldn't run: {e}");
     }
@@ -574,12 +685,13 @@ mod tests {
         let files: Vec<Entry> = (0..200).map(|i| entry(&format!("f{i}"), 100)).collect();
         let now = Timestamp::from_second(1_800_000_000).unwrap();
         let mut st = TestState::default();
+        let rng = &mut sample::Rng::seeded(1);
         let t = |mode| RestoreTest {
             mode,
             ..RestoreTest::default()
         };
         assert_eq!(
-            pick(files.clone(), &t(TestMode::RandomFiles), &mut st, now).len(),
+            pick(files.clone(), &t(TestMode::RandomFiles), &mut st, now, rng).len(),
             10
         );
         let pct = RestoreTest {
@@ -587,14 +699,20 @@ mod tests {
             ..t(TestMode::Percent)
         };
         assert_eq!(
-            pick(files.clone(), &pct, &mut st, now).len(),
+            pick(files.clone(), &pct, &mut st, now, rng).len(),
             10,
             "5% of 200 equal files"
         );
         assert_eq!(
-            pick(files.clone(), &t(TestMode::Full), &mut st, now).len(),
+            pick(files.clone(), &t(TestMode::Full), &mut st, now, rng).len(),
             200
         );
+
+        // Confidence: 1% at 99% of 200 files is 2 damaged files or more, which takes 180.
+        let sure = pick(files.clone(), &t(TestMode::Confidence), &mut st, now, rng);
+        assert_eq!(sure.len(), 180);
+        let distinct: std::collections::HashSet<_> = sure.iter().map(|e| &e.path).collect();
+        assert_eq!(distinct.len(), 180, "no file twice");
 
         // Rolling over 30 days, tested every 10 days: three tests cover every file once.
         let roll = t(TestMode::Rolling);
@@ -606,7 +724,7 @@ mod tests {
         let mut count = 0;
         for k in 0..3 {
             let at = now + jiff::SignedDuration::from_hours(240 * k);
-            for e in pick(files.clone(), &roll, &mut st, at) {
+            for e in pick(files.clone(), &roll, &mut st, at, rng) {
                 count += 1;
                 seen.insert(e.path);
             }
@@ -614,6 +732,36 @@ mod tests {
         }
         assert_eq!(seen.len(), 200, "every file once");
         assert_eq!(count, 200, "and only once");
+    }
+
+    #[test]
+    fn what_passing_proves() {
+        let t = |mode| RestoreTest {
+            mode,
+            ..RestoreTest::default()
+        };
+        // Confidence, the whole sample read: what was asked for.
+        let g = guarantee(&t(TestMode::Confidence), 120_000, 459).unwrap();
+        assert_eq!((g.damaged, g.files), (1_200, 120_000));
+        assert_eq!(
+            guarantee_words(&g),
+            "if 1% or more of its 120,000 files were damaged, this test would have found it (99% certain)"
+        );
+        // Too few files for it: nothing is claimed.
+        assert_eq!(guarantee(&t(TestMode::Confidence), 120_000, 400), None);
+        // Ten random files say little, and say so.
+        let g = guarantee(&t(TestMode::RandomFiles), 120_000, 10).unwrap();
+        assert_eq!(g.damage.to_string(), "37%");
+        assert_eq!(round_up("4.5321%".parse().unwrap()).to_string(), "4.6%");
+        assert_eq!(round_up("0.0412%".parse().unwrap()).to_string(), "0.05%");
+        assert_eq!(round_up("100%".parse().unwrap()).to_string(), "100%");
+        // A backup small enough to be read whole.
+        let g = guarantee(&t(TestMode::RandomFiles), 8, 8).unwrap();
+        assert_eq!(g.damaged, 1);
+        assert!(guarantee_words(&g).starts_with("if even one of its 8 files"));
+        // Not a uniform sample: no claim.
+        assert_eq!(guarantee(&t(TestMode::Percent), 1_000, 500), None);
+        assert_eq!(guarantee(&t(TestMode::Rolling), 1_000, 500), None);
     }
 
     #[test]

@@ -29,6 +29,9 @@ struct Faults {
     /// Armed: the place goes away after `config` is next read (a drive pulled out): every
     /// folder then lists as empty and nothing can be read.
     vanish: AtomicI64,
+    /// Fail the removal of an index file at which this countdown reaches 0 (negative:
+    /// never).
+    fail_index_remove_in: AtomicI64,
 }
 
 const ARMED: i64 = 1;
@@ -78,6 +81,9 @@ impl Backend for Faulty {
         self.inner.list(dir)
     }
     fn remove(&self, path: &str) -> io::Result<()> {
+        if path.starts_with("index/") && self.f.fail_index_remove_in.fetch_sub(1, SeqCst) == 0 {
+            return Err(io::ErrorKind::ConnectionAborted.into()); // once
+        }
         self.inner.remove(path)
     }
     fn exists(&self, path: &str) -> io::Result<bool> {
@@ -133,6 +139,7 @@ fn env() -> Env {
             fail_pack_in: AtomicI64::new(-1),
             at_first_pack: Mutex::new(None),
             vanish: AtomicI64::new(0),
+            fail_index_remove_in: AtomicI64::new(-1),
         }),
     }
 }
@@ -329,4 +336,50 @@ fn a_source_that_vanishes_does_not_empty_its_copy() {
     let r = flux_vault::replicate::replicate(repo.backend(), &replica, &Progress::new());
     assert!(r.is_err(), "{r:?}");
     assert_eq!((files("snapshots"), files("index"), files("keys")), before);
+}
+
+/// A prune cut short after it wrote its new index, before it removed all the old index
+/// files, leaves one behind that the new index supersedes. The prune after that replaces
+/// the new index: unless it takes the leftover along, nothing supersedes it any more and
+/// it counts again, naming packs that are gone. A backup would then skip data "already
+/// stored" and make a snapshot that can't be restored.
+#[test]
+fn an_index_file_left_by_an_interrupted_prune_never_counts_again() {
+    use flux_core::profile::Retention;
+    use flux_vault::gc;
+
+    let e = env();
+    let repo = e.init();
+    let keep_all = Retention {
+        enabled: false,
+        ..Retention::default()
+    };
+    let created = |o: BackupOutcome| match o {
+        BackupOutcome::Created { snapshot, .. } => snapshot,
+        o => panic!("{o:?}"),
+    };
+    // Two backups, two index files; the first one's data is in no other snapshot.
+    fs::write(e.src.join("old"), noise(1, 3 << 20)).unwrap();
+    let first = created(e.backup(&repo).unwrap());
+    fs::remove_file(e.src.join("old")).unwrap();
+    fs::write(e.src.join("kept"), noise(2, 1 << 20)).unwrap();
+    created(e.backup(&repo).unwrap());
+
+    // Prune 1: the first snapshot goes; the second old index file can't be removed.
+    e.faults.fail_index_remove_in.store(1, SeqCst);
+    gc::delete(&repo, &[first.id.as_str()], &silent).unwrap_err();
+    // Prune 2 finishes the job (the packs prune 1 didn't get to are unused now).
+    gc::prune(&repo, &e.owner, &keep_all, false, &silent).unwrap();
+    assert_eq!(
+        repo.backend().list("index").unwrap().len(),
+        1,
+        "the leftover index file is gone with the rest"
+    );
+
+    // The data comes back: it must be stored again, not taken for still there.
+    fs::write(e.src.join("old"), noise(1, 3 << 20)).unwrap();
+    let again = created(e.backup(&repo).unwrap());
+    assert_eq!(again.status, SnapshotStatus::Complete);
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{report:?}");
 }

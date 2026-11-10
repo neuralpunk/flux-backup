@@ -223,24 +223,42 @@ pub fn evaluate(
         .collect()
 }
 
-/// Snapshots that may be deleted to free space, oldest first: everything except pinned,
-/// protected-named, and the newest. Ids in `already` are excluded.
+/// Snapshots that may be deleted to free space, oldest first. Ids in `already` (removed
+/// by the rules just before) are excluded.
+///
+/// Never offered, however short the space is: anything at all when retention is switched
+/// off, pinned and protected-named snapshots, the `keep_last` newest (the newest one
+/// whatever `keep_last` says), and the newest `safety_floor` complete snapshots. The
+/// space floors go past the bucket rules, not past these.
 pub fn space_candidates(
     snaps: &[SnapshotInfo],
     policy: &Retention,
     already: &HashSet<String>,
 ) -> Vec<String> {
-    let newest = snaps
+    if !policy.enabled {
+        return Vec::new();
+    }
+    // Newest first, of what is still there.
+    let mut order: Vec<&SnapshotInfo> = snaps.iter().filter(|s| !already.contains(&s.id)).collect();
+    order.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| b.id.cmp(&a.id)));
+    let mut kept: HashSet<&str> = order
         .iter()
-        .max_by(|a, b| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)))
-        .map(|s| s.id.clone());
-    let mut v: Vec<&SnapshotInfo> = snaps
-        .iter()
-        .filter(|s| !s.pinned && !(s.named && policy.keep_named))
-        .filter(|s| Some(&s.id) != newest.as_ref() && !already.contains(&s.id))
+        .take((policy.keep_last as usize).max(1))
+        .map(|s| s.id.as_str())
         .collect();
-    v.sort_by(|a, b| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)));
-    v.into_iter().map(|s| s.id.clone()).collect()
+    kept.extend(
+        order
+            .iter()
+            .filter(|s| s.healthy)
+            .take(policy.safety_floor as usize)
+            .map(|s| s.id.as_str()),
+    );
+    order
+        .iter()
+        .rev()
+        .filter(|s| !s.pinned && !(s.named && policy.keep_named) && !kept.contains(s.id.as_str()))
+        .map(|s| s.id.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -406,6 +424,38 @@ mod tests {
         s[0].pinned = true;
         let c = space_candidates(&s, &none(), &HashSet::new());
         assert_eq!(c, ["b"], "pinned and newest are never candidates");
+    }
+
+    /// Making room goes past the bucket rules, never past the safety floor, `keep_last`
+    /// or a retention that is switched off.
+    #[test]
+    fn space_candidates_respect_the_floor_and_keep_last() {
+        // s0 newest … s5 oldest; the newest finished with problems.
+        let mut s: Vec<SnapshotInfo> = (0..6)
+            .map(|i| snap(&format!("s{i}"), ago(now(), i * 10)))
+            .collect();
+        s[0].healthy = false;
+        let mut p = none();
+        p.safety_floor = 2;
+        // The newest, and the two newest complete ones (s1, s2), stay.
+        assert_eq!(
+            space_candidates(&s, &p, &HashSet::new()),
+            ["s5", "s4", "s3"]
+        );
+        // `keep_last` stays too (it is how the snapshot before the newest is kept for
+        // Flux Sentry).
+        p.safety_floor = 0;
+        p.keep_last = 3;
+        assert_eq!(
+            space_candidates(&s, &p, &HashSet::new()),
+            ["s5", "s4", "s3"]
+        );
+        // What the rules just removed neither counts as kept nor is offered again.
+        let gone: HashSet<String> = ["s0".to_owned(), "s5".to_owned()].into();
+        assert_eq!(space_candidates(&s, &p, &gone), ["s4"]);
+        // Switched off: nothing is ever removed.
+        p.enabled = false;
+        assert!(space_candidates(&s, &p, &HashSet::new()).is_empty());
     }
 
     #[test]

@@ -518,21 +518,39 @@ impl Vault {
         }
     }
 
-    /// Every snapshot, oldest first.
+    /// Every snapshot that can be read, oldest first. A record that can't be (damaged
+    /// on a failing drive: what this tool is for) is said and left out; the others are
+    /// as good as ever, and must stay listable and restorable.
     fn snapshots(&self) -> Res<Vec<Snap>> {
+        let (out, damaged) = self.snapshots_and_damaged()?;
+        for d in &damaged {
+            eprintln!("warning: a snapshot's record can't be read and is left out: {d}");
+        }
+        Ok(out)
+    }
+
+    /// The snapshots that can be read (oldest first), and what is wrong with the records
+    /// that can't.
+    fn snapshots_and_damaged(&self) -> Res<(Vec<Snap>, Vec<String>)> {
         let mut out = Vec::new();
+        let mut damaged = Vec::new();
         for n in list(&self.root, "snapshots")? {
             if n.is_empty() || !n.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
             let path = format!("snapshots/{n}");
-            let raw = self.open_object(&read(&self.root, &path)?, &path)?;
-            let record: Record =
-                serde_json::from_slice(&raw).map_err(|e| format!("{path}: {e}"))?;
-            out.push(Snap { id: n, record });
+            let record = read(&self.root, &path)
+                .and_then(|raw| self.open_object(&raw, &path))
+                .and_then(|raw| {
+                    serde_json::from_slice::<Record>(&raw).map_err(|e| format!("{path}: {e}"))
+                });
+            match record {
+                Ok(record) => out.push(Snap { id: n, record }),
+                Err(e) => damaged.push(e),
+            }
         }
         out.sort_by(|a, b| started(a).cmp(&started(b)).then(a.id.cmp(&b.id)));
-        Ok(out)
+        Ok((out, damaged))
     }
 
     /// `latest`, an id or the start of one, or a name.
@@ -628,11 +646,16 @@ fn human(n: u64) -> String {
 
 // ---- commands ----
 
-fn cmd_snapshots(v: &Vault) -> Res<()> {
-    let snaps = v.snapshots()?;
+/// `Ok(false)`: a record couldn't be read (said; the others are listed).
+fn cmd_snapshots(v: &Vault) -> Res<bool> {
+    let (snaps, damaged) = v.snapshots_and_damaged()?;
+    for d in &damaged {
+        eprintln!("warning: a snapshot's record can't be read and is left out: {d}");
+    }
+    let whole = damaged.is_empty();
     if snaps.is_empty() {
         println!("No snapshots.");
-        return Ok(());
+        return Ok(whole);
     }
     println!(
         "{:<16}  {:<16}  {:<28}  NAME",
@@ -654,7 +677,7 @@ fn cmd_snapshots(v: &Vault) -> Res<()> {
             m["name"].as_str().unwrap_or("")
         );
     }
-    Ok(())
+    Ok(whole)
 }
 
 fn cmd_files(v: &Vault, spec: &str, path: Option<&str>) -> Res<()> {
@@ -895,28 +918,68 @@ fn cmd_restore(v: &Vault, spec: &str, to: &Path, paths: &[String]) -> Res<()> {
 
 /// Read back every blob the snapshots use. `Ok(false)`: damage found (reported).
 fn cmd_verify(v: &Vault, spec: Option<&str>) -> Res<bool> {
+    let mut problems = Vec::new();
     let snaps = match spec {
         Some(s) => vec![v.find(s)?],
-        None => v.snapshots()?,
+        None => {
+            // A whole check counts a record that can't be read as the damage it is.
+            let (snaps, damaged) = v.snapshots_and_damaged()?;
+            problems.extend(damaged);
+            snaps
+        }
     };
     let mut seen: HashSet<Id> = HashSet::new();
-    let mut problems = Vec::new();
+    // A folder that didn't change is the same tree in every snapshot: each tree is
+    // read, and what is below it looked at, once (with thousands of snapshots, walking
+    // each one's whole tree again takes hours before any data is read).
+    let mut trees: HashSet<(Id, u32)> = HashSet::new();
     let mut checked = 0u64;
     for s in &snaps {
-        let entries = match v.entries(s) {
-            Ok(e) => e,
-            Err(e) => {
-                problems.push(format!("snapshot {}: {e}", s.id));
+        let Some(root) = hex::decode(&s.record.tree)
+            .ok()
+            .and_then(|b| <Id>::try_from(b).ok())
+        else {
+            problems.push(format!(
+                "snapshot {}: the snapshot's root tree id is damaged",
+                s.id
+            ));
+            continue;
+        };
+        let format = s.record.tree_format;
+        let mut stack = vec![(Vec::new(), root)];
+        while let Some((prefix, tid)) = stack.pop() {
+            if !trees.insert((tid, format)) {
                 continue;
             }
-        };
-        for (p, n) in entries {
-            for id in &n.content {
-                if seen.insert(*id) {
-                    checked += 1;
-                    if let Err(e) = v.blob(id) {
-                        problems.push(format!("{}: {e}", String::from_utf8_lossy(&p)));
+            let nodes = match v.tree(&tid, format) {
+                Ok(n) => n,
+                Err(e) => {
+                    problems.push(format!(
+                        "snapshot {}, /{}: {e}",
+                        s.id,
+                        String::from_utf8_lossy(&prefix)
+                    ));
+                    continue;
+                }
+            };
+            for node in nodes {
+                let mut path = prefix.clone();
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(&node.name);
+                for id in &node.content {
+                    if seen.insert(*id) {
+                        checked += 1;
+                        if let Err(e) = v.blob(id) {
+                            problems.push(format!("{}: {e}", String::from_utf8_lossy(&path)));
+                        }
                     }
+                }
+                if let Some(sub) = node.subtree
+                    && node.kind == Kind::Dir
+                {
+                    stack.push((path, sub));
                 }
             }
         }
@@ -1025,7 +1088,11 @@ fn run(args: Vec<String>) -> Result<ExitCode, (u8, String)> {
     let err = |e: String| (1u8, e);
     let v = Vault::open(Path::new(vault), &password, unlock.as_deref()).map_err(err)?;
     match (cmd.as_str(), args) {
-        ("snapshots", []) => cmd_snapshots(&v).map_err(err)?,
+        ("snapshots", []) => {
+            if !cmd_snapshots(&v).map_err(err)? {
+                return Ok(ExitCode::from(3));
+            }
+        }
         ("files", [spec]) => cmd_files(&v, spec, None).map_err(err)?,
         ("files", [spec, path]) => cmd_files(&v, spec, Some(path)).map_err(err)?,
         ("restore", [spec, to, paths @ ..]) => {

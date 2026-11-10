@@ -118,6 +118,8 @@ fn system_profile_lifecycle_through_the_helper() {
             id: "conf".into(),
             snapshot: snap.clone(),
             path: src.join("conf").display().to_string(),
+            filter: None,
+            missing: false,
         })
         .unwrap();
     assert_eq!(listing["entries"][0]["name"], "app.conf");

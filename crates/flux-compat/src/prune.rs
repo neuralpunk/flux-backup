@@ -102,3 +102,91 @@ pub fn apply(
         dry_run,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use flux_core::units::ByteSize;
+
+    fn snap(id: &str, hours_ago: i64) -> SnapshotMeta {
+        let t = Timestamp::now() - jiff::SignedDuration::from_hours(hours_ago);
+        SnapshotMeta {
+            format: 1,
+            id: id.into(),
+            profile: "p".into(),
+            host: "h".into(),
+            user: "u".into(),
+            started: t,
+            finished: t,
+            status: SnapshotStatus::Complete,
+            name: None,
+            pinned: false,
+            sources: Vec::new(),
+            stats: Default::default(),
+            errors: Vec::new(),
+            errors_total: 0,
+            flux_version: "test".into(),
+            sources_missing: Vec::new(),
+            note: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// A free-space minimum that deleting can't reach takes what the rules leave, down to
+    /// the safety floor and no further (it used to take all but the newest).
+    #[test]
+    fn a_space_floor_that_cannot_be_met_stops_at_the_safety_floor() {
+        let snaps: Vec<SnapshotMeta> = (0..6).map(|i| snap(&format!("s{i}"), i * 2)).collect();
+        let policy = Retention {
+            min_free_space: Some(ByteSize(1 << 40)),
+            safety_floor: 3,
+            ..Retention::default()
+        };
+        let deleted = RefCell::new(Vec::new());
+        let r = apply(
+            &snaps,
+            &policy,
+            false,
+            &|| Some((0, 100.0)),
+            &mut |id| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+            &|_| {},
+        )
+        .unwrap();
+        // Everything is within `keep_within`, so the rules remove nothing; for space, the
+        // oldest go, the three newest complete ones stay.
+        assert!(r.removed.is_empty());
+        assert_eq!(r.removed_for_space, ["s5", "s4", "s3"]);
+        assert_eq!(*deleted.borrow(), ["s5", "s4", "s3"]);
+        assert!(r.space_floor_unmet);
+    }
+
+    /// Deleting stops as soon as there is room.
+    #[test]
+    fn space_pruning_stops_once_the_floor_is_met() {
+        let snaps: Vec<SnapshotMeta> = (0..6).map(|i| snap(&format!("s{i}"), i * 2)).collect();
+        let policy = Retention {
+            min_free_space: Some(ByteSize(100)),
+            ..Retention::default()
+        };
+        let deleted = RefCell::new(Vec::new());
+        let r = apply(
+            &snaps,
+            &policy,
+            false,
+            &|| Some((deleted.borrow().len() as u64 * 60, 100.0)),
+            &mut |id| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(r.removed_for_space, ["s5", "s4"]);
+        assert!(!r.space_floor_unmet);
+    }
+}

@@ -6,6 +6,7 @@
   import { app } from "../state.svelte";
   import type { RecoveryKit } from "../types";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Modal from "./Modal.svelte";
   import { copyText } from "../clipboard";
 
@@ -87,7 +88,7 @@
 
 <Modal title="Recovery kit for “{name}”" {onclose} width="max-w-3xl">
   {#if error}
-    <div class="flex items-center gap-3 rounded-card bg-danger/10 p-4 text-sm text-danger"><Icon name="alert" /> {error}</div>
+    <Callout tone="bad">{error}</Callout>
   {:else if !kit}
     <div class="h-72 rounded-card bg-surface-2 motion-safe:animate-pulse"></div>
   {:else}

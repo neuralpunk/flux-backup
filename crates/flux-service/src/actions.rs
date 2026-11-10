@@ -186,9 +186,23 @@ pub fn prune_impl(state: &Service, id: String, dry_run: bool) -> Result<PruneSum
 
 pub fn check_impl(state: &Service, id: String, read_data: bool) -> Result<CheckSummary> {
     let (pid, p) = state.load(&id)?;
-    Ok(state
-        .open(&pid, &p)?
-        .check(read_data, &Progress::new(), &silent)?)
+    // A backup that keeps repair data: verifying every byte also rebuilds what is damaged
+    // (first what the Vault can't be opened without).
+    let keeps = p.vault.as_ref().is_some_and(|v| v.parity > 0);
+    let first = if read_data && keeps {
+        flux_runner::repo::repair_vault_basics(&state.paths, &p)
+    } else {
+        Vec::new()
+    };
+    let repo = state.open(&pid, &p)?;
+    let mut r = repo.check_with(
+        read_data,
+        read_data && repo.keeps_repair_data(),
+        &Progress::new(),
+        &silent,
+    )?;
+    r.repaired.splice(0..0, first);
+    Ok(r)
 }
 
 /// Restore, calling `on_progress` about five times a second while it runs.
@@ -277,52 +291,23 @@ pub fn restore_tests_impl(
     Ok(h)
 }
 
-/// "This was me": the unusual changes of `snapshot` were the person's own. The warning
-/// goes; the snapshot before them is unpinned (if Flux pinned it) and the tag removed.
-pub fn dismiss_unusual_impl(state: &Service, id: String, snapshot: String) -> Result<()> {
+/// Settle the unusual changes of `snapshot`, so backups go on. "This was me" (`resolved`
+/// false): they were the person's own; the warning goes, Flux Sentry takes that backup
+/// as normal, the snapshot before is unpinned (if Flux pinned it) and the tag removed.
+/// "It's dealt with" (`resolved`): they weren't, and have been seen to; the pin and the
+/// tag stay.
+pub fn dismiss_unusual_impl(
+    state: &Service,
+    id: String,
+    snapshot: String,
+    resolved: bool,
+) -> Result<flux_runner::Settled> {
     let (pid, p) = state.load(&id)?;
-    flux_runner::dismiss_unusual(&state.paths, &pid, &snapshot)?;
-    let run = flux_runner::runlog::recent_runs(&state.paths, &pid, 300)
-        .into_iter()
-        .find(|r| r.unusual.as_ref().is_some_and(|u| u.snapshot == snapshot));
-    if let Ok(repo) = state.open(&pid, &p)
-        && let Ok(snaps) = repo.snapshots()
-    {
-        {
-            if let Some(s) = snaps.iter().find(|s| s.id == snapshot) {
-                let tags: Vec<String> = s
-                    .tags
-                    .iter()
-                    .filter(|t| *t != flux_runner::UNUSUAL_TAG)
-                    .cloned()
-                    .collect();
-                let _ = repo.change(
-                    &s.id,
-                    &flux_fs::snapshot::SnapshotChange {
-                        tags: Some(tags),
-                        ..Default::default()
-                    },
-                );
-            }
-            if let Some(before) = run.and_then(|r| r.unusual).and_then(|u| u.before)
-                && let Some(s) = snaps.iter().find(|s| s.id == before)
-                && s.note
-                    .as_deref()
-                    .is_some_and(|n| n.starts_with(flux_runner::AUTO_PIN_NOTE))
-            {
-                let _ = repo.change(
-                    &s.id,
-                    &flux_fs::snapshot::SnapshotChange {
-                        pinned: Some(false),
-                        note: Some(None),
-                        ..Default::default()
-                    },
-                );
-            }
-        }
-    }
+    let repo = (!resolved).then(|| state.open(&pid, &p).ok()).flatten();
+    let settled =
+        flux_runner::settle_unusual(&state.paths, &pid, &p, &snapshot, !resolved, repo.as_ref())?;
     state.forget_cached(&pid);
-    Ok(())
+    Ok(settled)
 }
 
 /// Save files of a snapshot as an archive in folder `dir` (named after the backup, the
@@ -453,7 +438,7 @@ mod unusual_tests {
         assert_eq!(v["unusual"]["snapshot"], u.snapshot.as_str());
         assert_eq!(v["health"][0]["level"], "danger");
 
-        dismiss_unusual_impl(&state, "p".into(), u.snapshot.clone()).unwrap();
+        dismiss_unusual_impl(&state, "p".into(), u.snapshot.clone(), false).unwrap();
         let snaps = crate::views::snapshots_impl(&state, "p".into()).unwrap();
         assert!(
             snaps.iter().all(|s| !s.pinned && s.note.is_none()),

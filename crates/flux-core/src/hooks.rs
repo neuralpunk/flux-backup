@@ -69,6 +69,10 @@ pub enum HookError {
     },
 }
 
+/// How long a finished hook's output is waited for, when something it started still
+/// holds its output open.
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
+
 /// Output of one hook command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookRun {
@@ -115,8 +119,11 @@ pub fn run_hooks(
                 );
             }
         };
-        // Drain both pipes concurrently so a chatty hook can't block on a full pipe.
-        let readers: Vec<_> = [
+        // Drain both pipes concurrently so a chatty hook can't block on a full pipe. Each
+        // reader keeps what it has read where it can be taken at any time, and says when
+        // its pipe is closed.
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+        let outputs: Vec<std::sync::Arc<std::sync::Mutex<String>>> = [
             child
                 .stdout
                 .take()
@@ -129,18 +136,23 @@ pub fn run_hooks(
         .into_iter()
         .flatten()
         .map(|r| {
+            let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let (sink, closed) = (out.clone(), closed_tx.clone());
             std::thread::spawn(move || {
-                let mut out = String::new();
                 for line in BufReader::new(r).lines().map_while(Result::ok) {
-                    if out.len() < 64 << 10 {
+                    if let Ok(mut out) = sink.lock()
+                        && out.len() < 64 << 10
+                    {
                         out.push_str(&line);
                         out.push('\n');
                     }
                 }
-                out
-            })
+                let _ = closed.send(());
+            });
+            out
         })
         .collect();
+        drop(closed_tx);
 
         let status = loop {
             match child.try_wait() {
@@ -157,7 +169,22 @@ pub fn run_hooks(
                 Err(_) => break Err(()),
             }
         };
-        let output: String = readers.into_iter().filter_map(|h| h.join().ok()).collect();
+        // The command is done. Its output is read to the end, but not waited for without
+        // limit: something it left running in the background (`ssh -f …`, `tool &`) keeps
+        // the pipes open for as long as it lives, and the backup would wait with it, past
+        // any timeout. Such a process is left alone (starting one is what some hooks are
+        // for); what it writes later is read and dropped.
+        let grace = Instant::now() + OUTPUT_GRACE;
+        for _ in &outputs {
+            let left = grace.saturating_duration_since(Instant::now());
+            if closed_rx.recv_timeout(left).is_err() {
+                break;
+            }
+        }
+        let output: String = outputs
+            .iter()
+            .map(|o| o.lock().map(|s| s.clone()).unwrap_or_default())
+            .collect();
         let duration_secs = started.elapsed().as_secs_f64();
         let success = matches!(&status, Ok(s) if s.success());
         tracing::info!(
@@ -232,6 +259,24 @@ mod tests {
         );
         assert!(matches!(r, Err(HookError::Failed { .. })));
         assert_eq!(runs.len(), 1);
+    }
+
+    /// A hook that leaves something running in the background (a tunnel, a daemon) is
+    /// done when its command is: the backup doesn't wait for what it left behind, which
+    /// holds the hook's output open for as long as it lives.
+    #[test]
+    fn a_background_process_does_not_hold_the_backup() {
+        let t = Instant::now();
+        let (runs, r) = run_hooks(
+            HookEvent::PreBackup,
+            &["echo started; sleep 30 &".into(), "echo next".into()],
+            &env(),
+            DEFAULT_TIMEOUT,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        assert_eq!(runs[0].output, "started\n");
+        assert_eq!(runs[1].output, "next\n");
     }
 
     #[test]

@@ -261,7 +261,13 @@ impl RsyncRepo {
     }
 
     fn read_meta(&self, id: &str) -> Option<SnapshotMeta> {
-        let raw = self.store.read(&format!("{}/{META}", snap_rel(id))).ok()?;
+        Self::meta_from(
+            id,
+            self.store.read(&format!("{}/{META}", snap_rel(id))).ok()?,
+        )
+    }
+
+    fn meta_from(id: &str, raw: Vec<u8>) -> Option<SnapshotMeta> {
         match serde_json::from_slice::<SnapshotMeta>(&raw) {
             // The folder is plain rsync output: a newer Flux's notes are left aside.
             Ok(m) if m.check_format().is_err() => {
@@ -283,12 +289,22 @@ impl RsyncRepo {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(CompatError::remote(e)),
         };
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|(name, is_dir)| *is_dir && crate::valid_snapshot_name(name))
+            .map(|(name, _)| name)
+            .collect();
+        // Every snapshot's notes in a few batched reads (on a server, one after another
+        // is four round trips each, every time the snapshots are listed).
+        let metas = self.store.read_many(
+            &names
+                .iter()
+                .map(|n| format!("{}/{META}", snap_rel(n)))
+                .collect::<Vec<_>>(),
+        );
         let mut out = Vec::new();
-        for (name, is_dir) in names {
-            if !is_dir || !crate::valid_snapshot_name(&name) {
-                continue;
-            }
-            match self.read_meta(&name) {
+        for (name, raw) in names.into_iter().zip(metas) {
+            match raw.ok().and_then(|raw| Self::meta_from(&name, raw)) {
                 Some(mut m) => {
                     m.id = name;
                     out.push(m);
@@ -432,7 +448,7 @@ impl RsyncRepo {
         progress: &Progress,
     ) -> std::io::Result<u64> {
         match self.local_data_dir(id) {
-            Some(base) => copier.copy_to(&base.join(e.rel_path()), out, progress),
+            Some(base) => copier.copy_below(&base, e.rel_path(), out, progress),
             None => self
                 .store
                 .copy_to(&Self::data_file_rel(id, e), out, copier, progress),
@@ -476,6 +492,8 @@ impl RsyncRepo {
 pub struct RsyncSource<'a> {
     repo: &'a RsyncRepo,
     snap: SnapshotMeta,
+    /// On a server: the small files of this restore, fetched in batches.
+    small: std::sync::OnceLock<Option<flux_transport::SmallFiles>>,
 }
 
 impl<'a> RsyncSource<'a> {
@@ -483,6 +501,7 @@ impl<'a> RsyncSource<'a> {
         Self {
             repo,
             snap: snap.clone(),
+            small: std::sync::OnceLock::new(),
         }
     }
 }
@@ -500,7 +519,34 @@ impl flux_fs::restore::RestoreSource for RsyncSource<'_> {
         copier: &Copier,
         progress: &Progress,
     ) -> std::io::Result<u64> {
+        // On a server, a small file comes with its neighbours, in a batch.
+        if let Some(Some(small)) = self.small.get()
+            && let Some(path) = self
+                .repo
+                .store
+                .remote_path(&RsyncRepo::data_file_rel(&self.snap.id, e))
+            && let Some(data) = small.get(path.as_bytes())
+        {
+            use std::io::Write;
+            let data = data?;
+            let mut out = out;
+            out.write_all(&data)?;
+            progress
+                .bytes_done
+                .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            return Ok(data.len() as u64);
+        }
         self.repo.copy_file(&self.snap.id, e, out, copier, progress)
+    }
+
+    fn will_restore(&self, files: &[&Entry]) {
+        let _ = self.small.set(
+            self.repo.store.small_files(
+                files
+                    .iter()
+                    .map(|e| (RsyncRepo::data_file_rel(&self.snap.id, e), e.size)),
+            ),
+        );
     }
 }
 
@@ -973,6 +1019,13 @@ pub fn backup(
         None => None,
     };
     let partial = format!("{SNAPSHOTS}/{PARTIAL}");
+    // An earlier run that was cut short left its work here, and this one continues it:
+    // what rsync then reports (nothing sent, nothing created) is what *this* run did, not
+    // what the snapshot-to-be holds.
+    let continued = !req.dry_run
+        && repo
+            .as_ref()
+            .is_some_and(|r| r.store.is_dir(&format!("{partial}/data")));
     let heading = format!(
         "Flux Backup: exclusion rules for a backup of \u{201c}{}\u{201d} ({}) started {}",
         p.name,
@@ -1104,6 +1157,9 @@ pub fn backup(
             && s.files == prev.stats.entries
             && errors.is_empty()
             && !p.options.snapshot_if_unchanged
+            // A continued backup may hold changed files the earlier run already brought
+            // over: calling it unchanged would delete the only copy of them.
+            && !continued
     });
     if unchanged {
         let prev = prev.expect("checked");
@@ -1326,82 +1382,90 @@ pub fn check(
                 .into(),
         );
     }
-    let mut lists = Vec::new();
+    // One snapshot at a time: its list is counted (and, to read the data, read) and let
+    // go. Kept until the end, the lists of a year of snapshots of a million files are
+    // tens of gigabytes.
+    let reading = read_data && !repo.store.is_remote();
+    if reading {
+        progress.set_phase(Phase::Transferring);
+    }
+    // Files already read: an unchanged file is one and the same file in every snapshot
+    // (a hard link). Read once, it is checked for all of them; read once per snapshot,
+    // a check reads the whole backup as many times as it has snapshots.
+    let mut read: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    let mut buf = vec![0u8; 1 << 20];
     for s in &snaps {
         if progress.is_cancelled() {
             return Err(CompatError::Cancelled);
         }
-        match repo.entries_now(s) {
-            Ok(v) => {
-                // What the backup stored (Flux's notes; a snapshot made without Flux has
-                // none). A backup with errors counted files it couldn't store.
-                let files = v.iter().filter(|e| e.kind == Kind::File).count() as u64;
-                if s.status == SnapshotStatus::Complete && files < s.stats.files {
-                    sum.errors.push(format!(
-                        "snapshot {}: {} of the {} files the backup stored are missing",
-                        s.id,
-                        s.stats.files - files,
-                        s.stats.files
-                    ));
-                }
-                if read_data && !repo.store.is_remote() {
-                    progress.bytes_total.fetch_add(
-                        v.iter()
-                            .filter(|e| e.kind == Kind::File)
-                            .map(|e| e.size)
-                            .sum(),
-                        Relaxed,
-                    );
-                }
-                lists.push((s, v));
+        let v = match repo.entries_now(s) {
+            Ok(v) => v,
+            Err(e) => {
+                sum.errors.push(format!("snapshot {}: {e}", s.id));
+                continue;
             }
-            Err(e) => sum.errors.push(format!("snapshot {}: {e}", s.id)),
+        };
+        // What the backup stored (Flux's notes; a snapshot made without Flux has
+        // none). A backup with errors counted files it couldn't store.
+        let files = v.iter().filter(|e| e.kind == Kind::File).count() as u64;
+        if s.status == SnapshotStatus::Complete && files < s.stats.files {
+            sum.errors.push(format!(
+                "snapshot {}: {} of the {} files the backup stored are missing",
+                s.id,
+                s.stats.files - files,
+                s.stats.files
+            ));
         }
-    }
-    if read_data && !repo.store.is_remote() {
-        progress.set_phase(Phase::Transferring);
-        let mut buf = vec![0u8; 1 << 20];
-        for (s, v) in &lists {
-            let base = repo.local_data_dir(&s.id).expect("local");
-            for e in v.iter().filter(|e| e.kind == Kind::File) {
-                if progress.is_cancelled() {
-                    return Err(CompatError::Cancelled);
+        sum.checked += files;
+        if !reading {
+            continue;
+        }
+        let base = repo.local_data_dir(&s.id).expect("local");
+        for e in v.iter().filter(|e| e.kind == Kind::File) {
+            if progress.is_cancelled() {
+                return Err(CompatError::Cancelled);
+            }
+            use std::os::unix::fs::MetadataExt;
+            let path = base.join(e.rel_path());
+            let res = std::fs::File::open(&path).and_then(|mut f| {
+                let m = f.metadata()?;
+                if !read.insert((m.dev(), m.ino())) {
+                    // Read before, in another snapshot: its length is all that's left
+                    // to compare.
+                    return Ok((m.len(), false));
                 }
-                let path = base.join(e.rel_path());
-                let res = std::fs::File::open(&path).and_then(|mut f| {
-                    let mut n = 0u64;
-                    loop {
-                        let k = f.read(&mut buf)?;
-                        if k == 0 {
-                            break Ok(n);
-                        }
-                        n += k as u64;
-                        progress.bytes_done.fetch_add(k as u64, Relaxed);
+                progress.bytes_total.fetch_add(e.size, Relaxed);
+                let mut n = 0u64;
+                loop {
+                    let k = f.read(&mut buf)?;
+                    if k == 0 {
+                        break Ok((n, true));
                     }
-                });
-                match res {
-                    Ok(n) if n == e.size => {}
-                    Ok(n) => sum.errors.push(format!(
-                        "snapshot {}: /{}: read {n} bytes, expected {}",
-                        s.id,
-                        String::from_utf8_lossy(&e.path),
-                        e.size
-                    )),
-                    Err(err) => sum.errors.push(format!(
-                        "snapshot {}: /{}: {err}",
-                        s.id,
-                        String::from_utf8_lossy(&e.path)
-                    )),
+                    n += k as u64;
+                    progress.bytes_done.fetch_add(k as u64, Relaxed);
                 }
-                sum.bytes_read += e.size;
-                sum.checked += 1;
+            });
+            match res {
+                Ok((n, fresh)) => {
+                    if n != e.size {
+                        sum.errors.push(format!(
+                            "snapshot {}: /{}: read {n} bytes, expected {}",
+                            s.id,
+                            String::from_utf8_lossy(&e.path),
+                            e.size
+                        ));
+                    }
+                    if fresh {
+                        sum.bytes_read += n;
+                    }
+                }
+                Err(err) => sum.errors.push(format!(
+                    "snapshot {}: /{}: {err}",
+                    s.id,
+                    String::from_utf8_lossy(&e.path)
+                )),
             }
         }
-    } else {
-        sum.checked = lists
-            .iter()
-            .map(|(_, v)| v.iter().filter(|e| e.kind == Kind::File).count() as u64)
-            .sum();
     }
     progress.set_phase(Phase::Done);
     Ok(sum)

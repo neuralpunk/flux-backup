@@ -74,11 +74,6 @@ pub struct DeleteArgs {
 }
 
 #[derive(Args)]
-#[command(after_help = "Examples:\n  \
-    flux diff home                    latest snapshot vs. the one before\n  \
-    flux diff home 2026-11-01         that snapshot vs. latest\n  \
-    flux diff home --live             latest snapshot vs. files on disk now\n  \
-    flux diff home A B --path ~/Docs  only below ~/Docs")]
 pub struct DiffArgs {
     pub profile: String,
     /// Older snapshot (default: the one before NEW).
@@ -181,7 +176,12 @@ pub fn run_prune(ctx: &Ctx, args: PruneArgs) -> anyhow::Result<ExitCode> {
     if let Some(freed) = r.bytes_freed {
         println!("Reclaimed {} of storage.", ByteSize(freed).display_approx());
     }
-    if r.space_floor_unmet {
+    if r.space_floor_unmet && args.dry_run {
+        println!(
+            "The target is below the profile's free-space minimum: older snapshots would \
+             also be removed, oldest first, until there is enough."
+        );
+    } else if r.space_floor_unmet {
         println!("Warning: the target is below the profile's free-space minimum.");
     }
     if !profile.retention.enabled {

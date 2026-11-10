@@ -127,6 +127,38 @@ pub(crate) fn time_from_id(id: &str) -> Option<jiff::Timestamp> {
         .map(|z| z.timestamp())
 }
 
+/// `p` as it may be written into a script, a guide or another tool's settings: its name
+/// and exclusions go into comment lines and here-documents, where a line break starts a
+/// new line of the file, and so a command. No profile Flux makes has one; settings read
+/// from a drive, or imported, might. In the name a control character becomes a space; in
+/// a pattern it becomes `?` (any one character), which still matches a file name that
+/// really has one.
+pub(crate) fn script_safe(p: &flux_core::Profile) -> flux_core::Profile {
+    let mut p = p.clone();
+    let swap = |s: &str, with: char| -> String {
+        s.chars()
+            .map(|c| if c.is_control() { with } else { c })
+            .collect()
+    };
+    p.name = swap(&p.name, ' ');
+    for list in [&mut p.sources.exclude, &mut p.sources.exclude_if_present] {
+        for pattern in list.iter_mut() {
+            *pattern = swap(pattern, '?');
+        }
+    }
+    p
+}
+
+/// A here-document end marker that no line of `body` is: a line of the body equal to the
+/// marker would end the document early, and the lines after it would run as commands.
+pub(crate) fn heredoc_tag(base: &str, body: &str) -> String {
+    let mut tag = base.to_owned();
+    while body.lines().any(|l| l == tag) {
+        tag.push('_');
+    }
+    tag
+}
+
 /// A name that can be used as one path component of a snapshot.
 pub(crate) fn valid_snapshot_name(id: &str) -> bool {
     !id.is_empty() && !id.starts_with('.') && !id.contains('/') && id != ".."

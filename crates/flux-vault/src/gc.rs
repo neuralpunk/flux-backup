@@ -190,8 +190,8 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
     out.orphan_packs = orphans.len() as u64;
 
     // Copy still-used blobs out of packs that are mostly garbage (no re-encryption needed).
-    let data_packer = Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs);
-    let tree_packer = Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs);
+    let data_packer = Packer::for_repo(repo);
+    let tree_packer = Packer::for_repo(repo);
     for (pack, _) in &repack {
         let hex = hex_id(pack);
         let path = pack_path(&hex);
@@ -224,7 +224,12 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
 
     // New index first, then remove old index files, then packs. A crash at any point
     // leaves every remaining snapshot readable.
-    if !doomed.is_empty() || !orphans.is_empty() || index.files.len() > 1 {
+    //
+    // The new index supersedes every index file there is, the leftovers of an earlier
+    // prune that was cut short included (`index.stale`): they are only ignored while the
+    // file that names them exists, and that file is removed here.
+    let old_index: Vec<String> = index.files.iter().chain(&index.stale).cloned().collect();
+    if !doomed.is_empty() || !orphans.is_empty() || old_index.len() > 1 {
         // The new packs on disk before the index that names them.
         repo.backend()
             .flush_packs()
@@ -234,20 +239,23 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
             &repo.crypto,
             &IndexFile {
                 packs: keep,
-                supersedes: index.files.clone(),
+                supersedes: old_index.clone(),
             },
+            repo.parity,
         )?;
-        for f in &index.files {
+        for f in &old_index {
             let p = format!("index/{f}");
             repo.backend()
                 .remove(&p)
                 .map_err(|e| VaultError::io(&p, e))?;
+            crate::protect::remove_for(repo.backend(), &p);
         }
         for name in doomed.iter().chain(&orphans) {
             let p = pack_path(name);
             repo.backend()
                 .remove(&p)
                 .map_err(|e| VaultError::io(&p, e))?;
+            crate::protect::remove_for(repo.backend(), &p);
             out.bytes_freed += sizes.get(name).copied().unwrap_or(0);
         }
         out.bytes_freed = out.bytes_freed.saturating_sub(new_bytes);
@@ -262,5 +270,8 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
             ),
         });
     }
+    // Parity files whose file is gone (deleted by a Flux that keeps none), and repair
+    // data for the small files that lack it.
+    crate::protect::tidy(repo)?;
     Ok(out)
 }

@@ -34,6 +34,8 @@ pub struct Preferences {
     pub diff_tools: Vec<(String, String)>,
     /// Webhooks told about every backup.
     pub webhooks: Vec<flux_core::webhook::Webhook>,
+    /// Closing the app's window keeps it running in the system tray.
+    pub close_to_tray: bool,
 }
 
 pub fn preferences_impl(state: &Service) -> Result<Preferences> {
@@ -56,7 +58,17 @@ pub fn preferences_impl(state: &Service) -> Result<Preferences> {
             .map(|(c, n)| (c.to_owned(), n.to_owned()))
             .collect(),
         webhooks: s.webhooks,
+        close_to_tray: !s.quit_on_close,
     })
+}
+
+/// Keep the app in the system tray when its window is closed (`true`), or quit.
+pub fn set_close_to_tray_impl(state: &Service, on: bool) -> Result<Preferences> {
+    let mut s = Settings::load(&state.paths);
+    s.quit_on_close = !on;
+    s.save(&state.paths)
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    preferences_impl(state)
 }
 
 /// The webhooks told about every backup (all of them, replacing the list).
@@ -230,5 +242,16 @@ mod tests {
         assert!(set_pause_impl(&s, "off".into()).unwrap().is_none());
         assert!(preferences_impl(&s).unwrap().pause.is_none());
         assert!(set_pause_impl(&s, "never".into()).is_err());
+
+        // Closing the window keeps the app in the tray unless asked not to; other
+        // preferences saved later leave the choice alone.
+        assert!(preferences_impl(&s).unwrap().close_to_tray);
+        assert!(!set_close_to_tray_impl(&s, false).unwrap().close_to_tray);
+        assert!(
+            !save_preferences_impl(&s, false, None, None)
+                .unwrap()
+                .close_to_tray
+        );
+        assert!(set_close_to_tray_impl(&s, true).unwrap().close_to_tray);
     }
 }

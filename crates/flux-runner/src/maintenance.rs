@@ -101,7 +101,24 @@ pub fn after_backup(
                 }
                 if verify {
                     info("monthly check: reading all stored data back".into());
-                    match repo.check(true, progress, report) {
+                    // A backup that keeps repair data has damage rebuilt as it's found.
+                    let checked = repo.check_with(true, repo.keeps_repair_data(), progress, report);
+                    if let Ok(c) = &checked
+                        && !c.repaired.is_empty()
+                    {
+                        for fixed in &c.repaired {
+                            info(format!("monthly check: repaired: {fixed}"));
+                        }
+                        desktop::notify(
+                            &format!("Damage in the backups of “{}” was repaired", p.name),
+                            &format!(
+                                "{} damaged files were rebuilt from their repair data. The drive may be failing: see Flux Backup › Activity.",
+                                c.repaired.len()
+                            ),
+                            Urgency::Normal,
+                        );
+                    }
+                    match checked {
                         Ok(c) if c.errors.is_empty() => {
                             info(format!(
                                 "monthly check: {} snapshots, {} read back, all fine",

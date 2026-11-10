@@ -1,5 +1,6 @@
 // Application state shared across components (Svelte 5 runes).
 
+import { hourCycle } from "./clock.svelte";
 import { api, listen, pickFile, type JobEventPayload } from "./api";
 import { ApiError, type BackupStatus, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type Scheduler, type SystemStatus } from "./types";
 
@@ -65,6 +66,8 @@ class AppState {
   /** System (root) profiles: helper installed / unlocked by an administrator. */
   system = $state<SystemStatus>({ available: false, unlocked: false });
   unlockingSystem = $state(false);
+  /** After unlocking: start setting up a system backup (from the New backup page). */
+  systemThen = $state<"new" | null>(null);
   showShortcuts = $state(false);
   /** A password dialog for profile `id`; `retry` runs once it's unlocked. */
   unlock = $state<{ id: string; retry: () => void } | null>(null);
@@ -339,13 +342,15 @@ class AppState {
     }
   }
 
-  async unlockSystem() {
+  /** `then`: what to do once unlocked ("new": set up a system backup). */
+  async unlockSystem(then: "new" | null = null) {
     this.unlockingSystem = true;
     try {
       await api.systemUnlock();
       this.system = { ...this.system, unlocked: true };
       await this.refresh();
       this.toast("ok", "System backups unlocked. They lock again after 15 idle minutes.");
+      if (then === "new") this.newProfile(true);
     } catch (e) {
       if (!(e instanceof ApiError && e.code === "auth_cancelled")) this.toast("bad", (e as Error).message);
     } finally {
@@ -463,7 +468,7 @@ class AppState {
 export function pauseUntil(p: Pause): string {
   if (!p.until) return "until you resume them";
   const d = new Date(p.until);
-  const t = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const t = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", ...hourCycle() });
   const today = new Date();
   const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
   if (d.toDateString() === today.toDateString()) return `until ${t}`;

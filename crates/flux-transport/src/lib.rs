@@ -9,4 +9,4 @@ pub mod ssh;
 #[doc(hidden)]
 pub mod testing;
 
-pub use ssh::{SftpPool, SshError, SshTarget, shell_quote};
+pub use ssh::{SMALL_FILE, SftpPool, SmallFiles, SshError, SshTarget, shell_quote};

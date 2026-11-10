@@ -308,6 +308,9 @@ fn an_unlock_file_and_a_tampered_record() {
     flux_runner::repo::create_unlock_file(&file).unwrap();
     e.profile.vault.as_mut().unwrap().unlock_file = Some(file.clone());
     e.backup();
+    // A second snapshot, whose record stays as it is.
+    fs::write(e.src().join("docs/b.txt"), "beta").unwrap();
+    e.backup();
     let v = e.vault();
     let o = tool(&[&v, "snapshots"], Some("s3cret"));
     assert!(err(&o).contains("unlock file"), "{}", err(&o));
@@ -329,7 +332,40 @@ fn an_unlock_file_and_a_tampered_record() {
         &[&v, "--unlock-file", file.to_str().unwrap(), "snapshots"],
         Some("s3cret"),
     );
-    assert_eq!(o.status.code(), Some(1));
+    // It is said and never used, and the damage shows in the exit code. The other
+    // snapshot is as good as ever: it is listed, and it restores (one record gone bad
+    // used to make the tool refuse every snapshot).
+    assert_eq!(o.status.code(), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("tampered"), "{}", err(&o));
+    assert_eq!(
+        out(&o).lines().count(),
+        2,
+        "a heading and one snapshot: {}",
+        out(&o)
+    );
+    let to = e.root.join("restored");
+    let o = tool(
+        &[
+            &v,
+            "--unlock-file",
+            file.to_str().unwrap(),
+            "restore",
+            "latest",
+            to.to_str().unwrap(),
+        ],
+        Some("s3cret"),
+    );
+    // Whichever record was swapped, the newest readable snapshot restores.
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(
+        fs::read_to_string(restored(&to, &e.src(), "docs/a.txt")).unwrap(),
+        "alpha"
+    );
+    let o = tool(
+        &[&v, "--unlock-file", file.to_str().unwrap(), "verify"],
+        Some("s3cret"),
+    );
+    assert_eq!(o.status.code(), Some(3), "{}", err(&o));
     assert!(err(&o).contains("tampered"), "{}", err(&o));
 }
 
@@ -406,6 +442,7 @@ fn a_forged_snapshot_cannot_write_outside_the_restore_folder() {
             packs,
             supersedes: Vec::new(),
         },
+        0,
     )
     .unwrap();
     let id = repo.records().unwrap().pop().unwrap().meta.id;

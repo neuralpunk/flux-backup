@@ -313,6 +313,22 @@ impl Calendar {
         None
     }
 
+    /// The next `n` runs after `after`, in time zone `tz` (fewer if it stops running).
+    pub fn upcoming(&self, after: Timestamp, tz: &TimeZone, n: usize) -> Vec<Timestamp> {
+        let mut out = Vec::with_capacity(n);
+        let mut at = after;
+        while out.len() < n {
+            match self.next_after(at, tz) {
+                Some(t) => {
+                    out.push(t);
+                    at = t;
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
     /// The five cron fields that fire at (at least) these times. When both the day of the
     /// month and the weekday are restricted, cron would take either; the line then names
     /// just the weekdays, and Flux's own check (`--if-due`) skips the other days. Years
@@ -344,6 +360,33 @@ impl Calendar {
 
 #[cfg(test)]
 mod tests {
+    /// What the app previews under a custom schedule: the next runs, in order.
+    #[test]
+    fn upcoming_runs() {
+        let tz = TimeZone::UTC;
+        // Monday 9 November 2026, 16:00.
+        let now: Timestamp = "2026-11-09T16:00:00Z".parse().unwrap();
+        let c = Calendar::parse("Mon,Wed,Fri 18:00").unwrap();
+        let next: Vec<String> = c
+            .upcoming(now, &tz, 3)
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(
+            next,
+            [
+                "2026-11-09T18:00:00Z",
+                "2026-11-11T18:00:00Z",
+                "2026-11-13T18:00:00Z"
+            ]
+        );
+        let years = Calendar::parse("2025-01-01 00:00").unwrap();
+        assert!(
+            years.upcoming(now, &tz, 3).is_empty(),
+            "a time already past"
+        );
+    }
+
     use super::*;
     use jiff::civil::datetime;
 

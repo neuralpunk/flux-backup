@@ -1,7 +1,9 @@
-//! System tray: open the window, back up every profile, quit. Closing the window quits
-//! the app as usual; scheduled backups never need it running.
+//! System tray: open the window, back up every profile, pause, quit. Closing the window
+//! leaves the app here (unless Preferences say to quit); scheduled backups never need it
+//! running either way.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::image::Image;
@@ -18,20 +20,34 @@ const TRAY_ID: &str = "flux";
 const IDLE: &[u8] = include_bytes!("../icons/tray/idle.png");
 const ACTIVE: &[u8] = include_bytes!("../icons/tray/active.png");
 
+/// The tray icon was made (the desktop may still not show it: see `session::tray_host`).
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Relaxed)
+}
+
 /// Profiles with a backup running, as seen in job notices.
 static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Track a profile's backup starting or ending, and show it in the tray icon.
 pub fn set_running(app: &AppHandle, profile: &str, running: bool) {
-    let busy = {
+    let (was, busy) = {
         let mut r = RUNNING.lock().expect("running set");
+        let was = !r.is_empty();
         if running {
             r.insert(profile.to_owned());
         } else {
             r.remove(profile);
         }
-        !r.is_empty()
+        (was, !r.is_empty())
     };
+    // Only when it changes: this is called with every progress message of a running
+    // backup (five a second), and setting the icon writes a new image file and has the
+    // panel load it again each time.
+    if was == busy {
+        return;
+    }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let icon = Image::from_bytes(if busy { ACTIVE } else { IDLE });
         if let Ok(icon) = icon {
@@ -45,7 +61,8 @@ pub fn set_running(app: &AppHandle, profile: &str, running: bool) {
     }
 }
 
-fn show(app: &AppHandle) {
+/// Bring the window back (from the tray, or from behind other windows).
+pub fn show(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -142,5 +159,6 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         }
     })
     .build(app)?;
+    INSTALLED.store(true, Ordering::Relaxed);
     Ok(())
 }

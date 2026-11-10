@@ -22,7 +22,7 @@ pub mod webhook;
 pub use paths::{Paths, Scope};
 pub use profile::{Engine, Issue, Profile, ProfileId, Severity, Target};
 pub use store::{ProfileStore, StoreError};
-pub use units::{ByteSize, HumanDuration};
+pub use units::{ByteSize, HumanDuration, Percent};
 
 /// Flux version string, shared by every binary.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

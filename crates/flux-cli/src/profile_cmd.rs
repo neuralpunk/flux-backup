@@ -19,11 +19,6 @@ pub enum ProfileCmd {
     /// Show a profile's settings.
     Show { id: String },
     /// Create a profile.
-    #[command(after_help = "Examples:\n  \
-        flux profile create home --target /run/media/me/Backup --source ~\n  \
-        flux profile create docs --target me@nas:/srv/backup --source ~/Documents --engine vault\n  \
-        flux profile create plain --target /run/media/me/Backup --source ~ --engine rsync\n  \
-        flux profile create borg --target me@nas:/srv/backup --source ~ --engine borg")]
     Create {
         /// Profile id (lowercase letters, digits, '-' and '_').
         id: String,
@@ -116,8 +111,6 @@ pub enum DestinationCmd {
     /// List a profile's destinations, the main one first.
     List { id: String },
     /// Add a destination.
-    #[command(after_help = "Example:\n  \
-        flux profile destination add home nas --target me@nas:/srv/backup --engine vault --offsite")]
     Add {
         id: String,
         /// Its name in the profile (`nas`): lowercase letters, digits, '-' and '_'.
@@ -404,6 +397,9 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
                 bail!("not confirmed (use --yes to delete without asking)");
             }
             store.delete(&id)?;
+            // Flux Sentry's tripwire files for it go with it (the app's delete did
+            // this; this one left them in your folders), and an open alarm is closed.
+            flux_runner::forget_profile(&ctx.paths, &id);
             let sd = flux_runner::schedule::Scheduler::new(&ctx.paths);
             match sd.remove(&id) {
                 Ok(a) if !a.removed.is_empty() && !ctx.json => println!("Removed its schedule."),

@@ -2,7 +2,7 @@
   import { ramp } from "../ramp";
   import { api } from "../api";
   import { app } from "../state.svelte";
-  import { ago, bytes, count, dateTime, dayLabel, time } from "../format";
+  import { ago, bytes, count, dateTime, dayLabel, monthLabel, time } from "../format";
   import { ApiError, type SnapshotMeta } from "../types";
   import CompareDialog from "./CompareDialog.svelte";
   import ExportSnapshotDialog from "./ExportSnapshotDialog.svelte";
@@ -10,6 +10,7 @@
   import FileBrowser from "./FileBrowser.svelte";
   import FindResults from "./FindResults.svelte";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import MenuButton from "./MenuButton.svelte";
   import SizeLimitNotice from "./SizeLimitNotice.svelte";
   import { contextMenu, type MenuEntry } from "../menu.svelte";
@@ -176,7 +177,7 @@
     const e = app.profiles.find((p) => p.id === id)?.engine;
     return e === "vault" || e === "borg";
   });
-  const month = (t: string) => new Date(t).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const month = (t: string) => monthLabel(t);
   /** The history strip's bar for a snapshot: 4 to 12px tall on the same fixed ramp, standing
    * on the text's baseline. */
   function mark(s: SnapshotMeta): number {
@@ -223,7 +224,7 @@
 </script>
 
 {#if error}
-  <div class="card flex items-center gap-3 bg-danger/10 p-5 text-danger"><Icon name="alert" /> {error}</div>
+  <Callout tone="bad">{error}</Callout>
 {:else if !snaps}
   <div class="card h-64 motion-safe:animate-pulse"></div>
 {:else if snaps.length === 0}
@@ -273,11 +274,11 @@
           {#each allTags as t (t)}
             {@const on = tagFilter?.toLowerCase() === t.toLowerCase()}
             <button
-              class="rounded-md px-2 py-0.5 text-[12px] transition-colors {on ? 'bg-selected font-medium text-on-selected' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
+              class="chip-toggle px-2 py-0.5 text-[12px]"
               aria-pressed={on}
               title={on ? "Show all snapshots" : `Show only snapshots tagged ${t}`}
               onclick={() => (tagFilter = on ? null : t)}
-            >#{t}</button>
+            >{#if on}<Icon name="check" size={12} />{/if}#{t}</button>
           {/each}
         </div>
       {/if}

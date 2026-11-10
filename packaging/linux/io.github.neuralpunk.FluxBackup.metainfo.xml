@@ -86,6 +86,24 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.1.0" date="2026-11-09">
+      <description>
+        <p>A refinement release: what was there, made clearer, safer and quicker to use.</p>
+        <ul>
+          <li>Flux Sentry: unusual-change detection that learns how much of each backup normally changes, so a quiet backup warns early and a busy one doesn't cry wolf</li>
+          <li>Repair data for encrypted backups (Reed-Solomon parity): verifying every byte rebuilds what a failing drive has damaged</li>
+          <li>Restore tests sized by what a pass must prove: enough files to catch damage to 1% of them, 99% certain</li>
+          <li>Restore tests read files back and check them as they stream, without writing anything anywhere, so an encrypted backup stays encrypted while it's tested</li>
+          <li>Each backup's settings at a glance on its overview, and every backup's side by side in a sortable table</li>
+          <li>The recovery checklist has a button for each thing it asks: back up, keep the password elsewhere, export the Borg key, test a restore, add a place</li>
+          <li>A warning when a scheduled backup's password is set to be asked for each time, with a one-click fix</li>
+          <li>Statuses that agree everywhere, red only for what isn't protected, and a calmer overview</li>
+          <li>Times are typed the way you write them, on a 12- or 24-hour clock, and custom times show their next runs</li>
+          <li>Closing the window keeps Flux in the system tray (it can be turned off), and starting it again shows the running one</li>
+          <li>Man pages with examples for every command</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-11-09">
       <description>
         <p>The 1.0 release: backups you can recover anywhere, in formats that are written down and frozen.</p>

@@ -102,6 +102,52 @@ impl Store {
         }
     }
 
+    /// [`Store::read`] for many files at once, answered in order: on a server, a batch
+    /// in two round trips instead of four for each file.
+    pub fn read_many(&self, rels: &[String]) -> Vec<io::Result<Vec<u8>>> {
+        match self {
+            Store::Local { root } => rels.iter().map(|r| fs::read(join_local(root, r))).collect(),
+            Store::Remote { pool, root } => {
+                let reqs: Vec<flux_transport::sftp::ReadReq> = rels
+                    .iter()
+                    .map(|r| flux_transport::sftp::ReadReq::whole(&join_remote(root, r)))
+                    .collect();
+                match pool.with(|s| Ok(s.read_many(&reqs))) {
+                    Ok(v) => v,
+                    Err(e) => rels
+                        .iter()
+                        .map(|_| Err(io::Error::new(e.kind(), e.to_string())))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    /// The small files among `files` (path in the repository, size), to be fetched in
+    /// batches during a restore from a server (`None` for a local store).
+    pub fn small_files(
+        &self,
+        files: impl IntoIterator<Item = (String, u64)>,
+    ) -> Option<flux_transport::SmallFiles> {
+        match self {
+            Store::Local { .. } => None,
+            Store::Remote { pool, root } => Some(flux_transport::SmallFiles::new(
+                pool.clone(),
+                files
+                    .into_iter()
+                    .map(|(rel, size)| (join_remote(root, &rel).into_bytes(), size)),
+            )),
+        }
+    }
+
+    /// Where `rel` is on the server (remote stores).
+    pub fn remote_path(&self, rel: &str) -> Option<String> {
+        match self {
+            Store::Local { .. } => None,
+            Store::Remote { root, .. } => Some(join_remote(root, rel)),
+        }
+    }
+
     /// Replace `rel` atomically (write a temporary file, then rename it).
     pub fn write(&self, rel: &str, data: &[u8], mode: u32) -> Result<(), CompatError> {
         match self {
@@ -351,7 +397,7 @@ impl Store {
                         Ok(())
                     })
                 })?;
-                out.sync_all()?;
+                // (Made durable by the restore, once at its end: not file by file.)
                 Ok(n)
             }
         }

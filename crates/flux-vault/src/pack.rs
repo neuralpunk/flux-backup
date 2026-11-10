@@ -124,6 +124,54 @@ fn finish(
     Ok((id, bytes, b.entries))
 }
 
+/// How much of a pack's end is read at once for its header: the header of a pack of
+/// ordinary blobs fits, and one read then does where two were needed.
+const HEADER_GUESS: u64 = 64 << 10;
+
+/// The headers of many packs (`(pack id in hex, size)`), in a few batched reads: the end
+/// of each pack, where its header's length and (nearly always) the header itself are.
+pub fn read_headers(
+    backend: &dyn Backend,
+    crypto: &Crypto,
+    packs: &[(String, u64)],
+) -> Vec<Result<Vec<PackEntry>, VaultError>> {
+    let reads: Vec<crate::backend::ReadAt> = packs
+        .iter()
+        .map(|(hex, size)| {
+            let n = (*size).min(HEADER_GUESS);
+            (pack_path(hex), size - n, Some(n))
+        })
+        .collect();
+    backend
+        .read_many(&reads)
+        .into_iter()
+        .zip(packs)
+        .map(|(tail, (hex, size))| {
+            let path = pack_path(hex);
+            let tail = tail.map_err(|e| VaultError::io(&path, e))?;
+            if tail.len() < 4 {
+                return Err(VaultError::Corrupt(format!("pack {hex} is truncated")));
+            }
+            let (body, len) = tail.split_at(tail.len() - 4);
+            let hlen = u64::from(u32::from_le_bytes(len.try_into().expect("4 bytes")));
+            if hlen + 4 > *size {
+                return Err(VaultError::Corrupt(format!(
+                    "pack {hex} has a bad header length"
+                )));
+            }
+            let header = if hlen as usize <= body.len() {
+                body[body.len() - hlen as usize..].to_vec()
+            } else {
+                backend
+                    .read_range(&path, size - 4 - hlen, hlen)
+                    .map_err(|e| VaultError::io(&path, e))?
+            };
+            postcard::from_bytes(&crypto.open(&header)?)
+                .map_err(|e| VaultError::Corrupt(format!("pack {hex} header: {e}")))
+        })
+        .collect()
+}
+
 /// Read a pack's header, given the pack's total size.
 pub fn read_header(
     backend: &dyn Backend,
@@ -188,6 +236,8 @@ pub struct Packer<'a> {
     pub bytes_written: std::sync::atomic::AtomicU64,
     /// Pad each pack to its [`padme`] length.
     pad: bool,
+    /// Write repair data with each pack: this share of it, in percent (0: none).
+    parity: u8,
     /// Where pack writes are timed (the performance inspector).
     timings: Option<&'a flux_core::progress::Timings>,
     /// Why a blob handed to this packer didn't reach the repository. A failed pack write
@@ -211,9 +261,17 @@ impl<'a> Packer<'a> {
             written: Mutex::new(Vec::new()),
             bytes_written: Default::default(),
             pad,
+            parity: 0,
             timings: None,
             failed: Mutex::new(None),
         }
+    }
+
+    /// The packer for `repo`'s settings: padding, and repair data.
+    pub fn for_repo(repo: &'a crate::repo::VaultRepo) -> Self {
+        let mut p = Self::padded(repo.backend(), &repo.crypto, repo.pad_packs);
+        p.parity = repo.parity;
+        p
     }
 
     /// Time each pack written into `t`.
@@ -275,6 +333,10 @@ impl<'a> Packer<'a> {
         self.backend
             .write_pack(&path, &bytes)
             .map_err(|e| VaultError::io(&path, e))?;
+        // Its repair data, from the bytes just written (durable when the pack is).
+        if self.parity > 0 {
+            crate::protect::write_for(self.backend, &path, &bytes, self.parity, true)?;
+        }
         if let Some(timings) = self.timings {
             timings.wrote(bytes.len() as u64, t.elapsed());
         }
@@ -309,6 +371,10 @@ pub struct Index {
     pub map: HashMap<BlobId, Loc>,
     /// Ids of the index files that were loaded (not superseded).
     pub files: Vec<String>,
+    /// Index files still there that a newer one supersedes: what a prune cut short left
+    /// behind. Ignored here; the next prune must take them along (see `gc_locked`), or
+    /// they'd count again once the file that supersedes them is itself replaced.
+    pub stale: Vec<String>,
 }
 
 impl Index {
@@ -320,11 +386,18 @@ impl Index {
             .map(|(n, _)| n)
             .collect();
         use rayon::prelude::*;
+        // (Read in batches: a Vault that is seldom pruned has an index file per backup.)
+        let reads: Vec<crate::backend::ReadAt> = names
+            .iter()
+            .map(|n| (format!("index/{n}"), 0, None))
+            .collect();
+        let raws = backend.read_many(&reads);
         let files: Vec<(String, IndexFile)> = names
             .par_iter()
-            .map(|n| {
+            .zip(raws)
+            .map(|(n, raw)| {
                 let path = format!("index/{n}");
-                let raw = backend.read(&path).map_err(|e| VaultError::io(&path, e))?;
+                let raw = raw.map_err(|e| VaultError::io(&path, e))?;
                 let f: IndexFile = postcard::from_bytes(&crypto.open(&raw)?)
                     .map_err(|e| VaultError::Corrupt(format!("{path}: {e}")))?;
                 Ok((n.clone(), f))
@@ -337,6 +410,7 @@ impl Index {
         let mut idx = Index::default();
         for (name, f) in &files {
             if superseded.contains(name) {
+                idx.stale.push(name.clone());
                 continue;
             }
             idx.files.push(name.clone());
@@ -368,11 +442,13 @@ impl Index {
     }
 }
 
-/// Write an index file; returns its id.
+/// Write an index file; returns its id. `parity`: with repair data, this share of it in
+/// percent (0: none).
 pub fn write_index(
     backend: &dyn Backend,
     crypto: &Crypto,
     file: &IndexFile,
+    parity: u8,
 ) -> Result<String, VaultError> {
     let id = hex::encode(crate::crypto::random::<8>()?);
     let path = format!("index/{id}");
@@ -381,6 +457,9 @@ pub fn write_index(
     backend
         .write(&path, &bytes)
         .map_err(|e| VaultError::io(&path, e))?;
+    if parity > 0 {
+        crate::protect::write_for(backend, &path, &bytes, parity, false)?;
+    }
     Ok(id)
 }
 

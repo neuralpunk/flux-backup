@@ -143,6 +143,35 @@ pub fn backup(
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<BackupOutcome, MirrorError> {
+    backup_scanned(req, None, progress, report)
+}
+
+/// The scan of a profile's sources that [`backup`] would make (see
+/// [`backup_scanned`]).
+pub fn scan_for_backup(
+    id: &ProfileId,
+    profile: &Profile,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<scan::ScanResult, MirrorError> {
+    let (root, target_path) = repo_root(id, profile)?;
+    let pool = thread_pool(profile)?;
+    progress.set_phase(Phase::Scanning);
+    report(Event::Phase {
+        phase: Phase::Scanning,
+    });
+    pool.install(|| scan_sources(profile, &target_path, &root, progress, report))
+}
+
+/// [`backup`], with the scan of the sources already made (by [`scan_for_backup`], just
+/// before): Flux Sentry looks at that scan before a backup is written, and the folders
+/// aren't walked (nor, with checksums, every file read) a second time for the backup.
+pub fn backup_scanned(
+    req: &BackupRequest<'_>,
+    scanned: Option<scan::ScanResult>,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<BackupOutcome, MirrorError> {
     let started = Timestamp::now();
     let profile = req.profile;
     progress.set_phase(Phase::Preparing);
@@ -172,12 +201,17 @@ pub fn backup(
     let xattrs = xattr_policy(profile);
     let pool = thread_pool(profile)?;
 
-    // 1. Scan.
-    progress.set_phase(Phase::Scanning);
-    report(Event::Phase {
-        phase: Phase::Scanning,
-    });
-    let scanned = pool.install(|| scan_sources(profile, &target_path, &root, progress, report))?;
+    // 1. Scan (unless it was made already).
+    let scanned = match scanned {
+        Some(s) => s,
+        None => {
+            progress.set_phase(Phase::Scanning);
+            report(Event::Phase {
+                phase: Phase::Scanning,
+            });
+            pool.install(|| scan_sources(profile, &target_path, &root, progress, report))?
+        }
+    };
 
     // 2. Plan against the previous snapshot.
     progress.set_phase(Phase::Planning);
@@ -493,11 +527,7 @@ impl flux_fs::restore::RestoreSource for MirrorSource<'_> {
         copier: &Copier,
         progress: &Progress,
     ) -> io::Result<u64> {
-        copier.copy_to(
-            &self.repo.data_dir(&self.id).join(e.rel_path()),
-            out,
-            progress,
-        )
+        copier.copy_below(&self.repo.data_dir(&self.id), e.rel_path(), out, progress)
     }
 }
 

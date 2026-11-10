@@ -105,6 +105,17 @@ pub fn replicate(
             copy(&pack_path(name), true, &mut out)?;
         }
     }
+    // Their repair data (a parity file is its pack's, by name: it never changes either).
+    let par_data = crate::protect::path_for("data");
+    let have_par = names(source, &par_data)?;
+    let there_par = names(replica, &par_data)?;
+    for (name, size) in &have_par {
+        if have_packs.iter().any(|(n, _)| n == name)
+            && !there_par.iter().any(|(n, s)| n == name && s == size)
+        {
+            copy(&crate::protect::path_for(&pack_path(name)), true, &mut out)?;
+        }
+    }
     replica
         .flush_packs()
         .map_err(|e| VaultError::io("data", e))?;
@@ -143,6 +154,24 @@ pub fn replicate(
     sync("snapshots", Some(&have_snapshots), true, &mut out)?;
     sync("keys", None, true, &mut out)?;
     sync(crate::repo::PROFILES_DIR, None, true, &mut out)?;
+    // The repair data of the small files (a snapshot record's changes with the record).
+    for dir in ["index", "snapshots", "keys"] {
+        sync(
+            &crate::protect::path_for(dir),
+            None,
+            dir != "index",
+            &mut out,
+        )?;
+    }
+    let par_config = crate::protect::path_for("config");
+    if let Ok(par) = source.read(&par_config)
+        && replica.read(&par_config).ok().as_deref() != Some(par.as_slice())
+    {
+        replica
+            .write(&par_config, &par)
+            .map_err(|e| VaultError::io(&par_config, e))?;
+        out.copied_files += 1;
+    }
     if replica.read("config").ok().as_deref() != Some(config.as_slice()) {
         replica
             .write("config", &config)
@@ -164,12 +193,25 @@ pub fn replicate(
         }
         Err(e) => return Err(VaultError::io("config", e)),
     }
-    for dir in ["snapshots", "index", "data", "keys"] {
+    let par = crate::protect::path_for;
+    for dir in [
+        "snapshots".to_owned(),
+        "index".into(),
+        "data".into(),
+        "keys".into(),
+        par("snapshots"),
+        par("index"),
+        par("data"),
+        par("keys"),
+    ] {
+        let dir = dir.as_str();
         let have = names(source, dir)?;
         for (name, _) in names(replica, dir)? {
             if !have.iter().any(|(n, _)| *n == name) {
                 let path = if dir == "data" {
                     pack_path(&name)
+                } else if dir == par_data {
+                    par(&pack_path(&name))
                 } else {
                     format!("{dir}/{name}")
                 };

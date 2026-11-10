@@ -22,11 +22,33 @@ impl LockGuard {
     }
 }
 
+/// One read of [`Backend::read_many`]: path, offset, and length (`None`: the whole file).
+pub type ReadAt = (String, u64, Option<u64>);
+
 pub trait Backend: Send + Sync {
     /// Human-readable location, for messages.
     fn describe(&self) -> String;
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     fn read_range(&self, path: &str, offset: u64, len: u64) -> io::Result<Vec<u8>>;
+    /// Many reads at once, answered in the order asked: `(path, offset, length)`, the
+    /// length `None` for the whole file. On a server this costs a couple of round trips
+    /// for a batch of files instead of several for each (snapshot records, index files,
+    /// pack headers: hundreds or thousands of small reads).
+    fn read_many(&self, reads: &[ReadAt]) -> Vec<io::Result<Vec<u8>>> {
+        use rayon::prelude::*;
+        reads
+            .par_iter()
+            .map(|(path, offset, len)| match len {
+                None => self.read(path),
+                Some(len) => self.read_range(path, *offset, *len),
+            })
+            .collect()
+    }
+    /// Is every read a round trip to another computer? There, a pack that more than one
+    /// blob is wanted from is fetched whole, once (see `VaultRepo::read_blob`).
+    fn remote(&self) -> bool {
+        false
+    }
     /// Create or replace `path` atomically (readers see the old or the new content), and
     /// make it durable before returning.
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
@@ -41,7 +63,8 @@ pub trait Backend: Send + Sync {
     fn flush_packs(&self) -> io::Result<()> {
         Ok(())
     }
-    /// Files directly in `dir`, or (for `data`) in its two-hex-digit subdirectories:
+    /// Files directly in `dir`, or (for `data` and `parity/data`) in its two-hex-digit
+    /// subdirectories:
     /// `(name, size)`. A missing directory is empty.
     fn list(&self, dir: &str) -> io::Result<Vec<(String, u64)>>;
     fn remove(&self, path: &str) -> io::Result<()>;
@@ -154,7 +177,7 @@ impl Backend for LocalBackend {
                 continue; // temporaries
             }
             let ft = e.file_type()?;
-            if ft.is_dir() && dir == "data" {
+            if ft.is_dir() && fanned_out(dir) {
                 for f in fs::read_dir(e.path())? {
                     let f = f?;
                     let n = f.file_name().to_string_lossy().into_owned();
@@ -325,6 +348,46 @@ impl Backend for SftpBackend {
         Ok(out)
     }
 
+    fn read_many(&self, reads: &[ReadAt]) -> Vec<io::Result<Vec<u8>>> {
+        use flux_transport::sftp::ReadReq;
+        use rayon::prelude::*;
+        // A batch to each session the pool has free.
+        let reqs: Vec<ReadReq> = reads
+            .iter()
+            .map(|(path, offset, len)| ReadReq {
+                path: self.path(path).into_bytes(),
+                offset: *offset,
+                len: *len,
+            })
+            .collect();
+        let mut out: Vec<io::Result<Vec<u8>>> = reqs
+            .par_chunks(32)
+            .flat_map_iter(|chunk| match self.pool.with(|s| Ok(s.read_many(chunk))) {
+                Ok(v) => v,
+                Err(e) => chunk
+                    .iter()
+                    .map(|_| Err(io::Error::new(e.kind(), e.to_string())))
+                    .collect(),
+            })
+            .collect();
+        // A range must come whole, as `read_range` gives it.
+        for (r, (path, _, len)) in out.iter_mut().zip(reads) {
+            if let (Ok(data), Some(len)) = (&r, len)
+                && data.len() as u64 != *len
+            {
+                *r = Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("{path}: short read"),
+                ));
+            }
+        }
+        out
+    }
+
+    fn remote(&self) -> bool {
+        true
+    }
+
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         if let Some(l) = &self.limiter {
             l.wait(data.len() as u64);
@@ -360,7 +423,7 @@ impl Backend for SftpBackend {
             if name.starts_with('.') {
                 continue;
             }
-            if attrs.is_dir() && dir == "data" {
+            if attrs.is_dir() && fanned_out(dir) {
                 for (n, a) in self.pool.with(|s| s.readdir(&format!("{base}/{name}")))? {
                     if !n.starts_with('.') && a.is_file() {
                         out.push((n, a.size.unwrap_or(0)));
@@ -403,6 +466,12 @@ impl Backend for SftpBackend {
     fn clear_locks(&self, force: bool) -> io::Result<Vec<LockInfo>> {
         locks::clear(self.pool.as_ref(), &self.path("locks"), force)
     }
+}
+
+/// Directories whose files sit in two-hex-digit subdirectories: the packs, and their
+/// parity files.
+fn fanned_out(dir: &str) -> bool {
+    dir == "data" || dir == "parity/data"
 }
 
 /// Path of a pack inside the repository.

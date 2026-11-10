@@ -1,13 +1,18 @@
 <script lang="ts">
   import { app, type Tab } from "../state.svelte";
   import { profileMenu } from "../profileMenu";
+  import { scheduleText } from "../clock.svelte";
   import type { ProfileSummary } from "../types";
   import Icon, { type IconName } from "./Icon.svelte";
   import MenuButton from "./MenuButton.svelte";
+  import SentryDialog from "./SentryDialog.svelte";
 
   let { profile }: { profile: ProfileSummary } = $props();
   // Shown as a tag: "manual", "daily", "every 4h + when drive connected"… capitalised.
-  const schedule = $derived(profile.schedule ? profile.schedule[0]!.toUpperCase() + profile.schedule.slice(1) : "Manual");
+  const schedule = $derived.by(() => {
+    const w = scheduleText(profile.schedule || "manual");
+    return w[0]!.toUpperCase() + w.slice(1);
+  });
   /** The destination, short: a drive's folder name, or user@host for a server. */
   const where = $derived.by(() => {
     const t = profile.target;
@@ -17,6 +22,8 @@
   const starting = $derived(!!app.starting[profile.id]);
   const stopping = $derived(!!app.stopping[profile.id]);
   const editing = $derived(app.tab === "settings");
+  /** Flux Sentry's own dialog, from its tag. */
+  let sentryOpen = $state(false);
 
   // Using a backup; its settings are a page of their own (the gear button), not a tab.
   const tabs: { id: Tab; label: string; key: string; icon: IconName }[] = [
@@ -55,6 +62,13 @@
             {@const e = engineTag[profile.engine]}
             <span class="tag {e.accent ? 'tag-accent' : ''}" title={e.title}><Icon name={e.icon} size={13} />{e.text}</span>
           {/if}
+          {#if profile.held}
+            <span class="tag tag-warn" title="Flux Sentry found unusual changes in the last backup. No backup is made until you settle them on the Overview: This was me, or It's dealt with."><Icon name="sentry" size={14} />Flux Sentry · backups on hold</span>
+          {:else if profile.sentry && profile.sentry !== "off"}
+            <button class="tag tag-accent tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry learns how much of this backup normally changes, and warns when a backup doesn't fit or shows the marks of ransomware{profile.sentry === 'high' ? ' (watching closely)' : ''}. Click to change how it watches."><Icon name="sentry" size={14} />Flux Sentry active{profile.sentry === "high" ? " · closely" : ""}<Icon name="chevronRight" size={12} /></button>
+          {:else if profile.sentry === "off"}
+            <button class="tag tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry isn't watching this backup: no warnings about unusual changes. Click to turn it on."><Icon name="sentry" size={14} />Flux Sentry off<Icon name="chevronRight" size={12} /></button>
+          {/if}
           {#if profile.scope === "system"}
             <span class="tag tag-warn" title="Runs as root; managed through the administrator helper"><Icon name="shield" size={13} />System · runs as root</span>
           {/if}
@@ -71,9 +85,9 @@
           <button
             id="backup-now"
             class="btn btn-primary"
-            title={profile.errors.length ? "Fix this backup's settings first" : "Back up now (Ctrl+B)"}
+            title={profile.held ? "On hold: Flux Sentry found unusual changes. Settle them on the Overview first" : profile.errors.length ? "Fix this backup's settings first" : "Back up now (Ctrl+B)"}
             onclick={() => app.backupNow(profile.id)}
-            disabled={starting || profile.errors.length > 0}
+            disabled={starting || profile.errors.length > 0 || !!profile.held}
           >
             <Icon name="play" size={14} /> {starting ? "Starting…" : "Back up now"}
           </button>
@@ -91,3 +105,7 @@
     </div>
   {/if}
 </header>
+
+{#if sentryOpen}
+  <SentryDialog id={profile.id} onclose={() => (sentryOpen = false)} />
+{/if}

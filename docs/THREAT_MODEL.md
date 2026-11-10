@@ -71,6 +71,18 @@ could otherwise turn encryption off and have the next backup stored in the clear
 Unencrypted Vaults (`encryption = false`) keep integrity checking and dedup, but not
 confidentiality.
 
+**Repair data** (`parity/`, optional since 1.1) is computed from what is stored, after
+encryption: it tells someone with the drive nothing the stored files don't, and its
+sizes say what theirs do. It is protection against a failing drive, not against a
+person: whoever can write to the target can spoil it along with the data. It can't be
+used to slip something in, because a repair is only of a file that fails its own check
+(a pack's hash, an object's authentication), and the result must pass that check before
+it replaces the file. Two things to know: a key slot's repair data holds that key slot,
+so it is removed with the password it belongs to (`flux key remove` in Flux 1.1 or
+later; a Flux older than that removes the slot and leaves its repair data until a newer
+Flux frees space, so remove a password with the newer one); and a snapshot record
+changed by an older Flux and damaged afterwards is rebuilt as it was before that change.
+
 ### Mirror (plain folders)
 
 Mirror snapshots are ordinary files with their original permissions. The repository folder
@@ -206,6 +218,14 @@ ordinary way:
   and device nodes are skipped. A user shouldn't end up holding a setuid-root copy of an
   old, perhaps vulnerable, program, or a raw disk device.
 
+**Exports as root.** A snapshot of a system backup saved as an archive is written by the
+helper into a folder you choose, often your own. The archive and its checksum file are
+made new there (never written through a file or link already under that name) and are
+readable by root only: they hold what the system backup holds, `/etc/shadow` included.
+The files are staged in a private folder made for the export and read back from that
+folder as it was opened, following no link, so renaming it away or putting another in its
+place gets nothing out of root.
+
 **Backups as root** read the source tree. The scanner doesn't follow symlinks (unless the
 profile asks for it), and nothing read from sources is executed. Files are read some time
 after they were scanned, so each is opened below its source folder with every symlink on
@@ -222,14 +242,21 @@ waited on. Links to and above a source folder are followed, as given.
   unencrypted Vault's trees) might contain absolute paths or `..` components. Restores
   skip such entries before reading or writing anything, and report them; mounts don't show
   them.
-- **Symlinks**: restored as symlinks, never followed while restoring (see above).
-  `flux-vault-recover` does the same: every folder on the way to a file must be a real
-  folder, a file is always created new, and only folders have anything below them.
+- **Symlinks**: restored as symlinks, never followed while restoring (see above), and
+  only folders have anything below them: an entry a forged snapshot lists below a link
+  is skipped and reported, not written to where the link points. A snapshot's stored
+  files (a Mirror's or rsync backup's data folder, what Borg extracted) are opened
+  below that folder with every link refused, so a link planted among them can't make a
+  restore copy a file from elsewhere. `flux-vault-recover` does the same: every folder
+  on the way to a file must be a real folder, and a file is always created new.
 - **Saved settings**: the copy of a profile kept with its backups (`flux-profile.toml`)
   is read as a description, not as instructions. Hooks, webhooks, password commands, ssh
   options (`ProxyCommand`) and extra rsync/borg arguments in it are dropped when a backup
   is recovered: a drive anyone could write to must not be able to run a program on the
-  computer recovering from it.
+  computer recovering from it. Its name and exclusions are text an attacker could write
+  too: in the scripts, guides and settings for other tools that Flux makes from a profile,
+  control characters in them are replaced, and a here-document's end marker is never a
+  line of its contents, so none of it becomes a command.
 - **Hard links**: recreated with `linkat` between two destinations of the same restore,
   both reached through held descriptors.
 - **Special files**: FIFOs are recreated; device nodes only as root, and never into

@@ -88,11 +88,13 @@ delete-template "<name>"`.
 A short guide then asks one question per step: **What** to back up (your home folder by default), **Where** to keep it (a
 connected drive, each with a meter of how full it is; a folder; or an SSH server), **Protection** (plain folders, encrypted, or
 written by rsync or Borg so the backups never depend on Flux; an encrypted one asks for
-its password right there), and **When**. **Review** shows every answer with a way back to
+its password right there), **When**, and **Flux Sentry**: whether it keeps watch for
+unusual changes, *normally* (recommended), *closely* or not at all (see
+[Unusual changes](#what-to-keep)). **Review** shows every answer with a way back to
 change it and the name it will have; **Create backup** sets it up and offers **Back up
 now** for the first run. Later, a backup's **Settings** show the same questions on one
 page. Everything else is one click away and has sensible defaults: each group of settings is a
-row showing its current value (*Leave some things out › caches*, *How backups are stored ›
+row showing its current value (*Exclude Files/Directories › caches*, *How backups are stored ›
 Plain folders*, *Keep and remove snapshots*, *Hooks › None*…). Click one to open just
 that group in a dialog over the editor; **Done** closes it, and nothing is saved until you click
 **Save**. A row with a problem says so in red.
@@ -378,7 +380,7 @@ Also available: skip folders with a `CACHEDIR.TAG` (on by default), skip folders
 contain a marker file (`exclude_if_present = [".nobackup"]`), skip big files
 (`exclude_larger_than = "4GB"`), and stay on one filesystem (`one_file_system`).
 
-In the app, *What to back up* › **Leave some things out** suggests common exclusions
+In the app, *What to back up* › **Exclude Files/Directories** suggests common exclusions
 (caches, trash, build output) with how much space each takes in your sources; the ones
 you've added are shown in green.
 
@@ -414,8 +416,9 @@ every photo as deleted. Flux doesn't: when you save a backup whose folder is on 
 its own (under `/run/media`, `/media` or `/mnt`), it records that drive's filesystem UUID,
 and before each backup it checks the drive is there. A folder under those places that's
 missing, or that turns out to be an empty folder on the system disk, also counts as an
-unconnected drive. (A backup made while the drive is connected records it for profiles
-from before 1.0.)
+unconnected drive; a folder there with files in it that simply lives on the system disk
+(`/mnt/data` on a server) is backed up like any other. (A backup made while the drive is
+connected records it for profiles from before 1.0.)
 
 What happens when the drive isn't there is chosen per folder, under the folder list
 (*If it isn't connected*), or as `when_missing`:
@@ -450,6 +453,18 @@ flux schedule status        # every profile's timer and next run
 flux schedule sync          # make timers match all profiles
 flux schedule remove home
 ```
+
+**Typing a time.** In the app, a backup's time takes what you type: `9` or `930` (on the
+24-hour clock: 9:00 and 9:30 in the morning), `21:30`, `9:30 pm`, `9p`, `noon`. ↑ and ↓
+move it by 15 minutes (with Shift, an hour), and the clock button lists times every half
+hour. Something that isn't a time is outlined in red and goes back to the time before when
+you leave the field. The upload limits by time of day take times the same way.
+
+**Custom times** (*More schedule options › Custom times*) takes a systemd calendar
+expression such as `Mon,Wed,Fri 18:00` or `*-*-01 03:00` (see `man systemd.time`). As you
+type, the next three runs are shown under it, so a mistake shows at once. A few forms Flux
+can't preview (time zones, the last day of a month with `~`) are said to be so; systemd
+still runs them.
 
 Scheduled backups run at low CPU and I/O priority (`options.nice`,
 `options.io_priority`), keep the computer from suspending while they run, and notify you
@@ -487,8 +502,18 @@ a week (`free_space_weekly`, on by default): each backup only marks old snapshot
 removed, and this deletes the data only they used. Results appear in the run's log in
 *Activity*.
 
+**Closing the window keeps Flux in the system tray.** Its icon lights up while a backup
+runs, and its menu opens the window, backs up everything, pauses schedules or quits. The
+first time, a notification says where Flux went. To quit when the window closes instead,
+turn off *Preferences › App › Keep running in the tray when the window is closed*. On a
+desktop with no tray to show the icon (GNOME without the AppIndicator extension, say),
+closing the window quits, so the app is never left running where you can't reach it.
+Starting Flux again while it runs brings back its window rather than a second copy.
+Scheduled backups never need the app either way.
+
 **Preferences** (bottom of the sidebar) also hold: start in the tray when you log in, the
-theme, and the exclusions new backups start with.
+theme, the clock (12-hour, 24-hour, or like the system: how the app shows and takes
+times), and the exclusions new backups start with.
 
 ### systemd timers or cron
 
@@ -598,7 +623,7 @@ to restore it (or its older version) from the older snapshot, or click **Restore
 removed**. Files larger than the backup's size limit are never compared: no backup holds
 them, and the comparison says how many there are.
 
-**Size limit.** *Settings › Leave some things out › Skip files larger than* takes a number
+**Size limit.** *Settings › Exclude Files/Directories › Skip files larger than* takes a number
 and a unit (MB, GB, TB). A limit under 1 MB leaves out nearly every file, so Flux warns
 when you set one, and Overview and Snapshots say so while it's set.
 
@@ -661,6 +686,10 @@ date and the item exported, and never replaces an existing file.
 While exporting, the files are restored into a hidden folder next to the archive and
 removed afterwards, so that drive needs room for them and the archive.
 
+An archive of a **system backup** is made by root and readable by root only, like the
+files it holds (`/etc/shadow` among them), wherever you save it. Use it with `sudo`, or
+restore into a folder instead.
+
 ```sh
 flux export home ~/home.tar.zst                               # the newest snapshot
 flux export home ~/photos.zip ~/Pictures/2025 --snapshot 3f2a91
@@ -705,11 +734,18 @@ flux recover /run/media/me/Backup --pick 1 --carry-on --id home
 `FLUX_PASSWORD` gives an encrypted Vault's password (otherwise it's asked on a terminal).
 
 **Ready for it?** At the bottom of a backup's Overview, *Could you recover it on another
-computer?* opens a short checklist: whether its settings are kept with the backups (and
-current), whether a restore test has passed, whether a copy is kept somewhere else, and,
-for encrypted backups, whether the password is kept somewhere other than this computer
-(Flux can't know: tick it when it is). For Borg, whether the key was exported
-(`borg key export`).
+computer?* opens a short checklist, with a button beside each line that isn't ready yet:
+
+| Line | Its button |
+|---|---|
+| Its settings are kept with the backups (and current) | **Back up now**: each backup keeps a copy |
+| The password is kept somewhere other than this computer | **Keep it elsewhere…**: shows the password from where Flux keeps it (masked until you click *Show*), copies it for a password manager (the clipboard is cleared 30 seconds later), saves a copy of a Vault's unlock file, and ticks the line. Flux can't know where you keep it, so **I have** ticks it too |
+| The Borg key is exported | **Export the key…**: `borg key export` into a folder you choose, as a new file; keep it with the passphrase, not next to the backups |
+| A restore test has passed | **Test a restore now** (or *Test again*) |
+| A copy is kept somewhere else | **Add a place…**: opens Settings at *Keep a copy somewhere else too* |
+
+A system backup's password and unlock file stay readable by root only, so its checklist
+doesn't show them.
 
 ### Without Flux: `flux-vault-recover`
 
@@ -737,6 +773,8 @@ A restore goes into an empty folder (nothing is overwritten), under the files' f
 with their permissions and times (and owners, when run as root); sparse files stay
 sparse. Named pipes and device files are skipped. The password can also come from
 `FLUX_PASSWORD` or `--password-file`; a Vault with an unlock file needs `--unlock-file`.
+A snapshot whose record is damaged is said and left out (`snapshots` and `verify` then
+exit with 3); every other snapshot is listed and restores as usual.
 
 ## What to keep
 
@@ -756,7 +794,15 @@ min_free_inodes_percent = 5
 ```
 
 Each bucket keeps the newest snapshot of each of its last N hours, days, weeks, months or
-years. Pruning runs after every backup. Run it yourself with a preview:
+years. A `[retention]` table that sets none of the `keep_` rules (only `min_free_space`,
+say) keeps the default ones; one that sets any means exactly what it says.
+
+`min_free_space` and `min_free_inodes_percent` go past the bucket rules: while the drive
+is below them, the oldest snapshots are removed. They never take pinned or named
+snapshots, the `keep_last` newest, or the newest `safety_floor` complete ones, and they do
+nothing when `enabled = false`.
+
+Pruning runs after every backup. Run it yourself with a preview:
 
 ```sh
 flux prune home --dry-run
@@ -777,25 +823,126 @@ to see which each rule keeps or removes, and why.
   one of its places, the next backups remove nothing until one runs cleanly. A run of bad
   backups can't push your good snapshots out. `flux prune` by hand still prunes.
 
-**Unusual changes.** After each backup, Flux compares what changed with what usually
-changes in this backup, and looks for the marks ransomware leaves: many more files changed
-or deleted than usual; files renamed to a new extension (`report.odt` →
+**Unusual changes: Flux Sentry.** After each backup, Flux Sentry compares what changed
+with what usually changes in this backup, and looks for the marks ransomware leaves: many
+more files changed or deleted than is usual for this backup (below); files renamed to a new extension (`report.odt` →
 `report.odt.locked`) or many new files with extensions ransomware uses; text files
 (`.txt`, `.csv`…) whose contents now look encrypted (a sample is read); ransom notes
-(`HOW_TO_DECRYPT.txt`). When a backup stands out:
+(`HOW_TO_DECRYPT.txt`).
 
-- its snapshot is tagged *unusual changes*, and **the snapshot before it is pinned**, with
-  a note saying why, so it can't be removed;
+**It looks before anything is written.** For backups in Flux's own formats (plain
+folders and encrypted), Sentry compares your files as they are now with the newest
+snapshot *before* the backup starts. If they show unusual changes, **the backup isn't
+made**: nothing of an attack reaches your backups, on this drive or any other place.
+The warning then reads *Flux Sentry stopped the last backup*. (For backups written by
+rsync or Borg, and while a backup has no snapshot to compare with, it looks at the new
+snapshot right after it's written.) If the changes were yours, *This was me* lets the
+next backup take them without being stopped again.
+
+**Tripwire files** (off unless you turn them on, in the setup step or *What to keep ›
+Safety*; `tripwires = true`). Flux Sentry plants a small hidden file,
+`.flux-sentry-tripwire.txt`, in each folder the backup covers and in its first eight
+visible subfolders, at the next backup. The file says what it is. Nothing has a reason to
+change it, and ransomware changes or renames every file it finds: before each backup
+Sentry looks at them, and if one has been changed or removed the backup is stopped at
+once, however little else has happened yet, for a backup of any kind (rsync and Borg
+too). A folder you delete takes its tripwire along without an alarm, and a drive that
+isn't connected says nothing. When you settle the alarm they are set again (a changed
+one is moved aside as `.flux-sentry-tripwire.txt.tripped`, never deleted). Turning the
+setting off, or deleting the backup, removes every tripwire that is still as Flux
+planted it (one on a drive that's away goes when it's back). Two backups of the same
+folder share its tripwires, and a tripwire an older snapshot's restore puts back is as
+good as the one it replaces. A folder you take out of a backup loses its tripwires at the
+next run. They aren't planted for system backups. `flux sentry home` says how many
+there are.
+
+When a backup stands out:
+
+- (a folder whose drive isn't connected is never counted as deleted, and what Sentry
+  learns from is its own count of files whose contents changed or that went, the same
+  thing it looks at: a `chmod -R` teaches it nothing)
+- **the snapshot from before is pinned**, with a note saying why, so it can't be removed
+  (and a snapshot that was written with the changes is tagged *unusual changes*);
+- **the backup is put on hold**: no further backup is made, by its schedule or by *Back
+  up now*, until you settle it. Another backup could only store more of the damage. The
+  backup's page shows *Flux Sentry · backups on hold*, and a notification says so again
+  once a day for as long as it lasts;
+- **its other places aren't backed up to** that time: they keep their copies from before
+  the changes, the ones kept elsewhere above all. (When the main backup can't be reached,
+  its drive away or its server down, each other place is looked at against its own
+  newest snapshot instead, before anything is written there);
 - old snapshots aren't removed until it's settled, and a notification says what was seen;
-- the Overview says what was found and where, with **Show the files**, **Browse the
-  snapshot before** (to restore from it) and **This was me** (when you made the changes:
-  the warning goes, the pin and the tag are removed).
+- the Overview says what was found and where, with **Restore everything…** (below),
+  **Show the files**, **Browse the snapshot before** (to restore from it piece by
+  piece), and the two ways to settle it:
+  - **This was me**, when you made the changes: backups go on, Flux Sentry takes that
+    backup as normal from now on, and the pin and the tag are removed;
+  - **It's dealt with**, when you didn't, and have restored what you need: backups go
+    on, Flux Sentry learns nothing from that backup, and the snapshot from before stays
+    pinned.
+
+**Restore everything…** is the short way back: it opens a restore of everything the
+backup covers, from the snapshot kept from before the changes, back to where it was. You
+see what it will do before anything is written. Files that differ now are kept beside
+the restored ones (renamed), not deleted, unless the backup is set not to keep them
+(*Keep my files when restoring over them* is off): the dialog says which, in red when
+they'd be replaced. What was added since stays where it is, for you to look through and
+clear out. When a restore *back to where it was* finishes without errors, the alarm is
+settled as *dealt with* and backups go on. A restore into another folder, to look at the
+files first, leaves the backup on hold: your files are still as they were, so settle it
+yourself once they're right. The first backup after an alarm you
+settled isn't stopped again for the same changes, or for what an attack left lying
+about; the snapshot from before stays pinned.
 
 If you didn't make the changes, don't delete or change anything: disconnect the computer
-from the network and restore from the snapshot before. *Watch for unusual changes*
-(*What to keep › Safety*: normally, closely, or not at all; `unusual_changes = "high"`)
-sets how readily changes count. While it's on, the snapshot before the newest always
+from the network and restore from the snapshot before. In a terminal, `flux sentry home`
+says whether a backup is on hold and why, `flux sentry home --this-was-me` and
+`flux sentry home --dealt-with` settle it, and `flux backup` refuses until then. Turning
+*Flux Sentry* off for the backup also lets backups run.
+
+Setting up a backup asks how Flux Sentry should watch it, and *Flux Sentry: watch for
+unusual changes* (*What to keep › Safety*; `unusual_changes = "high"`) changes it later:
+
+| | Warns when | For |
+|---|---|---|
+| **Normally** (recommended) | a backup changes about 6 times its usual amount or more (at least 100 files and 5% of them), 20 files are renamed to a new extension, 10 text files look encrypted, or 3 ransom notes appear | most backups |
+| **Closely** | about 3 times its usual (30 files, 2%), 8 renames, 4 encrypted-looking files, or 1 ransom note | files that rarely change; a busy folder may raise a false alarm now and then |
+| **Off** | never | when you don't want the warnings: backups and snapshots are made just the same |
+
+While Sentry watches a backup, its page shows a green **Flux Sentry active** tag (a
+shield with an eye) next to where it's kept and when it runs. While it's on, the snapshot before the newest always
 survives one more backup, so there is one to keep.
+
+Click that tag (or the *Unusual changes* cell under *Settings at a glance*) for Flux
+Sentry's own dialog: what it has learned of this backup, how closely it watches, and the
+tripwire files, without going through the other settings.
+
+*How Flux Sentry knows what's usual.* No fixed limit fits every backup: a folder of
+finished work where almost nothing changes should raise the alarm long before "30% of the
+files", and a projects folder rebuilt every Monday shouldn't raise it at all. So Sentry
+learns each backup's own normal from its last 60 backups, and keeps three things:
+
+- **A level**: how much of the backup usually changes, as a moving average that leans
+  toward recent backups (each new one counts for a fifth), so it follows a backup whose
+  habits change. It works with the logarithm of the share, since 0.1% and 10% are both
+  ordinary, for different backups; and one extraordinary backup moves it only a little.
+- **A spread**: how far backups usually land from the level (the median absolute
+  deviation of the last 30, which a few odd ones can't inflate).
+- **A memory**: an amount of change this backup has reached at least twice before, in
+  backups that weren't flagged or that you answered with *This was me*, is part of its
+  normal, however rare.
+
+A backup is unusual when it lands 6 spreads above the level (4 when watching *closely*),
+changes at least 100 files and 5% of them (30 files and 2%, closely), and is nothing the
+memory knows. For a steady backup that is about 6 times its usual change (3.3 times,
+closely); for one whose backups vary a lot, more, up to 20 times. The warning says it in
+those terms: "480 files changed or deleted, 4.8% of them: 40 times what this backup
+usually changes (0.12%)". The *Unusual changes* cell of a backup's settings at a glance
+says what Sentry has learned so far and where it would warn. Until a backup has run five
+times, fixed limits stand in (30% of the files and 5 times the usual; 15% and 3 times,
+closely). Backups whose changes were flagged teach it nothing unless you say they were
+yours, so an attack is never taken for a habit; the marks of ransomware (renames,
+encrypted text, ransom notes) are looked for whatever the amount of change.
 
 **Activity history** is kept separately from snapshots: the last 1000 backups by default,
 or only those of the last 30 days, 3 months or a year (`keep_history_days`, or
@@ -838,6 +985,13 @@ yet). So the first backup, even a scheduled one at night, has nothing to ask. A 
 was set up before this, or whose drive wasn't connected at the time, shows the same fields
 in its Settings until its first backup. On the command line, `flux key init <profile>`
 does the same.
+
+**A scheduled backup can't ask.** When the password is set to *Ask every time* and the
+backup runs on a schedule (or when its drive is plugged in), nobody is there to type it and
+those backups fail. The app warns about it next to *When* and under *How backups are
+stored*, with **Keep it in the keyring** to fix it: type the password once, Flux checks it
+opens the backups and keeps it in the keyring. (For a system backup the fix is a root-only
+key file.) `flux profile validate` gives the same warning.
 
 A Vault can have several passwords. Each one opens it, and changing them never re-encrypts
 data:
@@ -889,7 +1043,7 @@ setting: neither has a stronger alternative worth choosing.
 Sparse files (disk images, some databases: files with *holes*, ranges that take no disk
 space) keep their holes in a Vault: only their data is read and stored, and a restored
 copy is sparse again, as with Mirror. A Vault created before Flux 1.0 stores them whole
-until you upgrade it: *Upgrade the Vault* in the Overview's Maintenance (shown only for
+until you upgrade it: *Upgrade the Vault* on the Overview (shown only for
 such a Vault), or `flux vault upgrade <profile>`. Upgrade once every computer that uses
 the Vault runs Flux 1.0: older versions can't open it afterwards. The snapshots already
 there stay as they are.
@@ -912,32 +1066,123 @@ exact command). **Without the passphrase, the data can't be decrypted.**
 ```sh
 flux check home              # structure: every snapshot complete, every file accounted for
 flux check home --read-data  # also read and verify every byte (slow)
+flux check home --repair     # Vaults with repair data: and rebuild what is damaged
 ```
 
-The app has the same under *Maintenance* on a profile's overview. Vault data is
-authenticated, so any corruption or tampering is detected.
+Three checks, each answering one question, from quickest to most thorough. On a backup's
+Overview they're together under *Checks and upkeep*:
+
+| Question | Check | What it reads |
+|---|---|---|
+| Is every snapshot whole? | **Check** (`flux check`) | each snapshot's record and structure, not the data: quick |
+| Can files come back? | **Restore test** (`flux restore-test`) | some files, read back the way a restore does, every byte checked; nothing written |
+| Is all the stored data undamaged? | **Verify every byte** (`flux check --read-data`) | everything stored, to find a failing drive: as long as reading the whole backup |
+
+Vault data is authenticated, so any corruption or tampering is detected.
+
+### Repair data: damage undone, not only found
+
+Drives go bad a little at a time: a sector that no longer reads, a bit that flipped. A
+check finds that; by itself it can't undo it, and a damaged part of a Vault takes the
+files stored in it along. With **repair data** it can be undone. In *Settings › Where to
+keep it › How backups are stored*, **Repair data** keeps a little extra with
+everything the Vault stores from then on (2, 5, 10 or 20% more space; off by default):
+
+```toml
+[vault]
+parity = 5                        # percent of repair data: 1–50, 0 for none
+```
+
+When **Verify every byte** then finds damage, it rebuilds the damaged parts, checks the
+result against the same checksums as before, and says what it repaired (a drive that
+needed repairs is a drive to replace). The monthly verification of *Upkeep* does the
+same, with a notification. On the command line a check only reports, and says what could
+be repaired; `--repair` does it:
+
+```sh
+flux check home --read-data       # "…its repair data can rebuild it"
+flux check home --repair          # read every byte, rebuild what is damaged
+```
+
+Verifying every byte also adds repair data to what was stored before the setting was
+on (it reads everything anyway), and writes again repair data that is itself damaged.
+The storage summary on the Overview says how much there is and whether it covers
+everything.
+
+How it works, and how much it repairs: each stored file is cut into 4 KiB blocks, and
+Reed–Solomon parity blocks are computed over groups of up to about 240 of them (the
+arithmetic of RAID 6 and PAR2). With 5%, a group gets 13 parity blocks and can lose
+**any 13** of its blocks; the groups are interleaved, so a single damaged stretch of up
+to about 5% of a file (some 880 KiB of a 16 MiB one) is repaired, as is any scattering of
+damage that leaves no group with more than 13 bad blocks. Hashes of every block say
+which ones are damaged. What it doesn't repair: a stored file that is gone entirely, or
+a drive that has died. That is what a copy in a second place is for (*Several places at
+once*); copies carry the repair data too. The file format is in
+[VAULT_FORMAT.md](VAULT_FORMAT.md); it adds to a Vault without changing it, so older
+versions of Flux and `flux-vault-recover` read the Vault as before.
 
 ### Restore tests
 
-A check reads what's stored; a **restore test** goes all the way: it restores some files
-of the newest snapshot into a private temporary folder, as a real restore would, and checks
-each against the backup's own record (its size, and its checksum when the profile records
-checksums; a Vault checks every piece of data it reads anyway). A file that can't be
-restored, or comes back with the wrong size or contents, fails the test. Permissions or
-times not as recorded, a test stopped at a limit, and (if asked) files that differ from
-your copy now are notes: the test passes with a warning. The temporary folder is removed.
+A check reads what's stored; a **restore test** goes all the way: it reads some files of
+the newest snapshot back the way a restore does (from the drive or the server, decrypted
+and decompressed for a Vault, through `borg extract` for Borg) and checks each against the
+backup's own record (its size, and its checksum when the profile records checksums; a
+Vault checks every piece of data it reads anyway). A file that can't be read back, or
+comes back with the wrong size or contents, fails the test. A test stopped at a limit,
+and (if asked) files that differ from your copy now, are notes: the test passes with a
+warning.
+
+**Nothing is written anywhere.** Each file is checked as it streams, a piece at a time,
+and each piece is wiped from memory once checked: no copy lands on a disk or in a
+temporary folder, so an encrypted backup's files stay encrypted at rest, and the test
+uses the same little memory for ten files as for every file. (Until 1.1, a restore test
+restored its files into a temporary folder and checked their permissions and times too; a
+folder one of those left behind is removed by the next test.)
 
 On a backup's Overview, **Test a restore now** runs one; *Settings › What to keep ›
 Restore tests* runs them by themselves, after a backup once due: **after every backup**,
-**weekly** or **monthly** (off by default). Which files: **some at random** (10), **a share
-of the backup** (a percentage of its size), **every file once a month** (a different part
-each time, so every file is tested within 30 days), or **everything**. Limits on time and
-data read keep big tests in check. A failed test is notified and stays on the Overview and
+**weekly** or **monthly** (off by default). Which files: **enough to be sure** (below),
+**some at random** (10), **a share of the backup** (a percentage of its size), **every file
+once a month** (a different part each time, so every file is tested within 30 days), or
+**everything**. Limits on time and data read keep big tests in check. A failed test is notified and stays on the Overview and
 All backups until one passes; a test that's overdue (no pass within the interval and a
 bit) is a warning.
 
+**Enough to be sure.** "Ten files came back" says little about the other hundred
+thousand. With *Enough to be sure*, you say what a pass must prove instead, and Flux works
+out how many files that takes: *catch damage to 1% of the files or more, 99% certain*
+reads **459 random files**, and the report then says so: "if 1% or more of its 184,000
+files were damaged, this test would have found it (99% certain)".
+
+The number hardly depends on the size of the backup: 459 files say as much about ten
+million files as about ten thousand (a small backup needs fewer, since no file is picked
+twice: 368 of 1,000, 99 of 100). It grows with what you ask:
+
+| Catch damage to | 90% certain | 95% | 99% | 99.9% |
+|---|---|---|---|---|
+| 10% of the files | 22 | 29 | 44 | 66 |
+| 5% | 45 | 59 | 90 | 135 |
+| 1% | 230 | 299 | 459 | 688 |
+| 0.5% | 460 | 598 | 919 | 1,379 |
+| 0.1% | 2,302 | 2,995 | 4,603 | 6,905 |
+
+How it's worked out: if *D* of the snapshot's *N* files are damaged (can't be read back,
+or don't match their record) and *n* are picked at random, the test misses them all with
+probability C(N − D, n) / C(N, n). Flux takes the smallest *n* that brings this to
+1 − certainty or less for *D* = the share you chose; more damage than that is caught more
+surely still. For a large backup this is n ≥ ln(1 − certainty) / ln(1 − share). What it
+doesn't say: that fewer damaged files than that would be found (only testing everything,
+or every file once a month, gets to each file), or anything about a test stopped at a
+limit, which makes no such statement. The files are picked with the system's randomness,
+each set of *n* equally likely.
+
+A test of *some files at random* that passes says what it was worth, too: ten files
+catch damage only when 37% of the files or more are damaged (99% certain).
+
 ```sh
 flux restore-test home                 # the profile's settings (10 random files)
+flux restore-test home --damage 1%     # enough files to catch 1% damage, 99% certain
+flux restore-test home --damage 0.1% --certainty 99.9%
 flux restore-test home --files 50 --compare-source
 flux restore-test home --full
 flux restore-test home --history
@@ -946,8 +1191,10 @@ flux restore-test home --history
 ```toml
 [restore_test]
 every = "month"                        # off | backup | week | month
-mode = "rolling"                       # random_files | percent | full | rolling
-files = 10
+mode = "confidence"                    # random_files | percent | full | rolling | confidence
+# damage = "1%"                        # confidence: catch damage to this share of the files…
+# certainty = "99%"                    # …this surely (0.01–50%, 50–99.99%)
+# files = 10                           # random_files
 # percent = 5
 # window = "30days"                    # rolling: every file within this long
 # max_runtime = "1h"
@@ -961,10 +1208,13 @@ To back up things only root can read (`/etc`, `/root`, other users' files), use 
 profiles**. They live in `/etc/flux-backup/` and run from system timers, even when nobody is
 logged in.
 
-**In the app:** click **System backups** at the bottom of the sidebar. Flux explains what
-it needs; then your desktop asks for an administrator password (yours, if your account is
-an administrator). System profiles then appear and work like your own. The app locks them again
-after 15 minutes without use, or when you click the lock.
+**In the app:** on the **New backup** page, choose **Back up the whole computer** (last,
+below the templates). Flux explains what it needs; then your desktop asks for an
+administrator password (yours, if your account is an administrator), and setting up the
+system backup begins. To see the system backups you already have, choose **System
+backups…** in the **+** menu next to *Your backups*: once unlocked, they're listed under
+*System backups* in the sidebar and work like your own. The app locks them again after 15
+minutes without use, or with **Lock system backups** (the lock beside them, or the + menu).
 
 **In a terminal:** add `--system` and run as root:
 
@@ -999,7 +1249,17 @@ timeout = "10m"
 They run with `sh -c` and get `FLUX_EVENT`, `FLUX_PROFILE`, `FLUX_PROFILE_NAME`,
 `FLUX_ENGINE`, `FLUX_SOURCES`, `FLUX_TARGET`, `FLUX_TRIGGER`, `FLUX_STATUS`,
 `FLUX_SNAPSHOT_ID`, `FLUX_SNAPSHOT_PATH` and `FLUX_ERROR`. Their output goes into the
-run's log.
+run's log. A hook is done when its command is: something it leaves running in the
+background (`ssh -f -N -L …` for a tunnel, `some-tool &`) keeps running and doesn't hold
+the backup up; what it prints after that isn't logged.
+
+## Help on the command line
+
+Every `flux` command has a man page (`man flux`, `man flux-backup`, `man
+flux-profile-create`…): what it does and what it changes, every option, examples of basic
+use, its exit status (0 worked, 1 failed, 2 a wrong command line, 3 a profile with errors,
+4 done but not everything went through) and related pages. `flux <command> --help` lists
+the options and ends with the same examples; `flux help` lists the commands.
 
 ## Keeping an eye on things
 
@@ -1011,9 +1271,13 @@ flux log home          # recent runs
 flux log home --run last   # everything that happened in one run, including warnings
 ```
 
-The app shows the same: a coloured dot per profile (green: fine, amber: some files
-couldn't be read, red: failed, blue: running), live progress for every backup however it
-was started, and an *Activity* tab with the full log of each run. *Problems* in Activity
+The app shows the same. Next to each backup in the sidebar: a green tick when it's fine;
+a quiet amber dot and a few words when it's protected but something is worth a look (*Low
+on space*, *Not tested lately*, *A copy failed*…); a red ⚠ only when it isn't protected
+(it failed, it's at risk, or it hasn't backed up yet); a spinner while it runs. The time
+next to it is when its last good copy was made. *All backups* counts the same two kinds
+("2 not protected · 3 to look at"). Live progress shows for every backup however it was
+started, and an *Activity* tab has the full log of each run. *Problems* in Activity
 shows only the runs that failed or skipped files.
 
 With more than one backup, *All backups* can show only some of them: **Missed** (overdue,
@@ -1026,6 +1290,32 @@ The *Overview* tells you in words when something needs you: the drive hasn't bee
 connected for a while, the last few backups failed, no backup has succeeded for longer
 than its schedule suggests (3 days for a daily backup, 30 for a manual one), or the
 destination is almost full.
+
+**Settings at a glance.** A backup's Overview sums up its settings in a compact grid, so
+you can see without opening Settings whether it has a schedule, where its password is
+kept, what it keeps and so on: *Schedule*, *Backs up*, *Excluded*, *Where*, *Other
+copies*, *Stored as*, *Password*, *Keeps*, *Restore tests*, *Upkeep*, *Unusual changes*,
+*Notifications*, *Hooks* (and *Network* for a server), in three groups: *When and what*,
+*Where and how*, *Safety and alerts*. Settings that say nothing about this backup (no
+password for plain folders, no hooks) are left out. Something to fix is marked in amber
+(a password asked for each time on a scheduled backup, say); a setting that's off is
+greyed. Hover one for more; click it to change it right there: its section of the
+Settings page (*What to back up*, *Where to keep it*, *Also keep copies elsewhere*, *When*,
+*What to keep* or *More*) opens in a dialog, the same as on that page, with its own
+**Save** and **Cancel**. A row in it that opens more (*More schedule options*, say) shows
+it in the same dialog, with **Back**. You stay on the Overview throughout (*All settings*,
+or the gear button, opens the whole Settings page). The grid folds away with its heading, and stays
+folded until you open it again. The same goes for *Change the limit* on the size-limit
+note and *Add a place…* in the recovery checklist.
+
+On *All backups*, **Settings** (next to *Status*) shows every backup's settings side by
+side in a table, one line each (hover a cell for all of it): schedule, next backup, where,
+how it's stored, the password, what's kept, restore tests and notifications. **Columns**
+adds or removes any of the others (what's excluded, other copies, upkeep, hooks…). Click a
+column's heading to sort by it (again to reverse, a third time to go back); click a
+setting to change it in a dialog over the table, a name to open the backup. The table uses the window's whole width,
+with the headline shortened to one line above it. The filters work here too, and the app
+remembers the view and the columns you chose.
 
 To set up a similar backup (the same folders to a second drive, say), use **Duplicate** in
 the backup's menu or `flux profile duplicate home`: the copy is called "… (copy)" and opens
@@ -1238,6 +1528,7 @@ threads = 0                       # 0 = automatic
 compression_level = 3             # 0 (off) to 22
 encryption = true                 # fixed when the Vault is created
 password_source = { from = "keyring" }
+# parity = 5                      # repair data: this percent more space (1–50), 0 = none
 # keep_recovery_tool = false      # don't keep flux-vault-recover next to it on a drive
 
 [rsync]                           # rsync (compatibility mode) profiles only

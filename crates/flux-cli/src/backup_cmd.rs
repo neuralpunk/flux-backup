@@ -268,6 +268,12 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
             println!("Skipped: a backup of {id} is already running.");
             return Ok(ExitCode::SUCCESS);
         }
+        // On hold by Flux Sentry: a scheduled run is skipped (said again by a notification
+        // once a day); one asked for by hand fails, with what to do.
+        Err(flux_runner::RunError::Held(why)) if args.scheduled => {
+            println!("Skipped: {why}.");
+            return Ok(ExitCode::SUCCESS);
+        }
         Err(flux_runner::RunError::Skipped(why)) => {
             if ctx.json {
                 output::print_json(&record)?;
@@ -738,13 +744,17 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        let how = if args.overwrite {
-            "overwriting"
+        // What will be done, not what was asked: the profile can be set never to keep
+        // the current versions (`backup_before_restore = false`).
+        let how = if keep_existing {
+            "keeping the current versions of files that differ, renamed"
+        } else if args.overwrite {
+            "overwriting files that differ"
         } else {
-            "keeping"
+            "overwriting files that differ: this profile has backup_before_restore = false"
         };
         let question = format!(
-            "Restore {list} from snapshot {} to the original location ({how} files that differ)?",
+            "Restore {list} from snapshot {} to the original location ({how})?",
             snap.id
         );
         if !output::confirm(&question)? {
@@ -952,11 +962,7 @@ pub enum ChecksumArg {
 #[derive(Args)]
 #[command(after_help = "The archive's kind comes from its name:\n  \
     .tar.zst  keeps everything: owners, permissions, times, links, extended attributes and ACLs\n  \
-    .zip      for sharing: files, folders, times and basic permissions only\n\n\
-    Examples:\n  \
-    flux export home ~/home.tar.zst\n  \
-    flux export home ~/photos-2025.zip ~/Pictures/2025 --snapshot 3f2a91\n  \
-    flux export home /mnt/usb/docs.tar.zst ~/Documents --checksums sha256")]
+    .zip      for sharing: files, folders, times and basic permissions only")]
 pub struct ExportArgs {
     pub profile: String,
     /// The archive to write (it mustn't exist): NAME.tar.zst or NAME.zip.
@@ -1048,10 +1054,6 @@ pub fn run_export(ctx: &Ctx, args: ExportArgs) -> anyhow::Result<ExitCode> {
 }
 
 #[derive(Args)]
-#[command(after_help = "Examples:\n  \
-    flux explain home ~/Downloads/film.mkv\n  \
-    flux explain home ~/Projects/app/node_modules ~/.cache\n  \
-    flux explain home ~/Projects --list      # each item in the folder, with totals")]
 pub struct ExplainArgs {
     pub profile: String,
     /// Files or folders (they needn't exist: a path ending in / is judged as a folder).

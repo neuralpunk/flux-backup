@@ -185,6 +185,7 @@ pub fn location(id: &ProfileId, p: &Profile) -> String {
 
 /// `newest`: the newest snapshot's id, used in the examples when known.
 pub fn rsync_kit(id: &ProfileId, p: &Profile, rsync_version: &str, newest: Option<&str>) -> Kit {
+    let p = &crate::script_safe(p);
     Kit {
         recovery: rsync_recovery(
             id,
@@ -271,11 +272,50 @@ fn rsync_recovery(id: &ProfileId, p: &Profile, rsync_version: &str, example_id: 
         place.arg(&format!("{LATEST}/data/{folder_rel}/")),
         shell_quote(&format!("{folder}/"))
     );
-    let everything = format!(
-        "  rsync {flags}{e} --numeric-ids --dry-run {} /\n  rsync {flags}{e} --numeric-ids {} /",
-        place.arg(&format!("{LATEST}/data/")),
-        place.arg(&format!("{LATEST}/data/"))
-    );
+    // Each top folder of the backup (`data/home`, `data/etc`) into `/`, never `data/`
+    // itself: rsync gives the destination folder the mode and owner of a source named
+    // with a trailing slash, and `data` is a private folder of whoever made the backup.
+    // With sudo, `rsync … data/ /` would make `/` that too, and lock everyone else out.
+    let tops: Option<Vec<String>> = {
+        let mut seen = Vec::new();
+        flux_fs::scan::normalize_sources(&p.sources.paths)
+            .iter()
+            .map(|s| match s.components().nth(1) {
+                Some(std::path::Component::Normal(c)) => Some(c.to_string_lossy().into_owned()),
+                _ => None, // the backup is of `/` itself
+            })
+            .collect::<Option<Vec<String>>>()
+            .map(|v| {
+                for t in v {
+                    if !seen.contains(&t) {
+                        seen.push(t);
+                    }
+                }
+                seen
+            })
+            .filter(|v| !v.is_empty())
+    };
+    let everything = match &tops {
+        Some(tops) => {
+            let from = tops
+                .iter()
+                .map(|t| place.arg(&format!("{LATEST}/data/{t}")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "  rsync {flags}{e} --numeric-ids --dry-run {from} /\n  rsync {flags}{e} --numeric-ids {from} /"
+            )
+        }
+        // A backup of `/` itself has no top folders to name. `data/` it is, with the one
+        // thing that must be put right afterwards.
+        None => format!(
+            "  rsync {flags}{e} --numeric-ids --dry-run {from} /\n  rsync {flags}{e} --numeric-ids {from} /\n  \
+             Then give / its own permissions and owner back (rsync sets them from the\n  \
+             backup's data folder, which is private to whoever made the backup):\n  \
+             chmod 755 / && chown root:root /",
+            from = place.arg(&format!("{LATEST}/data/"))
+        ),
+    };
     let elsewhere = format!(
         "  rsync {flags}{e} {} ~/restored/",
         place.arg(&format!("{SNAPSHOTS}/{example_id}/data/{folder_rel}"))
@@ -591,6 +631,7 @@ rm -f "$RULES.markers"
         }
     };
     let rsync_line = script_rsync_line(p);
+    let rules_tag = crate::heredoc_tag("FLUX_RULES", &rules);
     format!(
         r#"#!/bin/sh
 # Flux Backup recovery kit: back up "{name}" ({id}) with plain rsync, without Flux.
@@ -609,8 +650,8 @@ KEEP={keep}
 if [ "${{1:-}}" = "--dry-run" ]; then DRY=1; KEEP=; fi
 {setup}
 # Exclusion rules (rsync filter syntax; the first matching rule wins).
-cat > "$RULES.profile" <<'FLUX_RULES'
-{rules}FLUX_RULES
+cat > "$RULES.profile" <<'{rules_tag}'
+{rules}{rules_tag}
 {markers}{no_markers}rm -f "$RULES.profile"
 
 # The newest snapshot: unchanged files become hard links to it.
@@ -729,6 +770,7 @@ fn borg_prune_args(p: &Profile) -> String {
 /// `newest`: the newest archive's name, used in the examples when known.
 pub fn borg_kit(id: &ProfileId, p: &Profile, borg_version: &str, newest: Option<&str>) -> Kit {
     use crate::borg;
+    let p = &crate::script_safe(p);
     let opts = p.borg.clone().unwrap_or_default();
     let url = borg::repo_url(id, p, true);
     let folder = borg::folder_location(id, p);
@@ -1041,6 +1083,7 @@ FOR BORG USERS
         ),
         &borg::never_paths(p),
     );
+    let patterns_tag = crate::heredoc_tag("FLUX_PATTERNS", &pattern_text);
     let mut opts_only = borg::create_options(p, &opts, "@PATTERNS@");
     opts_only.insert(0, "create".into());
     let script_create = format!(
@@ -1074,8 +1117,8 @@ if [ "${{1:-}}" = "--dry-run" ]; then MODE="--dry-run --list"; fi
 # Exclusion patterns (borg --patterns-from syntax; the first matching pattern wins).
 PATTERNS=$(mktemp)
 trap 'rm -f "$PATTERNS"' EXIT
-cat > "$PATTERNS" <<'FLUX_PATTERNS'
-{pattern_text}FLUX_PATTERNS
+cat > "$PATTERNS" <<'{patterns_tag}'
+{pattern_text}{patterns_tag}
 
 set +e
 {script_create}
@@ -1120,6 +1163,19 @@ mod tests {
         let repo = rsync::repo_location(&id, &p);
         assert!(k.recovery.contains(&format!("{repo}/latest/data/home/me/")));
         assert!(k.recovery.contains("rsync -aHAX"));
+        // "Restore everything" names the backup's top folders, never `data/` itself:
+        // with sudo that would give `/` the mode and owner of the private data folder.
+        assert!(
+            k.recovery
+                .contains(&format!("--numeric-ids {repo}/latest/data/home /\n")),
+            "{}",
+            k.recovery
+        );
+        assert!(!k.recovery.contains("latest/data/ /"));
+        let mut whole = p.clone();
+        whole.sources.paths = vec!["/".into()];
+        let w = rsync_kit(&id, &whole, "3.4.1", None).recovery;
+        assert!(w.contains("latest/data/ /") && w.contains("chmod 755 / && chown root:root /"));
         assert!(k.recovery.contains("rsync 3.4.1"));
         assert!(k.script.contains("--link-dest=$LINK"));
         assert!(k.script.contains("- *.tmp\n"));

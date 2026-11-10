@@ -17,6 +17,7 @@ const CLOSE: u8 = 4;
 const READ: u8 = 5;
 const WRITE: u8 = 6;
 const LSTAT: u8 = 7;
+const FSTAT: u8 = 8;
 const OPENDIR: u8 = 11;
 const READDIR: u8 = 12;
 const REMOVE: u8 = 13;
@@ -193,6 +194,44 @@ enum Reply {
     Attrs(Attrs),
     Extended(Vec<u8>),
 }
+
+/// One read of a batch ([`Sftp::read_many`]).
+#[derive(Debug, Clone)]
+pub struct ReadReq {
+    pub path: Vec<u8>,
+    pub offset: u64,
+    /// How many bytes; `None`: the whole file from `offset` 0.
+    pub len: Option<u64>,
+}
+
+impl ReadReq {
+    /// The whole of file `path`.
+    pub fn whole(path: &str) -> Self {
+        Self {
+            path: path.as_bytes().to_vec(),
+            offset: 0,
+            len: None,
+        }
+    }
+
+    /// `len` bytes of `path` from `offset`.
+    pub fn range(path: &str, offset: u64, len: u64) -> Self {
+        Self {
+            path: path.as_bytes().to_vec(),
+            offset,
+            len: Some(len),
+        }
+    }
+}
+
+/// Files opened together in one batch of [`Sftp::read_many`] (servers limit open handles).
+const MANY_FILES: usize = 32;
+/// The most one read of a batch asks for in the batch itself (more is read the plain way):
+/// the requests of a whole batch must fit the pipe to the server without waiting for
+/// replies.
+const MANY_BYTES: u64 = 16 * CHUNK as u64;
+/// What is asked of a file whose size isn't known yet.
+const MANY_FIRST: u64 = 4 * CHUNK as u64;
 
 /// One SFTP session over a child process's stdin/stdout.
 pub struct Sftp {
@@ -658,6 +697,179 @@ impl Sftp {
         Ok(done)
     }
 
+    /// Many small reads at the cost of a few: every file of a batch is opened in one
+    /// round trip, and read and closed in a second, where one after another they cost
+    /// three or four each. Over a link with 30 ms to the server that is the difference
+    /// between a second and a minute for a few hundred snapshot records. Results are in
+    /// the order of `reqs`. Anything that doesn't fit the pattern (a read of more than
+    /// 1 MiB, a file bigger than first asked for, a short reply) is read the plain way.
+    pub fn read_many(&mut self, reqs: &[ReadReq]) -> Vec<io::Result<Vec<u8>>> {
+        let mut out: Vec<Option<io::Result<Vec<u8>>>> = reqs.iter().map(|_| None).collect();
+        let batched: Vec<usize> = (0..reqs.len())
+            .filter(|&i| reqs[i].len.is_none_or(|l| l <= MANY_BYTES))
+            .collect();
+        for batch in batched.chunks(MANY_FILES) {
+            if let Err(e) = self.read_batch(reqs, batch, &mut out) {
+                // The session itself failed: every read still open fails with it.
+                for &i in batch {
+                    out[i].get_or_insert_with(|| Err(io::Error::new(e.kind(), e.to_string())));
+                }
+            }
+        }
+        // What the batches left: read as ever.
+        for (i, slot) in out.iter_mut().enumerate() {
+            if slot.is_none() {
+                let r = &reqs[i];
+                let mut data = Vec::new();
+                *slot = Some(
+                    self.read_range_bytes(&r.path, r.offset, r.len.unwrap_or(u64::MAX), |d| {
+                        data.extend_from_slice(d);
+                        Ok(())
+                    })
+                    .map(|_| data),
+                );
+            }
+        }
+        out.into_iter()
+            .map(|r| r.expect("every read answered"))
+            .collect()
+    }
+
+    /// One batch of [`Sftp::read_many`]: fills `out` for the reads it could finish (or
+    /// that failed for good), leaves the others `None`.
+    fn read_batch(
+        &mut self,
+        reqs: &[ReadReq],
+        batch: &[usize],
+        out: &mut [Option<io::Result<Vec<u8>>>],
+    ) -> io::Result<()> {
+        // 1. Open them all.
+        let opens: Vec<u32> = batch
+            .iter()
+            .map(|&i| {
+                self.send(OPEN, |b| {
+                    b.bytes(&reqs[i].path)
+                        .u32(OPEN_READ)
+                        .u32(ATTR_PERMISSIONS)
+                        .u32(0);
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let mut handles: Vec<Option<Vec<u8>>> = Vec::with_capacity(batch.len());
+        for (&i, id) in batch.iter().zip(opens) {
+            match self.recv(id)? {
+                Reply::Handle(h) => handles.push(Some(h)),
+                Reply::Status(c, m) => {
+                    out[i] = Some(Err(status_error(
+                        c,
+                        &m,
+                        &String::from_utf8_lossy(&reqs[i].path),
+                    )));
+                    handles.push(None);
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "open: unexpected reply",
+                    ));
+                }
+            }
+        }
+        // 2. Ask for each one's size (where it isn't known), its bytes, and close it.
+        struct Asked {
+            stat: Option<u32>,
+            reads: Vec<(u32, u32)>,
+            close: u32,
+            want: u64,
+        }
+        let mut asked: Vec<Option<Asked>> = Vec::with_capacity(batch.len());
+        for (&i, h) in batch.iter().zip(&handles) {
+            let Some(h) = h else {
+                asked.push(None);
+                continue;
+            };
+            let r = &reqs[i];
+            let stat = match r.len {
+                Some(_) => None,
+                None => Some(self.send(FSTAT, |b| {
+                    b.bytes(h);
+                })?),
+            };
+            let want = r.len.unwrap_or(MANY_FIRST);
+            let mut reads = Vec::new();
+            let (mut pos, end) = (r.offset, r.offset.saturating_add(want));
+            while pos < end {
+                let n = (end - pos).min(CHUNK as u64) as u32;
+                reads.push((
+                    self.send(READ, |b| {
+                        b.bytes(h).u64(pos).u32(n);
+                    })?,
+                    n,
+                ));
+                pos += u64::from(n);
+            }
+            let close = self.send(CLOSE, |b| {
+                b.bytes(h);
+            })?;
+            asked.push(Some(Asked {
+                stat,
+                reads,
+                close,
+                want,
+            }));
+        }
+        // 3. Take the answers.
+        for (&i, a) in batch.iter().zip(asked) {
+            let Some(a) = a else { continue };
+            let mut failed = None;
+            let size = match a.stat {
+                None => None,
+                Some(id) => match self.recv(id)? {
+                    Reply::Attrs(at) => at.size,
+                    Reply::Status(c, m) => {
+                        failed = Some(status_error(c, &m, "fstat"));
+                        None
+                    }
+                    _ => None,
+                },
+            };
+            let mut data = Vec::new();
+            let mut whole = true; // every reply so far was as long as asked for
+            for (id, n) in a.reads {
+                match self.recv(id)? {
+                    Reply::Data(d) if whole => {
+                        whole = d.len() as u32 == n;
+                        data.extend_from_slice(&d);
+                    }
+                    Reply::Data(_) | Reply::Status(FX_EOF, _) => whole = false,
+                    Reply::Status(c, m) => {
+                        failed.get_or_insert(status_error(c, &m, "read"));
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "read: unexpected reply",
+                        ));
+                    }
+                }
+            }
+            let _ = self.recv(a.close)?;
+            // Done if all that was asked for came (a range), or all there is (a file
+            // whose size the server gave). Otherwise it's read again, the plain way.
+            let complete = match (reqs[i].len, size) {
+                (Some(_), _) => data.len() as u64 == a.want,
+                (None, Some(size)) => data.len() as u64 == size,
+                (None, None) => false,
+            };
+            match failed {
+                Some(e) => out[i] = Some(Err(e)),
+                None if complete => out[i] = Some(Ok(data)),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_file(&mut self, path: &str) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
         self.read_range(path, 0, u64::MAX, |d| {
@@ -747,6 +959,42 @@ mod tests {
         })
         .unwrap();
         assert!(part == data[1_234_567..1_334_567]);
+
+        // Many reads in a few round trips: small files whole, ranges, a file that isn't
+        // there, one too big for a batch, and an empty one, each answered in its place.
+        for (name, text) in [("one", "first"), ("two", "second, longer"), ("empty", "")] {
+            s.write_new(&format!("{d}/{name}"), text.as_bytes(), 0o600)
+                .unwrap();
+        }
+        let mut reqs = vec![
+            ReadReq::whole(&format!("{d}/one")),
+            ReadReq::whole(&format!("{d}/nope")),
+            ReadReq::range(&f, 1_234_567, 100_000),
+            ReadReq::whole(&f),
+            ReadReq::whole(&format!("{d}/empty")),
+            ReadReq::range(&f, 4_999_990, 10),
+            ReadReq::range(&f, 4_999_990, 500), // past the end: what there is
+            ReadReq::range(&f, 0, 3_000_000),   // too big for a batch
+        ];
+        // More files than one batch opens.
+        reqs.extend((0..70).map(|_| ReadReq::whole(&format!("{d}/two"))));
+        let got = s.read_many(&reqs);
+        assert_eq!(got[0].as_ref().unwrap(), b"first");
+        assert_eq!(got[1].as_ref().unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(got[2].as_ref().unwrap() == &data[1_234_567..1_334_567]);
+        assert!(got[3].as_ref().unwrap() == &data);
+        assert!(got[4].as_ref().unwrap().is_empty());
+        assert!(got[5].as_ref().unwrap() == &data[4_999_990..]);
+        assert!(got[6].as_ref().unwrap() == &data[4_999_990..]);
+        assert!(got[7].as_ref().unwrap() == &data[..3_000_000]);
+        assert!(
+            got[8..]
+                .iter()
+                .all(|r| r.as_ref().unwrap() == b"second, longer")
+        );
+        for name in ["one", "two", "empty"] {
+            s.remove(&format!("{d}/{name}")).unwrap();
+        }
 
         // Atomic replace.
         let g = format!("{d}/other");

@@ -53,6 +53,12 @@ pub enum Call {
         id: String,
         snapshot: String,
         path: String,
+        /// Only items whose name contains this (case doesn't matter).
+        #[serde(default)]
+        filter: Option<String>,
+        /// Only items that aren't on the computer any more.
+        #[serde(default)]
+        missing: bool,
     },
     Unlock {
         id: String,
@@ -93,6 +99,10 @@ pub enum Call {
     /// one installed.
     SetDiffTool {
         tool: Option<String>,
+    },
+    /// Keep the app in the system tray when its window is closed, or quit.
+    SetCloseToTray {
+        on: bool,
     },
     Cancel {
         id: String,
@@ -288,6 +298,9 @@ pub enum Call {
     DismissUnusual {
         id: String,
         snapshot: String,
+        /// "It's dealt with" rather than "This was me".
+        #[serde(default)]
+        resolved: bool,
     },
     /// The webhooks told about every backup (Preferences).
     SetWebhooks {
@@ -367,6 +380,20 @@ pub enum Call {
         key: String,
         yes: bool,
     },
+    /// The password of one of your backups, to keep somewhere else.
+    RevealPassword {
+        id: String,
+    },
+    /// Export a Borg repository's key into a folder.
+    ExportBorgKey {
+        id: String,
+        dir: String,
+    },
+    /// Save a copy of a Vault's unlock file into a folder.
+    CopyUnlockFile {
+        id: String,
+        dir: String,
+    },
 }
 
 impl Call {
@@ -420,7 +447,10 @@ impl Call {
             | VaultFormat { id }
             | UpgradeVault { id }
             | ExportSnapshot { id, .. }
-            | SetReadiness { id, .. } => Some(id),
+            | SetReadiness { id, .. }
+            | RevealPassword { id }
+            | ExportBorgKey { id, .. }
+            | CopyUnlockFile { id, .. } => Some(id),
             Profiles
             | NewProfile
             | BackInTime
@@ -440,6 +470,7 @@ impl Call {
             | CancelShutdown
             | DiffTool
             | SetDiffTool { .. }
+            | SetCloseToTray { .. }
             | TimeHashing { .. }
             | SetWebhooks { .. }
             | TestWebhook { .. }
@@ -488,6 +519,9 @@ impl Call {
             Recover { .. } => "recover",
             Readiness { .. } => "readiness",
             SetReadiness { .. } => "set_readiness",
+            RevealPassword { .. } => "reveal_password",
+            ExportBorgKey { .. } => "export_borg_key",
+            CopyUnlockFile { .. } => "copy_unlock_file",
             SetPassword { .. } => "set_password",
             SaveKeyFile { .. } => "save_key_file",
             BackupNow { .. } => "backup_now",
@@ -496,6 +530,7 @@ impl Call {
             DiffFile { .. } => "diff_file",
             DiffTool => "diff_tool",
             SetDiffTool { .. } => "set_diff_tool",
+            SetCloseToTray { .. } => "set_close_to_tray",
             Cancel { .. } => "cancel",
             Restore { .. } => "restore",
             GetProfile { .. } => "get_profile",
@@ -570,7 +605,15 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::Overview { id } => json(views::overview_impl(s, id)?),
         Call::Status { id } => json(views::status_impl(s, id)?),
         Call::Snapshots { id } => json(views::snapshots_impl(s, id)?),
-        Call::ListDir { id, snapshot, path } => json(views::list_dir_impl(s, id, snapshot, path)?),
+        Call::ListDir {
+            id,
+            snapshot,
+            path,
+            filter,
+            missing,
+        } => json(views::list_dir_impl(
+            s, id, snapshot, path, filter, missing,
+        )?),
         Call::Unlock {
             id,
             password,
@@ -611,9 +654,16 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::SetReadiness { id, key, yes } => {
             json(crate::recover::set_readiness_impl(s, id, key, yes)?)
         }
-        Call::DismissUnusual { id, snapshot } => {
-            json(actions::dismiss_unusual_impl(s, id, snapshot)?)
+        Call::RevealPassword { id } => json(crate::recover::reveal_password_impl(s, id)?),
+        Call::ExportBorgKey { id, dir } => json(crate::recover::export_borg_key_impl(s, id, dir)?),
+        Call::CopyUnlockFile { id, dir } => {
+            json(crate::recover::copy_unlock_file_impl(s, id, dir)?)
         }
+        Call::DismissUnusual {
+            id,
+            snapshot,
+            resolved,
+        } => json(actions::dismiss_unusual_impl(s, id, snapshot, resolved)?),
         Call::SaveKeyFile { id } => json(edit::save_key_file_impl(s, id)?),
         Call::BackupNow { id, shutdown } => json(views::start_backup(s, id, shutdown)?),
         Call::ShutdownAfter { id, on } => json(views::shutdown_after_impl(s, id, on)?),
@@ -623,6 +673,7 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         }
         Call::DiffTool => json(filediff::diff_tool(s)),
         Call::SetDiffTool { tool } => json(prefs::set_diff_tool_impl(s, tool)?),
+        Call::SetCloseToTray { on } => json(prefs::set_close_to_tray_impl(s, on)?),
         Call::Cancel { id } => json(views::cancel_impl(s, id)?),
         Call::Restore {
             id,

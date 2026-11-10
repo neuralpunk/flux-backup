@@ -8,7 +8,30 @@
   import { profileMenu } from "../profileMenu";
   import type { ProfileSummary } from "../types";
   import HistoryStrip from "./HistoryStrip.svelte";
+  import StatusGlyph from "./StatusGlyph.svelte";
+  import { counts, remainder } from "../attention";
   import Icon from "./Icon.svelte";
+  import SettingsTable from "./SettingsTable.svelte";
+
+  // Each backup's status (the default), or every backup's settings side by side in a
+  // table. Remembered on this computer.
+  type View = "status" | "settings";
+  let view = $state<View>("status");
+  try {
+    if (localStorage.getItem("flux.allBackupsView") === "settings") view = "settings";
+  } catch {
+    /* storage unavailable */
+  }
+  let table = $state<ReturnType<typeof SettingsTable>>();
+  let columnsButton = $state<HTMLButtonElement>();
+  function setView(v: View) {
+    view = v;
+    try {
+      localStorage.setItem("flux.allBackupsView", v);
+    } catch {
+      /* storage unavailable */
+    }
+  }
 
   function percent(p: ProfileSummary): number | null {
     const pr = app.jobs[p.id]?.progress;
@@ -33,8 +56,9 @@
   const shown = $derived(filter ? rows.filter((r) => filters.find((f) => f.key === filter)!.test(r.p)) : rows);
   const mine = $derived(shown.filter((r) => r.p.scope !== "system"));
   const system = $derived(shown.filter((r) => r.p.scope === "system"));
-  const total = $derived(rows.length);
-  const safe = $derived(rows.filter((r) => r.s.protected).length);
+  const tally = $derived(counts(rows.map((r) => r.s)));
+  const total = $derived(tally.total);
+  const safe = $derived(tally.protected);
   // Most serious first: the headline speaks of a failure before a warning.
   const severity: Record<string, number> = { bad: 0, warn: 1, idle: 2 };
   const attention = $derived(
@@ -70,8 +94,8 @@
     run: { cls: "glyph-run", icon: "refresh" },
     idle: { cls: "", icon: "clock" },
   };
-  const rowGlyph: Record<Tone, "check" | "alert" | "refresh" | "clock"> = { ok: "check", warn: "alert", bad: "alert", run: "refresh", idle: "clock" };
-  const toneText: Record<Tone, string> = { ok: "text-fg-muted", warn: "text-warning", bad: "text-danger", run: "text-primary", idle: "text-fg-muted" };
+  // Red only for what isn't protected (as in the sidebar).
+  const toneText: Record<Tone, string> = { ok: "text-fg-muted", warn: "text-fg-2", bad: "text-danger", run: "text-primary", idle: "text-fg-muted" };
 
   let backingUpAll = $state(false);
   async function backUpAll() {
@@ -132,7 +156,7 @@
     onclick={() => app.open(p.id)}
     use:contextMenu={{ items: () => profileMenu(p), label: p.name }}
   >
-    <span class="glyph col-start-1 row-start-1 {glyph[s.tone].cls}"><Icon name={rowGlyph[s.tone]} size={13} class={s.tone === "run" ? "motion-safe:animate-spin [animation-duration:2.4s]" : ""} /></span>
+    <span class="col-start-1 row-start-1"><StatusGlyph tone={s.tone} /></span>
     <span class="col-start-2 row-start-1 min-w-0">
       <span class="block truncate font-semibold">{p.name}</span>
       <span class="block truncate text-[12.5px]">
@@ -161,7 +185,8 @@
 {/snippet}
 
 <div class="@container flex min-h-0 flex-1 flex-col overflow-y-auto">
-  <div class="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-10 pt-6 pb-10">
+  <!-- The settings table may use the whole width; the status view reads better narrower. -->
+  <div class="mx-auto flex w-full {view === 'settings' ? 'max-w-none' : 'max-w-[1080px]'} flex-col gap-8 px-10 pt-6 pb-10">
     <div class="flex items-center justify-between gap-4">
       <h1 class="text-[15px] font-semibold text-fg-2">All backups</h1>
       <div class="flex gap-2">
@@ -176,15 +201,28 @@
       </div>
     </div>
 
+    {#if view === "settings"}
+      <!-- The table is what this view is for: the answer in one line above it. -->
+      <section class="-mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[14px]" aria-live="polite">
+        <StatusGlyph tone={tone === "run" ? "run" : tone === "bad" ? "bad" : tone === "warn" ? "warn" : "ok"} />
+        <span class="font-semibold">{headline}</span>
+        {#if attention.length}
+          {@const first = attention[0]!}
+          <span class="min-w-0 text-fg-2"><span class="font-medium {first.s.tone === 'bad' ? 'text-danger' : 'text-warning'}">{first.p.name}</span>: {first.s.short}</span>
+          <button class="text-[13px] font-medium text-primary hover:underline" onclick={() => app.open(first.p.id)}>Open it</button>
+        {/if}
+      </section>
+    {:else}
     <section class="flex items-start gap-5" aria-live="polite">
       <span class="glyph {glyph[tone].cls} size-14"><Icon name={glyph[tone].icon} size={28} /></span>
       <div class="min-w-0 pt-1">
         <h2 class="text-[30px] leading-tight font-semibold tracking-[-0.015em] text-balance">{headline}</h2>
         {#if attention.length}
           {@const first = attention[0]!}
+          {@const more = remainder(tally, first.s)}
           <p class="mt-2 max-w-[68ch] text-[15px] text-fg-2">
-            <span class="font-semibold {toneText[first.s.tone]}">{first.p.name}</span>: {first.s.detail}
-            {#if attention.length > 1}<span class="text-fg-muted"> And {attention.length - 1} more {attention.length === 2 ? "needs" : "need"} a look below.</span>{/if}
+            <span class="font-semibold {first.s.tone === 'bad' ? 'text-danger' : 'text-warning'}">{first.p.name}</span>: {first.s.detail}
+            {#if more}<span class="text-fg-muted"> {more}</span>{/if}
           </p>
           <div class="mt-4 flex gap-2">
             <button class="btn" onclick={() => app.open(first.p.id)}>Open {first.p.name}</button>
@@ -197,14 +235,21 @@
         {/if}
       </div>
     </section>
+    {/if}
 
     <section>
-      <div class="flex items-baseline justify-between gap-4 px-0.5 pb-2">
-        <h2 class="text-[13px] font-semibold text-fg-2">Your backups</h2>
-        <span class="text-[12.5px] text-fg-muted">Last 30 days · taller bars copied more</span>
+      <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-0.5 pb-2">
+        <h2 class="text-[13px] font-semibold text-fg-2">{view === "settings" ? "Their settings" : "Your backups"}</h2>
+        <div class="flex items-center gap-3">
+          <span class="text-[12.5px] text-fg-muted">{view === "settings" ? "Click a setting to change it" : "Last 30 days · taller bars copied more"}</span>
+          <div class="segmented [&>button]:h-7 [&>button]:px-3 [&>button]:text-[12.5px]" role="radiogroup" aria-label="Show">
+            <button role="radio" aria-checked={view === "status"} onclick={() => setView("status")}><Icon name="activity" size={13} /> Status</button>
+            <button role="radio" aria-checked={view === "settings"} onclick={() => setView("settings")}><Icon name="settings" size={13} /> Settings</button>
+          </div>
+        </div>
       </div>
-      {#if rows.length > 1}
-        <div class="mb-2.5 flex flex-wrap gap-1.5" role="group" aria-label="Show only">
+      {#if rows.length > 1 || view === "settings"}
+        <div class="mb-2.5 flex flex-wrap items-center gap-1.5" role="group" aria-label="Show only">
           <button class="chip-filter" aria-pressed={filter === null} onclick={() => (filter = null)}>All <span class="num">{rows.length}</span></button>
           {#each filters as f (f.key)}
             {@const n = rows.filter((r) => f.test(r.p)).length}
@@ -212,8 +257,20 @@
               {f.label} <span class="num">{n}</span>
             </button>
           {/each}
+          {#if view === "settings"}
+            <button bind:this={columnsButton} class="btn btn-ghost ml-auto h-7 px-2.5 text-[12.5px] text-fg-2" aria-haspopup="menu" onclick={() => columnsButton && table?.chooseColumns(columnsButton)}>
+              <Icon name="layers" size={13} /> Columns
+            </button>
+          {/if}
         </div>
       {/if}
+      {#if view === "settings"}
+        {#if shown.length}
+          <SettingsTable bind:this={table} profiles={shown.map((r) => r.p)} />
+        {:else}
+          <p class="row text-[13px] text-fg-muted">None of your backups.</p>
+        {/if}
+      {:else}
       <div class="rows">
         {#each mine as r (r.p.id)}
           {@render backupRow(r.p, r.s)}
@@ -227,9 +284,10 @@
           </button>
         {/if}
       </div>
+      {/if}
     </section>
 
-    {#if system.length}
+    {#if system.length && view === "status"}
       <section>
         <h2 class="group-title">System backups</h2>
         <div class="rows">

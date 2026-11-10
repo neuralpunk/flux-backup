@@ -24,6 +24,8 @@ flux-vault/
 ├── profiles/<key>         the settings of each backup using the Vault (sealed JSON
 │                          {profile, host, user, text}; <key> is 32 hex digits of the
 │                          BLAKE3 of "host\nuser\nprofile"); see FORMATS.md
+├── parity/…               repair data: one parity file per file above, at parity/<its path>
+│                          (optional, Flux 1.1; see "Repair data")
 ├── locks/<lock-id>        lock files, one per holder (every backend)
 └── lock                   flock(2) target (local backend)
 ```
@@ -120,7 +122,9 @@ padded packs need nothing new from them; any Flux reads them.
 
 `index/<16 hex>` is an object whose payload is postcard
 `{ packs: [{ pack, blobs: [entry…] }], supersedes: [index ids] }`. Loading reads every
-index file, ignoring those superseded by another. This is how prune swaps in a compacted
+index file, ignoring those superseded by another. A prune supersedes and removes every index file
+there, including ones a newer file already supersedes (left by a prune that was cut
+short): such a leftover must not outlive the file that names it. This is how prune swaps in a compacted
 index without a window where blobs are unreachable.
 
 ## Trees and snapshots
@@ -185,10 +189,98 @@ is written in its tree format (a backup writes all of its trees).
   (superseding all old ones) → delete old index files → delete unused packs. After a crash,
   every snapshot still present is fully readable.
 
+## Repair data
+
+Since Flux 1.1 a Vault can keep **repair data**: for each file it stores, a *parity file*
+that can rebuild parts of that file after a drive has damaged them. The parity file of
+`<path>` is `parity/<path>`: `parity/data/<xx>/<pack-id>`, `parity/index/<id>`,
+`parity/snapshots/<id>`, `parity/keys/<slot-id>`, `parity/config`.
+
+It is an addition, not a new format: nothing else in the Vault changes, a Vault with
+`parity/` is still format 2 (or 1), and a Flux that knows nothing of repair data reads and
+writes it as before. What such a Flux writes has no repair data until a newer one adds
+it, and what it deletes leaves parity files behind, which the newer one removes (when it
+frees space). Whether repair data is written is a setting of the profile
+(`[vault] parity`), not of the Vault.
+
+### The code
+
+The file is cut into **blocks** of `B` = 4096 bytes (the last may be shorter; it counts as
+padded with zeros). With `N` blocks, the blocks are dealt to `G` **stripes** in turn:
+block `i` is column `c = i div G` of stripe `g = i mod G`. So a run of damaged blocks is
+spread over all the stripes. Each stripe has `m` parity blocks, and `k + m ≤ 256` for the
+number `k` of data blocks in the largest stripe (`k = ⌈N / G⌉`).
+
+Parity block `j` (0 ≤ j < m) of a stripe with data blocks `d₀ … d₍ₖ₋₁₎` is, byte by byte,
+
+```
+p_j = Σ  C[j][c] · d_c          C[j][c] = 1 / ((255 − j) ⊕ c)
+     c<k
+```
+
+in GF(2⁸): bytes are polynomials over GF(2) modulo x⁸ + x⁴ + x³ + x² + 1 (0x11d),
+addition is XOR, `1 / a` is the multiplicative inverse. `C` is a Cauchy matrix (its
+points `255 − j` and `c` never coincide, as `c + j ≤ k + m − 2 < 255`), so every square
+submatrix is invertible: any `e ≤ m` lost data blocks of a stripe are the solution of the
+`e` equations given by any `e` intact parity blocks (a systematic Reed–Solomon code; no
+code with `m` parity blocks rebuilds more).
+
+Flux writes, for a setting of `p` percent (1–50): `G = ⌈N / ⌊25500 / (100 + p)⌋⌉` and
+`m = max(2, ⌈k·p / 100⌉)`: stripes as large as the field allows, about `p` percent of
+parity, and never fewer than two parity blocks. A 16 MiB pack at 5% has 4096 blocks in 17
+stripes of up to 241, with 13 parity blocks each. Readers take `B`, `G` and `m` from the
+file, not from this rule.
+
+### The parity file
+
+```
+head ‖ parity blocks ‖ head ‖ head_len (u64 LE)
+```
+
+The **head** (stored twice, identical) is, with integers little-endian:
+
+| bytes | |
+|---|---|
+| 8 | `FLUXPAR1` |
+| 4 | `B`, the block size (4096) |
+| 4 | `G`, the number of stripes (0 for an empty file) |
+| 2 | `m`, parity blocks per stripe |
+| 2 | the percentage it was written with |
+| 8 | the length of the protected file |
+| 32 | BLAKE3 of the protected file |
+| 16 × N | for each data block, the first 16 bytes of its BLAKE3 (of its actual bytes: the last block unpadded) |
+| 16 × G·m | the same for each parity block, in the order they are stored |
+| 32 | BLAKE3 of all of the head before this field |
+
+The **parity blocks** follow, `B` bytes each, row by row: block `j` of stripe `g` is the
+`(j·G + g)`-th.
+
+### Repairing
+
+A block whose hash doesn't match (or that can't be read) is lost; so is a parity block.
+A stripe with more lost data blocks than intact parity blocks can't be rebuilt, and then
+the file isn't touched. Otherwise the lost blocks are solved for, and the result must
+have the BLAKE3 in the head **and** pass the file's own check before it replaces the
+file: a pack's BLAKE3 is its name; an index file or snapshot record must open (decrypt
+and authenticate, in an encrypted Vault). The head is read from its first copy, or from
+the second (found by `head_len` at the end) if the first fails its checksum.
+
+Only something that fails its own check is repaired. Parity that doesn't match a file
+that passes its check is stale (a snapshot record rewritten by a Flux that keeps no
+repair data) and is written again, not used. A key slot never changes, so one that
+differs from its parity is repaired; `config` changes only when the format is upgraded,
+and one that still parses and differs from its parity's version in nothing but the
+format is taken as upgraded.
+
+What this repairs: up to `m` damaged blocks in every stripe, so any `m` blocks of a
+file wherever they are, any one run of up to `m·G` blocks (about `p` percent of the
+file), and usually much more scattered damage. What it doesn't: a file that is missing,
+or damaged beyond that. A copy in another place is for those.
+
 ## Copies (replicas)
 
 A copy of a Vault is the same repository in another place: `config`, `keys/`, `index/`,
-`snapshots/` and `data/` copied as files, never decrypted. Each replication copies, under
+`snapshots/`, `data/` and `parity/` copied as files, never decrypted. Each replication copies, under
 the source's shared lock and the copy's exclusive lock: packs missing from the copy (by
 name and size; a pack's name is its hash, so a pack never changes), then index files,
 then snapshot records that are missing or differ (naming, pinning, notes and tags rewrite

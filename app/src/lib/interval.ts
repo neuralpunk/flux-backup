@@ -53,3 +53,18 @@ export function intervalParts(text: string): { n: number; unit: IntervalUnit } |
 export function intervalText(n: number, unit: IntervalUnit): string {
   return `${Math.max(1, Math.round(n))}${unit}`;
 }
+
+/** A duration in words: `4h` → "4 hours", `1h 30m` → "1 hour 30 minutes", `1d` → "1 day".
+ * Text that isn't a duration comes back as it is. */
+export function durationWords(text: string): string {
+  const secs = durationSeconds(text);
+  if (secs === null || secs === 0) return text.trim();
+  const parts: string[] = [];
+  let rest = secs;
+  for (const [n, one] of [[86_400, "day"], [3600, "hour"], [60, "minute"], [1, "second"]] as const) {
+    const k = Math.floor(rest / n);
+    if (k) parts.push(`${k} ${one}${k === 1 ? "" : "s"}`);
+    rest -= k * n;
+  }
+  return parts.join(" ");
+}

@@ -2,16 +2,21 @@
   import { api } from "../api";
   import { coalesce } from "../coalesce";
   import { app, pauseUntil } from "../state.svelte";
+  import { scheduleText } from "../clock.svelte";
   import { ago, bytes, count, dateTime, runStatusLabel, shortDate } from "../format";
-  import { ApiError, engineLabel, isCompat, type Overview, type RunRecord } from "../types";
+  import { ApiError, engineLabel, isCompat, storageWords, type Overview, type RunRecord, type SnapshotMeta } from "../types";
+  import RestoreDialog from "./RestoreDialog.svelte";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Modal from "./Modal.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import { copyText } from "../clipboard";
+  import { guaranteeWords } from "../confidence";
   import SpaceCard from "./SpaceCard.svelte";
   import HistoryStrip from "./HistoryStrip.svelte";
   import SizeLimitNotice from "./SizeLimitNotice.svelte";
   import Readiness from "./Readiness.svelte";
+  import SettingsGlance from "./SettingsGlance.svelte";
   import StorageCard from "./StorageCard.svelte";
   import { nextRun, protection, type Tone } from "../protection";
 
@@ -42,10 +47,31 @@
   }
   let testing = $state(false);
   let showingAffected = $state(false);
-  async function dismissUnusual(snapshot: string) {
+  /** Guided recovery: everything, from the snapshot kept from before unusual changes. */
+  let recovering = $state<{ snapshot: SnapshotMeta; paths: string[]; alarm: string } | null>(null);
+  async function recover(before: string, alarm: string) {
     try {
-      await api.dismissUnusual(id, snapshot);
-      app.toast("ok", "Noted: those changes were yours. The extra snapshot that was kept is no longer pinned.");
+      const [snaps, prof] = await Promise.all([api.snapshots(id), api.getProfile(id)]);
+      const snapshot = snaps.find((s) => s.id === before);
+      if (!snapshot) throw new Error("The snapshot from before those changes isn't there any more.");
+      recovering = { snapshot, paths: prof.profile.sources.paths, alarm };
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "password_required") onLocked(() => void recover(before, alarm));
+      else app.toast("bad", (e as Error).message);
+    }
+  }
+  /** Settle unusual changes: they were mine, or (`resolved`) they weren't and are dealt with. */
+  async function dismissUnusual(snapshot: string, resolved = false) {
+    try {
+      const settled = await api.dismissUnusual(id, snapshot, resolved);
+      app.toast(
+        "ok",
+        resolved
+          ? "It's dealt with: backups go on. The snapshot from before those changes stays pinned."
+          : settled?.marks_left
+            ? "Noted: those changes were yours, and Flux Sentry counts them as normal for this backup from now on. Backups go on. The backups couldn't be reached to unpin the snapshot that was kept: unpin it in Snapshots when they can."
+            : "Noted: those changes were yours, and Flux Sentry counts them as normal for this backup from now on. Backups go on, and the extra snapshot that was kept is no longer pinned.",
+      );
       app.revision++;
       void app.refresh();
     } catch (e) {
@@ -57,7 +83,7 @@
     testing = true;
     try {
       const r = await api.restoreTest(id);
-      if (r.result === "passed") app.toast("ok", `Restore test passed: ${r.tested} files restored and checked.`);
+      if (r.result === "passed") app.toast("ok", `Restore test passed: ${count(r.tested)} files read back and checked.${r.guarantee ? ` ${guaranteeWords(r.guarantee)}` : ""}`);
       else if (r.result === "warning") app.toast("info", `Restore test passed with ${r.problems_total} notes${r.stopped_early ? " (stopped at a limit)" : ""}.`);
       else app.toast("bad", `Restore test failed: ${r.error ?? r.problems.map((p) => `${p.path} (${p.problem.replaceAll("_", " ")})`).slice(0, 2).join(", ")}`);
       app.revision++;
@@ -154,16 +180,21 @@
   // ---- maintenance ----
   let busy = $state<"check" | "verify" | "prune" | null>(null);
   let result = $state<{ ok: boolean; text: string; details?: string[] } | null>(null);
-  let pruneConfirm = $state<string[] | null>(null);
+  /** What a prune would remove, to be confirmed: the snapshots the rules no longer keep,
+      and whether more would go, oldest first, to reach the free-space minimum. */
+  let pruneConfirm = $state<{ removed: string[]; forSpace: boolean } | null>(null);
 
   async function check(readData: boolean) {
     busy = readData ? "verify" : "check";
     result = null;
     try {
       const c = await api.check(id, readData);
+      const fixed = c.repaired ?? [];
+      const mended = fixed.length ? ` ${count(fixed.length)} damaged ${fixed.length === 1 ? "file was" : "files were"} rebuilt from repair data: the drive may be failing.` : "";
+      const added = c.parity_added ? ` Repair data was added to ${count(c.parity_added)} stored files that had none.` : "";
       result = c.errors.length
-        ? { ok: false, text: `${c.errors.length} problems found in ${count(c.snapshots)} snapshots.`, details: c.errors.slice(0, 50) }
-        : { ok: true, text: `All ${count(c.snapshots)} snapshots are intact${readData ? `; ${bytes(c.bytes_read)} read back and verified` : ""}.`, details: c.warnings };
+        ? { ok: false, text: `${c.errors.length} problems found in ${count(c.snapshots)} snapshots.${c.repairable ? ` ${count(c.repairable)} of them can be rebuilt from the repair data: turn on Repair data in Settings › Where to keep it, then Verify every byte.` : ""}${mended}`, details: [...c.errors, ...fixed].slice(0, 50) }
+        : { ok: true, text: `All ${count(c.snapshots)} snapshots are intact${readData ? `; ${bytes(c.bytes_read)} read back and verified` : ""}.${mended}${added}`, details: [...fixed, ...c.warnings] };
     } catch (e) {
       result = { ok: false, text: (e as Error).message };
     } finally {
@@ -177,7 +208,9 @@
     try {
       const r = await api.prune(id, dryRun);
       if (dryRun) {
-        if (r.removed.length) pruneConfirm = r.removed;
+        // Below the free-space minimum, older snapshots go as well, as many as it takes:
+        // the trial run can't name them, so that is asked about too.
+        if (r.removed.length || r.space_floor_unmet) pruneConfirm = { removed: r.removed, forSpace: r.space_floor_unmet };
         else {
           // No snapshot goes, but a Vault may still hold data that none uses (an
           // interrupted backup, or a deletion by an older version). Collecting it removes
@@ -186,11 +219,15 @@
           result = done.bytes_freed
             ? { ok: true, text: `Every snapshot is kept by the retention rules; reclaimed ${bytes(done.bytes_freed)} of data no snapshot used.` }
             : { ok: true, text: "Nothing to remove: every snapshot is kept by the retention rules." };
-          if (done.removed.length || done.bytes_freed) app.revision++;
+          if (done.removed.length || done.removed_for_space.length || done.bytes_freed) app.revision++;
         }
       } else {
         pruneConfirm = null;
-        result = { ok: true, text: `Removed ${r.removed.length} snapshots${r.bytes_freed != null ? ` and reclaimed ${bytes(r.bytes_freed)}` : ""}.` };
+        const gone = r.removed.length + r.removed_for_space.length;
+        result = {
+          ok: true,
+          text: `Removed ${gone} ${gone === 1 ? "snapshot" : "snapshots"}${r.removed_for_space.length ? ` (${r.removed_for_space.length} of them to free space)` : ""}${r.bytes_freed != null ? ` and reclaimed ${bytes(r.bytes_freed)}` : ""}.${r.space_floor_unmet ? " Free space is still below this backup's minimum: no more snapshots may be removed." : ""}`,
+        };
         app.revision++;
       }
     } catch (e) {
@@ -228,7 +265,7 @@
     </div>
   </div>
 {:else if error}
-  <div class="card flex items-center gap-3 bg-danger/10 p-5 text-danger"><Icon name="alert" /> {error}</div>
+  <Callout tone="bad">{error}</Callout>
 {:else if !data}
   <div class="flex flex-col gap-4" aria-busy="true">
     <div class="h-14 w-2/3 rounded-lg bg-surface-2 motion-safe:animate-pulse"></div>
@@ -267,28 +304,52 @@
 
     {#if data.unusual}
       {@const u = data.unusual}
-      <section class="card flex flex-col gap-3 bg-danger/8 px-5 py-4" aria-labelledby="unusual-title">
-        <div class="flex items-start gap-3">
-          <span class="glyph glyph-bad size-9"><Icon name="alert" size={17} /></span>
-          <div class="min-w-0 flex-1">
-            <h2 id="unusual-title" class="title">Unusual changes in the last backup</h2>
-            <ul class="mt-1 list-disc pl-5 text-[14px] text-fg">
-              {#each u.signals as sig (sig)}<li>{sig}</li>{/each}
-            </ul>
-            <p class="mt-1.5 text-[13px] text-fg-2">
-              {count(u.affected_total)} files{#if u.by_folder.length}, mostly in <span class="font-mono text-[12.5px]">{u.by_folder[0]![0]}</span>{#if u.by_folder.length > 1}{" "}and {u.by_folder.length - 1} other {u.by_folder.length === 2 ? "folder" : "folders"}{/if}{/if}.
-            </p>
-            <p class="mt-1.5 max-w-[70ch] text-[13px] text-fg-2">
-              If you didn't make these changes, don't delete or change anything: the snapshot before them is kept (pinned), and you can restore from it. Old snapshots aren't removed until this is settled.
-            </p>
-          </div>
-        </div>
-        <div class="flex flex-wrap gap-2 pl-12">
+      <Callout tone="bad" title={u.stopped ? "Flux Sentry stopped the last backup: unusual changes in your files" : "Flux Sentry found unusual changes in the last backup"}>
+        <ul class="mt-1 list-disc pl-5 text-fg">
+          {#each u.signals as sig (sig)}<li>{sig}</li>{/each}
+        </ul>
+        <p class="mt-1.5">
+          {count(u.affected_total)} files{#if u.by_folder.length}, mostly in <span class="font-mono text-[12.5px]">{u.by_folder[0]![0]}</span>{#if u.by_folder.length > 1}{" "}and {u.by_folder.length - 1} other {u.by_folder.length === 2 ? "folder" : "folders"}{/if}{/if}.
+        </p>
+        <p class="mt-1.5 max-w-[70ch]">
+          {#if u.stopped}<span class="font-semibold text-fg">Nothing was backed up:</span> your backups are as they were before these changes.{" "}{/if}<span class="font-semibold text-fg">Backups are on hold</span> until this is settled: none is made, by schedule or by hand, nothing old is removed, and the other places keep their copies from before.
+        </p>
+        <p class="mt-1.5 max-w-[70ch]">
+          {#if u.before}
+            If you didn't make these changes, don't delete or change anything: the {u.stopped ? "newest snapshot, from before them," : "snapshot before them"} {u.before_pinned === false ? "is there, but couldn't be pinned: pin it in Snapshots so it isn't removed" : "is kept (pinned)"}. <em>Restore everything</em> puts every file back as it was then and lets backups go on; or restore what you need yourself, then choose <em>It's dealt with</em>. If you did make them, choose <em>This was me</em>.
+          {:else}
+            If you didn't make these changes, don't delete or change anything. There is no snapshot from before them to go back to here (none had been made, or the backups couldn't be reached). Once your files are as they should be, choose <em>It's dealt with</em>; if you made the changes, choose <em>This was me</em>.
+          {/if}
+        </p>
+        {#snippet actions()}
+          {#if u.before}
+            {@const before = u.before}
+            <button class="btn btn-primary" title="Put every file back as it was in the snapshot from before these changes. You see what it will do first, and what happens to files that differ now. Backups go on when it's done." onclick={() => void recover(before, u.snapshot)}><Icon name="restore" size={14} /> Restore everything…</button>
+            <button class="btn" onclick={() => ((app.snapshotsOf = null), (app.showSnapshot = before), (app.tab = "snapshots"))}>Browse the snapshot before</button>
+          {/if}
           <button class="btn" onclick={() => (showingAffected = true)}>Show the files</button>
-          {#if u.before}<button class="btn" onclick={() => ((app.snapshotsOf = null), (app.showSnapshot = u.before ?? null), (app.tab = "snapshots"))}>Browse the snapshot before</button>{/if}
-          <button class="btn btn-ghost" onclick={() => void dismissUnusual(u.snapshot)}>This was me</button>
-        </div>
-      </section>
+          <button class="btn btn-ghost" title="The changes were yours: backups go on, and Flux Sentry takes them as normal for this backup" onclick={() => void dismissUnusual(u.snapshot)}>This was me</button>
+          <button class="btn btn-ghost" title="The changes weren't yours and you've restored what you need: backups go on, and the snapshot from before stays pinned" onclick={() => void dismissUnusual(u.snapshot, true)}>It's dealt with</button>
+        {/snippet}
+      </Callout>
+    {/if}
+
+    <!-- Further problems beside the one in the sentence: next to it, not below the fold. -->
+    {#if data.repo_error || (data.health ?? []).length > 1}
+      <div class="rows">
+        {#if data.repo_error}
+          <div class="row">
+            <span class="glyph glyph-warn"><Icon name="alert" size={13} /></span>
+            <span class="text-sm"><span class="font-medium">Snapshots can't be read right now.</span> <span class="text-fg-2">{data.repo_error}</span></span>
+          </div>
+        {/if}
+        {#each (data.health ?? []).slice(1) as h (h.text)}
+          <div class="row">
+            <span class="glyph {h.level === 'danger' ? 'glyph-bad' : 'glyph-warn'}"><Icon name="alert" size={13} /></span>
+            <span class="text-sm"><span class="font-medium">{h.text}</span>{#if h.hint} <span class="text-fg-2">{h.hint}</span>{/if}</span>
+          </div>
+        {/each}
+      </div>
     {/if}
 
     {#if status}
@@ -309,7 +370,7 @@
           <p class="mt-1 max-w-[70ch] text-sm text-fg-2">
             {manual
               ? "From now on, click Back up now whenever you want a new snapshot; each one stores only what changed."
-              : `It runs ${data.profile.schedule} from now on, storing only what changed.`}
+              : `It runs ${scheduleText(data.profile.schedule)} from now on, storing only what changed.`}
             To get a file back: open <strong class="font-medium text-fg">Snapshots</strong>, find it, and click
             <strong class="font-medium text-fg">Restore</strong> (or double-click it to open a copy). It's worth trying once with a file you don't need.
           </p>
@@ -323,29 +384,14 @@
 
     <SizeLimitNotice {id} onlyTiny />
 
-    {#if data.repo_error || (data.health ?? []).length > 1}
-      <div class="rows">
-        {#if data.repo_error}
-          <div class="row">
-            <span class="glyph glyph-warn"><Icon name="alert" size={13} /></span>
-            <span class="text-sm"><span class="font-medium">Snapshots can't be read right now.</span> <span class="text-fg-2">{data.repo_error}</span></span>
-          </div>
-        {/if}
-        {#each (data.health ?? []).slice(1) as h (h.text)}
-          <div class="row">
-            <span class="glyph {h.level === 'danger' ? 'glyph-bad' : 'glyph-warn'}"><Icon name="alert" size={13} /></span>
-            <span class="text-sm"><span class="font-medium">{h.text}</span>{#if h.hint} <span class="text-fg-2">{h.hint}</span>{/if}</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
+    <SettingsGlance {id} sentry={data.sentry} />
 
     {#if data.profile.destinations?.length}
       {@const prof = data.profile}
       {@const last = data.recent_runs.find((r) => r.status !== "skipped" && r.status !== "dry_run")}
       <section>
         <h2 class="group-title">Where it's kept</h2>
-        <ul class="rows">
+        <ul class="rows-flat">
           {#snippet place(name: string, target: string, remote: boolean, offsite: boolean | undefined, engine: string, status: RunRecord["status"] | null, err: string | null | undefined, browse: string, copy = false)}
             <li class="row min-h-12 gap-3 py-2 text-sm">
               <Icon name={remote ? "server" : "drive"} size={17} class="shrink-0 text-fg-2" />
@@ -366,10 +412,10 @@
               <button class="btn btn-ghost h-7 shrink-0 px-2.5 text-[13px]" onclick={() => ((app.snapshotsOf = browse === data?.profile.id ? null : browse), (app.tab = "snapshots"))}>Browse</button>
             </li>
           {/snippet}
-          {@render place(prof.target.split("/").filter(Boolean).pop() ?? prof.target, prof.target, prof.remote, prof.offsite, engineLabel[prof.engine], last?.status ?? null, last?.error, prof.id)}
+          {@render place(prof.target.split("/").filter(Boolean).pop() ?? prof.target, prof.target, prof.remote, prof.offsite, storageWords[prof.engine], last?.status ?? null, last?.error, prof.id)}
           {#each prof.destinations ?? [] as d (d.id)}
             {@const r = last?.destinations?.find((x) => x.name === d.name)}
-            {@render place(d.label, d.target, d.remote, d.offsite, engineLabel[d.engine], r?.status ?? null, r?.error, d.id, d.replica)}
+            {@render place(d.label, d.target, d.remote, d.offsite, storageWords[d.engine], r?.status ?? null, r?.error, d.id, d.replica)}
           {/each}
         </ul>
       </section>
@@ -383,7 +429,7 @@
           {#if data.recent_runs.length}<button class="btn btn-ghost h-7 px-2.5 text-[13px]" onclick={() => (app.tab = "activity")}>All activity</button>{/if}
         </div>
       </div>
-      <ul class="rows">
+      <ul class="rows-flat">
         {#each data.recent_runs.slice(0, 3) as r (r.run_id + r.started)}
           <li class="row min-h-11 py-2 text-sm" title={r.error ?? `${dateTime(r.started)} · ${r.trigger}`}>
             <span class="size-2 shrink-0 rounded-full {dot[r.status]}" aria-hidden="true"></span>
@@ -401,6 +447,10 @@
       </ul>
     </section>
 
+    <!-- Can it be restored: the last restore test, and (rsync, Borg) the guide to do it
+         without Flux. Part of the page, not raised: only the answer at the top is. -->
+    {#if data.restore_test || isCompat(data.profile.engine)}
+    <div class="rows-flat">
     {#if data.restore_test}
       {@const rt = data.restore_test}
       {@const last = rt.last}
@@ -412,12 +462,15 @@
           </span>
           <span class="block text-[13px] text-fg-2">
             {#if last}
-              {ago(last.started)} · {count(last.tested)} files restored and checked{#if last.result !== "passed"} · {last.error ?? `${last.problems_total} ${last.problems_total === 1 ? "problem" : "problems"}`}{/if}
+              {ago(last.started)} · {count(last.tested)} files read back and checked{#if last.result !== "passed"} · {last.error ?? `${last.problems_total} ${last.problems_total === 1 ? "problem" : "problems"}`}{/if}
             {:else}
-              Restore a few files into a temporary folder and check them, to know the backup can be read back.
+              Read a few files back and check every byte, to know the backup can be restored. Nothing is written anywhere.
             {/if}
             {#if rt.every !== "off"} · {rt.every === "backup" ? "after every backup" : `every ${rt.every}`}{/if}
           </span>
+          {#if last?.guarantee && last.result !== "failed"}
+            <span class="block text-[13px] text-fg-muted">{guaranteeWords(last.guarantee)}</span>
+          {/if}
         </span>
         <button class="btn shrink-0" disabled={testing} onclick={() => void testNow()}>
           {#if testing}<Icon name="refresh" size={14} class="motion-safe:animate-spin" /> Testing…{:else}Test a restore now{/if}
@@ -440,6 +493,8 @@
         <Icon name="chevronRight" size={16} class="shrink-0 text-fg-muted" />
       </button>
     {/if}
+    </div>
+    {/if}
 
     <!-- Space: how full the drive is, and what the snapshots take of it. -->
     {#if data.space && data.space.size}
@@ -451,33 +506,34 @@
     {/if}
 
     {#if vaultFormat && vaultFormat.format < vaultFormat.newest}
-      <div class="row card gap-3">
-        <Icon name="vault" size={17} class="shrink-0 text-fg-2" />
-        <span class="min-w-0 flex-1">
-          <span class="block font-medium">This Vault can be upgraded</span>
-          <span class="block text-[13px] text-fg-2">Format {vaultFormat.newest} keeps sparse files (disk images) small. Its snapshots stay as they are.</span>
-        </span>
-        <button class="btn" onclick={() => (confirmingUpgrade = true)} disabled={busy !== null}>Upgrade…</button>
-      </div>
+      <Callout tone="info" icon="vault" compact title="This Vault can be upgraded">
+        Format {vaultFormat.newest} keeps sparse files (disk images) small. Its snapshots stay as they are.
+        {#snippet actions()}<button class="btn h-8" onclick={() => (confirmingUpgrade = true)} disabled={busy !== null}>Upgrade…</button>{/snippet}
+      </Callout>
     {/if}
 
     <!-- Less often needed: folded, one line each until opened. -->
     <div class="flex flex-col gap-3">
-      <Readiness {id} />
+      <Readiness {id} onlocked={onLocked} />
       <details class="group" open={busy !== null || pruneConfirm != null || result != null}>
         <summary class="flex cursor-pointer list-none items-center gap-2 rounded-md px-0.5 py-1 text-[13px] font-semibold text-fg-2 select-none hover:text-fg [&::-webkit-details-marker]:hidden">
           <Icon name="chevronRight" size={14} class="transition-transform group-open:rotate-90" />
-          Maintenance
-          <span class="font-normal text-fg-muted">Check, verify, free up space</span>
+          Checks and upkeep
+          <span class="font-normal text-fg-muted">What each check proves</span>
         </summary>
       <div class="rows mt-2">
+        <!-- Three checks, each the answer to one question, from quickest to most thorough. -->
         <div class="row">
-          <span class="min-w-0 flex-1"><span class="block font-medium">Check backups</span><span class="block text-[13px] text-fg-2">Reads the index and structure of every snapshot. Quick.</span></span>
+          <span class="min-w-0 flex-1"><span class="block font-medium">Is every snapshot whole?</span><span class="block text-[13px] text-fg-2"><span class="text-fg">Check</span> reads each snapshot's record and structure, not the data. Quick.</span></span>
           <button class="btn" onclick={() => check(false)} disabled={busy !== null}>{busy === "check" ? "Checking…" : "Check"}</button>
         </div>
         <div class="row">
-          <span class="min-w-0 flex-1"><span class="block font-medium">Verify every byte</span><span class="block text-[13px] text-fg-2">Reads all stored data back and compares it. Can take a while.</span></span>
-          <button class="btn" onclick={() => check(true)} disabled={busy !== null}>{busy === "verify" ? "Verifying…" : "Verify"}</button>
+          <span class="min-w-0 flex-1"><span class="block font-medium">Can files come back?</span><span class="block text-[13px] text-fg-2">A <span class="text-fg">restore test</span> reads some files back the way a restore does and checks every byte. Nothing is written anywhere.</span></span>
+          <button class="btn" onclick={() => void testNow()} disabled={busy !== null || testing}>{testing ? "Testing…" : "Test a restore"}</button>
+        </div>
+        <div class="row">
+          <span class="min-w-0 flex-1"><span class="block font-medium">Is all the stored data undamaged?</span><span class="block text-[13px] text-fg-2"><span class="text-fg">Verify every byte</span> reads everything stored back and checks it: it finds a failing drive. As long as reading the whole backup.</span></span>
+          <button class="btn" onclick={() => check(true)} disabled={busy !== null}>{busy === "verify" ? "Verifying…" : "Verify every byte"}</button>
         </div>
         <div class="row">
           <span class="min-w-0 flex-1"><span class="block font-medium">Free up space</span><span class="block text-[13px] text-fg-2">Removes the snapshots the retention rules no longer keep. Asks first.</span></span>
@@ -486,22 +542,25 @@
       </div>
       </details>
       {#if pruneConfirm}
-        <div class="mt-3 rounded-card bg-warning/10 p-4 text-sm">
-          <div class="font-medium">Retention would remove {pruneConfirm.length} snapshots:</div>
-          <div class="mt-1 max-h-24 overflow-y-auto font-mono text-xs text-fg-2">{pruneConfirm.join(", ")}</div>
-          <div class="mt-3 flex gap-2">
-            <button class="btn btn-danger-filled" onclick={() => prune(false)} disabled={busy !== null}>Remove them</button>
+        <Callout class="mt-3" title={pruneConfirm.removed.length ? `Retention would remove ${pruneConfirm.removed.length} ${pruneConfirm.removed.length === 1 ? "snapshot" : "snapshots"}:` : "Free space is below this backup's minimum"}>
+          {#if pruneConfirm.removed.length}
+            <div class="mt-1 max-h-24 overflow-y-auto font-mono text-xs">{pruneConfirm.removed.join(", ")}</div>
+          {/if}
+          {#if pruneConfirm.forSpace}
+            <p class="mt-1 text-sm">Free space is below the minimum set for this backup, so older snapshots would be removed {pruneConfirm.removed.length ? "as well" : ""}, oldest first, until there is enough. Pinned and named snapshots and the newest ones stay.</p>
+          {/if}
+          {#snippet actions()}
+            <button class="btn btn-danger-filled" onclick={() => prune(false)} disabled={busy !== null}>{pruneConfirm?.removed.length ? "Remove them" : "Remove old snapshots"}</button>
             <button class="btn btn-ghost" onclick={() => (pruneConfirm = null)}>Not now</button>
-          </div>
-        </div>
+          {/snippet}
+        </Callout>
       {/if}
       {#if result}
-        <div class="mt-3 rounded-card p-4 text-sm {result.ok ? 'bg-success/10' : 'bg-danger/10'}" role="status">
-          <div class="flex items-center gap-2 font-medium {result.ok ? 'text-success' : 'text-danger'}"><Icon name={result.ok ? "check" : "alert"} size={15} /> {result.text}</div>
+        <Callout class="mt-3" tone={result.ok ? "ok" : "bad"} title={result.text}>
           {#if result.details?.length}
-            <ul class="mt-2 max-h-40 overflow-y-auto font-mono text-xs text-fg-2">{#each result.details as d (d)}<li class="truncate">{d}</li>{/each}</ul>
+            <ul class="mt-1 max-h-40 overflow-y-auto font-mono text-xs">{#each result.details as d (d)}<li class="truncate">{d}</li>{/each}</ul>
           {/if}
-        </div>
+        </Callout>
       {/if}
     </div>
   </div>
@@ -514,12 +573,30 @@
   </ConfirmDialog>
 {/if}
 
+{#if recovering}
+  {@const rec = recovering}
+  <RestoreDialog
+    profile={id}
+    snapshot={rec.snapshot}
+    paths={rec.paths}
+    startAt="original"
+    note="Everything this backup covers, as it was before the unusual changes. What was added since stays: look through it afterwards. When a restore back to where it was is done, backups go on; after a restore into another folder they stay on hold until you choose It's dealt with."
+    onrestored={(_r, where) => {
+      // Only files put back where they were settle it: a copy in another folder, to look
+      // at first, leaves the files as the attack left them.
+      if (where === "original") void dismissUnusual(rec.alarm, true);
+      else app.toast("ok", "Restored into another folder. Backups stay on hold: choose It's dealt with once your files are as they should be.");
+    }}
+    onclose={() => (recovering = null)}
+  />
+{/if}
+
 {#if showingAffected && data?.unusual}
   {@const u = data.unusual}
   <Modal title="Files involved" onclose={() => (showingAffected = false)} width="max-w-2xl">
     <p class="-mt-1 mb-3 text-[13px] text-fg-2">
-      {count(u.affected_total)} files changed, deleted or added in snapshot {u.snapshot}{u.affected_total > u.affected.length ? ` (the first ${count(u.affected.length)} shown)` : ""}.
-      {#if u.by_extension.length}By type: {u.by_extension.map(([x, n]) => `.${x} (${n})`).join(", ")}.{/if}
+      {count(u.affected_total)} files changed, deleted or added {u.stopped ? (u.before ? `since snapshot ${u.before}` : "since the last backup") : `in snapshot ${u.snapshot}`}{u.affected_total > u.affected.length ? ` (the first ${count(u.affected.length)} shown)` : ""}.
+      {#if u.by_extension.length}By type: {u.by_extension.map(([x, n]) => `${x === "(none)" ? "no extension" : `.${x}`} (${n})`).join(", ")}.{/if}
     </p>
     <ul class="max-h-[50vh] overflow-y-auto rounded-card bg-surface-2 px-3 py-2 font-mono text-[12.5px] leading-6">
       {#each u.affected as f (f)}<li class="truncate" title={f}>{f}</li>{/each}

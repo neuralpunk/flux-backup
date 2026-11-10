@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flux Backup 1.0: snapshot backups for Linux</title>
+  <title>Flux Backup 1.1: snapshot backups for Linux</title>
   <meta name="description" content="Flux Backup keeps snapshots of your Linux desktop on a drive or a server and gets any file back from any day. Fast, encrypted if you like, and your backups never depend on Flux.">
   <meta name="theme-color" content="#18191c">
-  <meta property="og:title" content="Flux Backup 1.0">
+  <meta property="og:title" content="Flux Backup 1.1">
   <meta property="og:description" content="Linux backups, done right: snapshots of your desktop on a drive or a server, and any file back from any day.">
   <meta property="og:image" content="assets/screenshots/overview-dark.png">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
@@ -18,7 +18,7 @@
 
   <header class="nav">
     <div class="wrap">
-      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="24" height="24">Flux Backup <span class="ver">1.0</span></a>
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="24" height="24">Flux Backup <span class="ver">1.1</span></a>
       <nav aria-label="Main" style="display: contents">
         <a class="o" href="#specs">Specs</a>
         <a class="o" href="#restore">Restore</a>
@@ -44,8 +44,8 @@
             <div><span>License</span><b>MIT or Apache-2.0</b></div>
           </div>
           <div class="open-lede">
-            <p>Flux Backup 1.0 keeps snapshots of your Linux desktop on a drive or a server, and gets any file back from any day. A desktop app and the <code>flux</code> command.</p>
-            <div class="actions"><a class="btn btn-p" href="#install">Download 1.0</a><a class="btn btn-m" href="#specs">See the specs</a></div>
+            <p>Flux Backup 1.1 keeps snapshots of your Linux desktop on a drive or a server, and gets any file back from any day. A desktop app and the <code>flux</code> command.</p>
+            <div class="actions"><a class="btn btn-p" href="#install">Download 1.1</a><a class="btn btn-m" href="#specs">See the specs</a></div>
           </div>
         </div>
         <div class="rise">
@@ -86,16 +86,24 @@
       </ul>
     </section>
 
-    <!-- Safety -->
+    <!-- Safety: Flux Sentry -->
     <section class="section wrap" id="safety" aria-labelledby="safety-title">
+      <p class="sentry-name r"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3ZM7.6 11.6c1.2-1.7 2.7-2.6 4.4-2.6s3.2.9 4.4 2.6c-1.2 1.7-2.7 2.6-4.4 2.6s-3.2-.9-4.4-2.6ZM12 11.6h.01"/></svg><span>Flux Sentry</span></p>
       <h2 class="r" id="safety-title">Ransomware? <em>Caught in the act.</em></h2>
-      <p class="lead r">Files renamed to <code>.locked</code> by the dozen and a <code>HOW_TO_DECRYPT.txt</code> on the disk: Flux warns you right away and keeps the snapshot from before.</p>
-      <div class="frame shot" data-scale><img src="assets/screens/unusual.webp" width="2400" height="1560" loading="lazy" alt="Unusual changes in the last backup: 48 files renamed to end in .locked and 3 files that look like ransom notes; the snapshot before is kept."></div>
+      <p class="lead r">Flux Sentry stands watch over every backup. It learns the rhythm of your files, how much of them changes on an ordinary day, and knows at once when a backup doesn't fit: files renamed to <code>.locked</code> by the dozen, text turned to noise, a <code>HOW_TO_DECRYPT.txt</code> on the disk. It raises the alarm and puts your last good snapshot out of harm's way.</p>
+      <div class="frame shot" data-scale><img src="assets/screens/unusual.webp" width="2400" height="1560" loading="lazy" alt="Flux Sentry found unusual changes in the last backup: 99 files changed, 19 times what this backup usually changes; 48 files renamed to end in .locked; 3 files that look like ransom notes. Backups are on hold and the snapshot before is kept."></div>
       <ul class="facts">
-        <li class="r"><h3>Watched every backup</h3><p>Far more changes than usual, encrypted-looking files, ransom notes.</p></li>
-        <li class="r"><h3>The last good snapshot</h3><p>Kept and pinned, ready to restore from.</p></li>
-        <li class="r"><h3>Nothing removed</h3><p>Old snapshots stay until you've looked.</p></li>
+        <li class="r"><h3>It learns what's normal</h3><p>From each backup's own history. A quiet archive raises the alarm at a ripple; a busy projects folder doesn't cry wolf.</p></li>
+        <li class="r"><h3>It looks before it writes</h3><p>Mass renames, files that suddenly look encrypted, ransom notes: seen in your files before a backup starts, so a backup of the damage is never made.</p></li>
+        <li class="r"><h3>It locks the backup down</h3><p>The last good snapshot is pinned, nothing more is backed up or removed, and your other copies stay as they were, until you've looked.</p></li>
       </ul>
+      <div class="sentry r">
+        <div class="sentry-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3ZM7.6 11.6c1.2-1.7 2.7-2.6 4.4-2.6s3.2.9 4.4 2.6c-1.2 1.7-2.7 2.6-4.4 2.6s-3.2-.9-4.4-2.6ZM12 11.6h.01"/></svg></div>
+        <div>
+          <h3>On watch from the first backup.</h3>
+          <p>Setting up a backup asks one question about it: watch <b>normally</b> (recommended), <b>closely</b>, or not at all. Add <b>tripwire files</b>, and the first file an attacker touches may be the one that gives it away. A green <span class="sentry-tag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3ZM7.6 11.6c1.2-1.7 2.7-2.6 4.4-2.6s3.2.9 4.4 2.6c-1.2 1.7-2.7 2.6-4.4 2.6s-3.2-.9-4.4-2.6ZM12 11.6h.01"/></svg>Flux Sentry active</span> on the backup's page says it's there. Tell it <i>This was me</i> when a big change was yours, and it remembers.</p>
+        </div>
+      </div>
     </section>
 
     <!-- Runs on its own -->
@@ -124,12 +132,12 @@
     <section class="section wrap" aria-labelledby="details-title">
       <h2 class="r" id="details-title">Every detail, considered.</h2>
       <div class="mosaic">
-        <figure class="m m1 r"><div class="pic"><img src="assets/screens/d-versions.webp" width="1344" height="976" loading="lazy" alt="Versions of .bashrc: four versions, each with Compare, Open and Restore."></div><figcaption>Every version of a file, side by side</figcaption></figure>
+        <figure class="m m1 r"><div class="pic"><img src="assets/screens/d-versions.webp" width="1344" height="977" loading="lazy" alt="Versions of .bashrc: four versions, each with Compare, Open and Restore."></div><figcaption>Every version of a file, side by side</figcaption></figure>
         <figure class="m m2 r"><div class="pic"><img src="assets/screens/d-days.webp" width="1752" height="274" loading="lazy" alt="Last 30 days: one bar a day, taller bars copied more."></div><figcaption>Thirty days at a glance</figcaption></figure>
-        <figure class="m m3 r"><div class="pic"><img src="assets/screens/d-restore.webp" width="968" height="420" loading="lazy" alt="What will happen: 3 items added, 2 files that differ kept aside, 9 already identical."></div><figcaption>A restore preview</figcaption></figure>
-        <figure class="m m4 r"><div class="pic"><img src="assets/screens/d-space.webp" width="1800" height="730" loading="lazy" alt="Space on BackupDisk with a forecast: full in about 3 months."></div><figcaption>When the drive will be full</figcaption></figure>
-        <figure class="m m5 r"><div class="pic"><img src="assets/screens/d-calendar.webp" width="552" height="402" loading="lazy" alt="October 2026, with the days that have snapshots marked."></div><figcaption>A calendar of snapshots</figcaption></figure>
-        <figure class="m m6 r"><div class="pic"><img src="assets/screens/d-timings.webp" width="1056" height="858" loading="lazy" alt="Where the time went: each phase and step of a backup, timed."></div><figcaption>Where the time went</figcaption></figure>
+        <figure class="m m3 r"><div class="pic"><img src="assets/screens/d-restore.webp" width="968" height="422" loading="lazy" alt="What will happen: 3 items added, 2 files that differ kept aside, 9 already identical."></div><figcaption>A restore preview</figcaption></figure>
+        <figure class="m m4 r"><div class="pic"><img src="assets/screens/d-space.webp" width="1752" height="763" loading="lazy" alt="Space on BackupDisk with a forecast: full in about 3 months."></div><figcaption>When the drive will be full</figcaption></figure>
+        <figure class="m m5 r"><div class="pic"><img src="assets/screens/d-calendar.webp" width="512" height="416" loading="lazy" alt="October 2026, with the days that have snapshots marked."></div><figcaption>A calendar of snapshots</figcaption></figure>
+        <figure class="m m6 r"><div class="pic"><img src="assets/screens/d-timings.webp" width="1056" height="859" loading="lazy" alt="Where the time went: each phase and step of a backup, timed."></div><figcaption>Where the time went</figcaption></figure>
       </div>
     </section>
 
@@ -188,15 +196,31 @@ flux recover /run/media/$USER/Backup</code></pre>
       </div>
     </section>
 
-    <!-- New in 1.0 -->
+    <!-- New in 1.1, then what 1.0 brought -->
     <section class="section wrap" id="new" aria-labelledby="new-title">
-      <h2 class="r" id="new-title">New in 1.0.</h2>
+      <h2 class="r" id="new-title">New in 1.1.</h2>
+      <p class="lead r">What was there, made clearer, safer and quicker to use, and three things that put numbers behind what a backup promises.</p>
+      <div class="chips r">
+        <span>Flux Sentry<em>learns each backup's normal</em></span>
+        <span>Repair data<em>damage undone, not just found</em></span>
+        <span>Restore tests<em>with a stated confidence</em></span>
+        <span>Restore tests<em>nothing written anywhere</em></span>
+        <span>Settings at a glance</span>
+        <span>Every backup<em>side by side</em></span>
+        <span>Checklist<em>a button for each</em></span>
+        <span>Statuses that agree</span>
+        <span>Times as you write them<em>12 or 24 h</em></span>
+        <span>Custom times<em>previewed</em></span>
+        <span>Stays in the tray</span>
+        <span>Man pages<em>with examples</em></span>
+      </div>
+      <h3 class="r" style="margin-top:2.5rem">And in 1.0</h3>
       <p class="lead r">Version 1.0 is about the day you need your backups: on another computer, without Flux, or years from now.</p>
       <div class="chips r">
         <span>Recover anywhere<em>new computer, no Flux</em></span>
         <span>Several places<em>one offsite</em></span>
         <span>Restore tests<em>scheduled</em></span>
-        <span>Ransomware watch</span>
+        <span>Ransomware watch<em>now Flux Sentry</em></span>
         <span>Webhooks<em>ntfy, Gotify</em></span>
         <span>Templates</span>
         <span>Rule tester</span>
@@ -211,7 +235,7 @@ flux recover /run/media/$USER/Backup</code></pre>
 
     <!-- Install -->
     <section class="section wrap" id="install" aria-labelledby="install-title">
-      <h2 class="r" id="install-title">Get Flux Backup 1.0.</h2>
+      <h2 class="r" id="install-title">Get Flux Backup 1.1.</h2>
       <p class="lead r">Each package holds the app, the <code>flux</code> command, man pages and shell completions.</p>
       <div class="pkgs">
         <a class="pkg r" href="https://github.com/neuralpunk/flux-backup/releases"><span class="pkg-name">.rpm</span><span class="for">Fedora, openSUSE</span><span class="note">With system backups through polkit.</span><span class="get">Download</span></a>
@@ -237,9 +261,9 @@ sudo PREFIX=/usr packaging/install.sh</code></pre>
     <section class="close" aria-labelledby="close-title">
       <div class="wrap">
         <img class="r" src="assets/logo.svg" alt="" width="84" height="84">
-        <h2 class="r" id="close-title">Flux Backup 1.0</h2>
+        <h2 class="r" id="close-title">Flux Backup 1.1</h2>
         <p class="r">Free software for Linux. Your first backup takes a minute to set up.</p>
-        <div class="actions r"><a class="btn btn-p" href="https://github.com/neuralpunk/flux-backup/releases">Download 1.0</a><a class="btn btn-m" href="guide.html#your-first-backup">Start with the guide</a></div>
+        <div class="actions r"><a class="btn btn-p" href="https://github.com/neuralpunk/flux-backup/releases">Download 1.1</a><a class="btn btn-m" href="guide.html#your-first-backup">Start with the guide</a></div>
       </div>
     </section>
   </main>

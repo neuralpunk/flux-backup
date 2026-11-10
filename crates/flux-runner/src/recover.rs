@@ -672,7 +672,7 @@ pub fn readiness(paths: &Paths, id: &ProfileId, p: &Profile) -> Vec<Check> {
             asked: true,
             title: "The Borg key is exported".into(),
             detail: format!(
-                "If the repository's key is damaged, the password alone can't open it. Run borg key export {} borg-key.txt and keep the file with the password.",
+                "If the repository's key is damaged, the passphrase alone can't open it. Export the key (borg key export {} borg-key.txt) and keep the file with the passphrase.",
                 flux_compat::borg::repo_url(id, p, true)
             ),
         });
@@ -685,10 +685,10 @@ pub fn readiness(paths: &Paths, id: &ProfileId, p: &Profile) -> Vec<Check> {
         title: "A restore test has passed".into(),
         detail: match tests.last_passed {
             Some(t) => format!(
-                "Files were last restored and checked on {}.",
+                "Files were last read back and checked on {}.",
                 t.to_zoned(jiff::tz::TimeZone::system()).strftime("%-d %B %Y")
             ),
-            None => "Test a restore now on the Overview: Flux restores a few files to a temporary folder and checks them.".into(),
+            None => "Flux reads a few files back from the backups and checks every byte against what was stored.".into(),
         },
     });
     let offsite = p.offsite || p.destinations.iter().any(|d| d.offsite);
@@ -700,7 +700,7 @@ pub fn readiness(paths: &Paths, id: &ProfileId, p: &Profile) -> Vec<Check> {
         detail: if offsite {
             "A fire or a theft wouldn't take every copy.".into()
         } else {
-            "A fire or a theft takes a computer and the drive next to it together. Add a place that's kept elsewhere in Settings › Also keep copies elsewhere.".into()
+            "A fire or a theft takes a computer and the drive next to it together. Add a place that's kept elsewhere: another drive you keep away from home, or a server.".into()
         },
     });
     out

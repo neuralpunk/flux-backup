@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::units::{ByteSize, HumanDuration};
+use crate::units::{ByteSize, HumanDuration, Percent};
 
 /// Current on-disk profile schema version.
 pub const PROFILE_VERSION: u32 = 1;
@@ -203,6 +203,10 @@ pub struct Profile {
     /// text that now looks encrypted, ransom notes.
     #[serde(default, skip_serializing_if = "Sensitivity::is_normal")]
     pub unusual_changes: Sensitivity,
+    /// Flux Sentry plants tripwire files (`.flux-sentry-tripwire.txt`) in the folders
+    /// this backs up, and stops backing up when one is changed or removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tripwires: bool,
     /// Where to tell how this backup goes, off this computer (besides the ones in
     /// Preferences, for every backup).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -248,8 +252,8 @@ impl Sensitivity {
     }
 }
 
-/// `[restore_test]`: how often a sample of the newest snapshot is restored into a
-/// temporary folder and checked, and which sample.
+/// `[restore_test]`: how often a sample of the newest snapshot is read back and checked
+/// (as it streams: nothing is written anywhere), and which sample.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreTest {
@@ -263,6 +267,13 @@ pub struct RestoreTest {
     /// `percent`: of the snapshot's size.
     #[serde(default = "five")]
     pub percent: u8,
+    /// `confidence`: the share of damaged files a test must not miss (default 1%)…
+    #[serde(default = "one_percent", skip_serializing_if = "is_one_percent")]
+    pub damage: Percent,
+    /// …and how sure it must be of catching it (default 99%). Together they set how many
+    /// files are tested: see `flux_runner::sample`.
+    #[serde(default = "ninety_nine", skip_serializing_if = "is_ninety_nine")]
+    pub certainty: Percent,
     /// `rolling`: every file is tested once in this long (default 30 days).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<HumanDuration>,
@@ -285,6 +296,8 @@ impl Default for RestoreTest {
             mode: TestMode::RandomFiles,
             files: 10,
             percent: 5,
+            damage: one_percent(),
+            certainty: ninety_nine(),
             window: None,
             max_runtime: None,
             max_read: None,
@@ -306,6 +319,33 @@ fn ten() -> u32 {
 fn five() -> u8 {
     5
 }
+
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
+}
+
+fn one_percent() -> Percent {
+    Percent::from_millionths(10_000)
+}
+
+fn is_one_percent(p: &Percent) -> bool {
+    *p == one_percent()
+}
+
+fn ninety_nine() -> Percent {
+    Percent::from_millionths(990_000)
+}
+
+fn is_ninety_nine(p: &Percent) -> bool {
+    *p == ninety_nine()
+}
+
+/// The least share of damaged files a restore test can be asked to catch, and the most:
+/// 0.01% to 50%.
+pub const DAMAGE_RANGE: (u32, u32) = (100, 500_000);
+/// How sure it can be asked to be: 50% to 99.99%. (Never 100%: only testing every file is
+/// certain, and that's `full`.)
+pub const CERTAINTY_RANGE: (u32, u32) = (500_000, 999_900);
 
 /// How often a restore test runs (after a backup, once it's due).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -329,6 +369,9 @@ pub enum TestMode {
     Percent,
     Full,
     Rolling,
+    /// As many random files as it takes to catch damage to a given share of the files
+    /// with a given certainty (`damage`, `certainty`).
+    Confidence,
 }
 
 /// One more place a profile's backups go: same sources, schedule and retention, its own
@@ -544,7 +587,7 @@ impl WhenMissing {
 /// Bucket rules (`hourly` … `yearly`) keep the newest snapshot of each of the last N
 /// periods that contain a snapshot, like restic and borg do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "RetentionFile")]
 pub struct Retention {
     /// Master switch. When false, nothing is ever pruned automatically.
     #[serde(default = "yes")]
@@ -592,6 +635,86 @@ pub struct Retention {
     /// At most this many runs of history are kept (at most 1000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_history_runs: Option<u32>,
+}
+
+/// [`Retention`] as written in a profile. The keep rules are told apart from "not
+/// written": a `[retention]` table that sets none of them (only, say, `min_free_space` or
+/// `keep_history_days`) keeps the default rules, the same as no table at all. It used to
+/// read as "keep nothing but the newest". A table that sets any keep rule means exactly
+/// what it says, the others 0.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionFile {
+    #[serde(default = "yes")]
+    enabled: bool,
+    #[serde(default)]
+    keep_last: Option<u32>,
+    #[serde(default)]
+    keep_within: Option<HumanDuration>,
+    #[serde(default)]
+    keep_hourly: Option<u32>,
+    #[serde(default)]
+    keep_daily: Option<u32>,
+    #[serde(default)]
+    keep_weekly: Option<u32>,
+    #[serde(default)]
+    keep_monthly: Option<u32>,
+    #[serde(default)]
+    keep_yearly: Option<u32>,
+    #[serde(default)]
+    max_age: Option<HumanDuration>,
+    #[serde(default = "yes")]
+    keep_named: bool,
+    #[serde(default)]
+    min_free_space: Option<ByteSize>,
+    #[serde(default)]
+    min_free_inodes_percent: Option<u8>,
+    #[serde(default = "one")]
+    safety_floor: u32,
+    #[serde(default)]
+    after_problems: AfterProblems,
+    #[serde(default)]
+    keep_history_days: Option<u32>,
+    #[serde(default)]
+    keep_history_runs: Option<u32>,
+}
+
+impl From<RetentionFile> for Retention {
+    fn from(f: RetentionFile) -> Self {
+        let rules_unset = f.keep_last.is_none()
+            && f.keep_within.is_none()
+            && f.keep_hourly.is_none()
+            && f.keep_daily.is_none()
+            && f.keep_weekly.is_none()
+            && f.keep_monthly.is_none()
+            && f.keep_yearly.is_none();
+        let d = Retention::default();
+        let rule = |written: Option<u32>, default: u32| {
+            written.unwrap_or(if rules_unset { default } else { 0 })
+        };
+        Self {
+            enabled: f.enabled,
+            keep_last: rule(f.keep_last, d.keep_last),
+            keep_within: if rules_unset {
+                d.keep_within
+            } else {
+                f.keep_within
+            },
+            keep_hourly: rule(f.keep_hourly, d.keep_hourly),
+            keep_daily: rule(f.keep_daily, d.keep_daily),
+            keep_weekly: rule(f.keep_weekly, d.keep_weekly),
+            keep_monthly: rule(f.keep_monthly, d.keep_monthly),
+            keep_yearly: rule(f.keep_yearly, d.keep_yearly),
+            max_age: f.max_age,
+            keep_named: f.keep_named,
+            min_free_space: f.min_free_space,
+            min_free_inodes_percent: f.min_free_inodes_percent,
+            safety_floor: f.safety_floor,
+            after_problems: f.after_problems,
+            keep_history_days: f.keep_history_days,
+            keep_history_runs: f.keep_history_runs,
+        }
+    }
 }
 
 /// What scheduled pruning does after a backup with problems.
@@ -838,6 +961,11 @@ pub struct VaultOptions {
     /// Costs a little space; applies to what's written from then on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_sizes: bool,
+    /// Keep repair data with what's stored: this share of it (percent, 1–50), as
+    /// Reed–Solomon parity that can rebuild damaged parts (bad sectors, bit rot). 0: none.
+    /// Applies to what's written from then on; verifying every byte adds it to the rest.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub parity: u8,
     /// The app locks the Vault again after this many minutes without use (forgets the
     /// password it was given). `None`: unlocked until the app closes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -860,6 +988,7 @@ impl Default for VaultOptions {
             password_source: PasswordSource::default(),
             hashing: PasswordHashing::default(),
             hide_sizes: false,
+            parity: 0,
             lock_after_minutes: None,
             unlock_file: None,
             keep_recovery_tool: true,
@@ -1108,6 +1237,7 @@ impl Profile {
             network: Default::default(),
             restore_test: RestoreTest::default(),
             unusual_changes: Sensitivity::Normal,
+            tripwires: false,
             webhooks: Vec::new(),
             origin: None,
         }
@@ -1143,9 +1273,11 @@ impl Profile {
         toml::to_string_pretty(self)
     }
 
-    /// Check the profile for problems. Errors make the profile unusable; warnings do not.
-    /// [`Profile::validate`] plus what only matters in `scope`: system backups run without
-    /// anyone logged in, so their Vault password must come from a file or a command.
+    /// Does it start backups by itself (on a schedule, or when its drive is plugged in)?
+    pub fn runs_on_its_own(&self) -> bool {
+        self.schedule.trigger != Trigger::Manual || self.schedule.on_connect
+    }
+
     /// Where this profile's password comes from, or `None` when it needs none (Mirror,
     /// rsync, unencrypted Vault or Borg).
     pub fn password_source(&self) -> Option<PasswordSource> {
@@ -1164,8 +1296,27 @@ impl Profile {
         }
     }
 
+    /// [`Profile::validate`] plus what only matters in `scope`: system backups run without
+    /// anyone logged in, so their Vault password must come from a file or a command; a
+    /// user's backups that start by themselves can't ask for one either.
     pub fn validate_in(&self, scope: crate::Scope) -> Vec<Issue> {
         let mut issues = self.validate();
+        let password_field = || {
+            if self.engine == Engine::Borg {
+                "borg.password_source".to_owned()
+            } else {
+                "vault.password_source".to_owned()
+            }
+        };
+        if scope == crate::Scope::User
+            && self.runs_on_its_own()
+            && matches!(self.password_source(), Some(PasswordSource::Prompt))
+        {
+            issues.push(Issue::warning(
+                &password_field(),
+                "scheduled backups will fail: the password is set to \"Ask every time\", and nobody is there to type it when a backup starts on its own. Keep it in the desktop keyring, a key file or a command".into(),
+            ));
+        }
         if scope == crate::Scope::System
             && matches!(
                 self.password_source(),
@@ -1174,17 +1325,14 @@ impl Profile {
         {
             issues.push(Issue {
                 severity: Severity::Warning,
-                field: if self.engine == Engine::Borg {
-                    "borg.password_source".into()
-                } else {
-                    "vault.password_source".into()
-                },
-                message: "system backups run without anyone logged in, so they can't use a keyring or ask for the password; use a key file readable by root only (password_source = { file = \"/etc/flux-backup/keys/<id>\" })".into(),
+                field: password_field(),
+                message: "system backups run without anyone logged in, so they can't use a keyring or ask for the password: keep it in a key file only root can read (/etc/flux-backup/keys/<id>)".into(),
             });
         }
         issues
     }
 
+    /// Check the profile for problems. Errors make the profile unusable; warnings do not.
     pub fn validate(&self) -> Vec<Issue> {
         let mut v = Vec::new();
         let mut err = |field: &str, msg: String| v.push(Issue::error(field, msg));
@@ -1201,6 +1349,13 @@ impl Profile {
         if self.name.trim().is_empty() {
             err("name", "name must not be empty".into());
         }
+        if self.name.chars().any(char::is_control) {
+            err(
+                "name",
+                "name must be one line of plain text (it has a line break or another control character)"
+                    .into(),
+            );
+        }
 
         match &self.target {
             Target::Local { path, fs_uuid } => {
@@ -1216,7 +1371,8 @@ impl Profile {
                 if fs_uuid.as_deref().is_some_and(|u| u.trim().is_empty()) {
                     err(
                         "target.fs_uuid",
-                        "fs_uuid must not be empty when set".into(),
+                        "the drive's id is empty: choose the drive again while it's connected"
+                            .into(),
                     );
                 }
             }
@@ -1327,13 +1483,13 @@ impl Profile {
             {
                 v.push(Issue::error(
                     "schedule.on_calendar",
-                    "a calendar schedule needs on_calendar (e.g. \"daily\")".into(),
+                    "choose the times it runs (for example: daily, or Mon..Fri 18:00)".into(),
                 ));
             }
             Trigger::Interval if sch.every.is_none_or(|e| e.0.as_secs() < 60) => {
                 v.push(Issue::error(
                     "schedule.every",
-                    "an interval schedule needs every >= 1 minute".into(),
+                    "the time between backups must be at least a minute".into(),
                 ));
             }
             _ => {}
@@ -1349,7 +1505,7 @@ impl Profile {
         {
             v.push(Issue::error(
                 "schedule.on_connect",
-                "backup on connect needs a local target with target.fs_uuid set".into(),
+                "backing up when the drive is plugged in needs a drive Flux knows: choose it while it's connected".into(),
             ));
         }
 
@@ -1372,6 +1528,20 @@ impl Profile {
             v.push(Issue::error(
                 "restore_test.percent",
                 "a restore test takes 1–100 percent".into(),
+            ));
+        }
+        let dmg = self.restore_test.damage.millionths();
+        if !(DAMAGE_RANGE.0..=DAMAGE_RANGE.1).contains(&dmg) {
+            v.push(Issue::error(
+                "restore_test.damage",
+                "a restore test can catch damage to between 0.01% and 50% of the files".into(),
+            ));
+        }
+        let sure = self.restore_test.certainty.millionths();
+        if !(CERTAINTY_RANGE.0..=CERTAINTY_RANGE.1).contains(&sure) {
+            v.push(Issue::error(
+                "restore_test.certainty",
+                "a restore test's certainty is between 50% and 99.99% (to be certain, test everything)".into(),
             ));
         }
         for (i, msg) in self.network.problems() {
@@ -1416,6 +1586,12 @@ impl Profile {
                     v.push(Issue::error(
                         "vault.compression_level",
                         "zstd level must be 0-22".into(),
+                    ));
+                }
+                if vo.parity > 50 {
+                    v.push(Issue::error(
+                        "vault.parity",
+                        "repair data takes 1–50 percent (0 for none)".into(),
                     ));
                 }
                 if let PasswordHashing::Custom {
@@ -1771,6 +1947,56 @@ mod tests {
         assert_eq!(Profile::from_toml(&s).unwrap(), p);
     }
 
+    /// A `[retention]` table that sets no keep rule keeps the default ones (it used to
+    /// mean "keep only the newest"); one that sets any means what it says.
+    #[test]
+    fn a_retention_table_without_keep_rules_keeps_the_defaults() {
+        let with = |retention: &str| {
+            Profile::from_toml(&format!(
+                "name = \"Docs\"\n[target]\nkind = \"local\"\npath = \"/mnt/b\"\n\
+                 [sources]\npaths = [\"/home/me\"]\n[retention]\n{retention}\n"
+            ))
+            .unwrap()
+            .retention
+        };
+        let r = with("keep_history_days = 90\nmin_free_space = \"50GB\"");
+        let d = Retention::default();
+        assert_eq!(
+            (
+                r.keep_last,
+                r.keep_within,
+                r.keep_daily,
+                r.keep_weekly,
+                r.keep_monthly,
+                r.keep_yearly
+            ),
+            (
+                d.keep_last,
+                d.keep_within,
+                d.keep_daily,
+                d.keep_weekly,
+                d.keep_monthly,
+                d.keep_yearly
+            )
+        );
+        assert_eq!(r.keep_history_days, Some(90));
+        assert!(r.min_free_space.is_some());
+        // Any rule written: the others are 0, as before.
+        let r = with("keep_daily = 3");
+        assert_eq!(
+            (r.keep_last, r.keep_within, r.keep_daily, r.keep_weekly),
+            (0, None, 3, 0)
+        );
+        // What Flux writes reads back the same, `keep_within` left out included.
+        let exact = Retention {
+            keep_within: None,
+            keep_daily: 0,
+            ..Retention::default()
+        };
+        let text = toml::to_string(&exact).unwrap();
+        assert_eq!(toml::from_str::<Retention>(&text).unwrap(), exact);
+    }
+
     #[test]
     fn minimal_toml_gets_defaults() {
         let p = Profile::from_toml(
@@ -1882,6 +2108,47 @@ mod tests {
         assert_eq!(Profile::from_toml(&s).unwrap(), p);
         p.engine = Engine::Mirror;
         assert!(p.validate().iter().any(|i| i.field == "rsync"));
+    }
+
+    #[test]
+    fn warns_when_a_backup_on_its_own_would_ask_for_the_password() {
+        let warned = |p: &Profile, scope| {
+            p.validate_in(scope)
+                .iter()
+                .filter(|i| i.field == "vault.password_source")
+                .count()
+        };
+        let mut p = sample();
+        p.engine = Engine::Vault;
+        p.vault = Some(VaultOptions {
+            password_source: PasswordSource::Prompt,
+            ..VaultOptions::default()
+        });
+        p.schedule.trigger = Trigger::Manual;
+        assert_eq!(warned(&p, crate::Scope::User), 0, "by hand: it can ask");
+        p.schedule.on_connect = true;
+        assert_eq!(
+            warned(&p, crate::Scope::User),
+            1,
+            "when the drive is plugged in"
+        );
+        p.schedule.on_connect = false;
+        p.schedule.trigger = Trigger::Calendar;
+        assert_eq!(warned(&p, crate::Scope::User), 1, "on a schedule");
+        assert_eq!(
+            warned(&p, crate::Scope::System),
+            1,
+            "system's own warning only"
+        );
+        p.vault.as_mut().unwrap().password_source = PasswordSource::Keyring;
+        assert_eq!(
+            warned(&p, crate::Scope::User),
+            0,
+            "the keyring works unattended"
+        );
+        p.vault.as_mut().unwrap().password_source = PasswordSource::Prompt;
+        p.vault.as_mut().unwrap().encryption = false;
+        assert_eq!(warned(&p, crate::Scope::User), 0, "no password at all");
     }
 
     #[test]

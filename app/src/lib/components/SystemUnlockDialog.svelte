@@ -11,10 +11,16 @@
   icon="shield"
   confirm="Continue"
   onconfirm={() => {
+    // Taken now: closing this dialog forgets it.
+    const then = app.systemThen;
     onclose();
-    void app.unlockSystem();
+    void app.unlockSystem(then);
   }}
-  {onclose}
+  onclose={() => {
+    // Not now: nothing waits for an unlock any more.
+    app.systemThen = null;
+    onclose();
+  }}
 >
   <p>
     System backups protect what only the administrator can read: settings in <span class="font-mono text-[12.5px]">/etc</span>, other users' files, and

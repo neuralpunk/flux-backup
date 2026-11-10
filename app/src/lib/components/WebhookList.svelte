@@ -104,7 +104,7 @@
       <div class="flex flex-wrap gap-1.5">
         {#each events as e (e.value)}
           {@const on = (draft.events ?? []).includes(e.value)}
-          <button class="rounded-md px-2.5 py-1 {on ? 'bg-selected font-medium text-on-selected' : 'bg-surface-3 text-fg-2 hover:text-fg'}" aria-pressed={on} onclick={() => toggleEvent(e.value)}>{e.label}</button>
+          <button class="chip-toggle" aria-pressed={on} onclick={() => toggleEvent(e.value)}>{#if on}<Icon name="check" size={13} />{/if}{e.label}</button>
         {/each}
       </div>
       {#if draft.preset === "healthchecks"}<span class="text-fg-muted">Pings always include started, succeeded and failed.</span>{/if}

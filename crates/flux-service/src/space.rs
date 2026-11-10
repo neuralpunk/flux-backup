@@ -200,6 +200,7 @@ mod tests {
             sources_missing: Vec::new(),
             destinations: Vec::new(),
             unusual: None,
+            sentry_seen: None,
             performance: None,
         }
     }

@@ -9,7 +9,10 @@
     "types": ["svelte"],
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // Pure modules import each other as `./x.ts`, so node runs their tests as they are.
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   },
   "include": ["src/**/*.ts", "src/**/*.svelte"]
 }

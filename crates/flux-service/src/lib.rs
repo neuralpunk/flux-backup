@@ -107,6 +107,9 @@ impl From<VaultError> for ApiError {
 
 pub type Result<T> = std::result::Result<T, ApiError>;
 
+/// How long after the last look into a snapshot its file list is kept in memory.
+const BROWSE_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Snapshot entries cached for browsing (a few recent snapshots).
 const CACHE_SNAPSHOTS: usize = 4;
 
@@ -120,6 +123,8 @@ pub struct Service {
     /// Vault passwords typed into the app, in memory only, with when each was last used.
     passwords: Mutex<HashMap<String, (Zeroizing<String>, std::time::Instant)>>,
     entries: Mutex<EntryCache>,
+    /// When a snapshot was last browsed (what `entries` holds is let go a while after).
+    pub(crate) browsed: Mutex<Option<std::time::Instant>>,
     /// How to start a background backup: program and leading arguments, then the id.
     backup_cmd: Vec<OsString>,
     /// The `flux` CLI that timers run.
@@ -147,6 +152,7 @@ impl Service {
             paths,
             passwords: Mutex::new(HashMap::new()),
             entries: Mutex::new(VecDeque::new()),
+            browsed: Mutex::new(None),
             backup_cmd,
             unit_bin,
             estimate_gen: std::sync::atomic::AtomicU64::new(0),
@@ -186,7 +192,7 @@ impl Service {
             })
     }
 
-    fn remember_password(&self, id: &ProfileId, password: Zeroizing<String>) {
+    pub(crate) fn remember_password(&self, id: &ProfileId, password: Zeroizing<String>) {
         self.passwords
             .locked()
             .insert(id.to_string(), (password, std::time::Instant::now()));
@@ -203,6 +209,16 @@ impl Service {
     }
 
     fn expire_idle_at(&self, now: std::time::Instant) -> Vec<String> {
+        // The snapshots kept for browsing are whole file lists, hundreds of megabytes
+        // for a big backup: not held for weeks by an app sitting in the tray.
+        let stale = self
+            .browsed
+            .locked()
+            .is_some_and(|at| now.saturating_duration_since(at) >= BROWSE_IDLE);
+        if stale {
+            self.entries.locked().clear();
+            *self.browsed.locked() = None;
+        }
         let ids: Vec<(String, std::time::Instant)> = self
             .passwords
             .locked()

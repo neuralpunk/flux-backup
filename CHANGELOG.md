@@ -4,6 +4,483 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-10
+
+A refinement release: what was there, made clearer, safer and quicker to use, and three
+things that put numbers behind what a backup promises. **Flux Sentry** learns how much of
+each backup normally changes and warns when one doesn't fit. A Vault can keep **repair
+data**, so damage from a failing drive is undone, not only found. Restore tests can be
+sized by **what a pass must prove** ("if 1% of the files were damaged, this would have
+found it, 99% certain"). Restore tests also no longer write a single file anywhere, so an encrypted backup stays encrypted
+while it's tested. Each backup's settings can be read at a glance, and every backup's side
+by side. Statuses agree everywhere and only what isn't protected is red; the Overview is
+calmer, and the words are plainer. The recovery checklist has a button for each thing it
+asks, a scheduled backup that can't get its password says so before it fails, times are
+typed the way you write them (on a 12- or 24-hour clock) and custom times are previewed,
+closing the window leaves Flux in the tray, and every man page has examples.
+
+### Added
+- **Flux Sentry: unusual-change detection that learns each backup's normal.** "Far more
+  changes than usual" used to mean fixed limits (30% of the files, 5 times the median).
+  Flux Sentry learns instead how much of each backup normally changes, from its last 60
+  backups: a level (an exponentially weighted moving average of the share of files
+  changed, on a logarithmic scale, which one odd backup barely moves), a spread (the
+  median absolute deviation around it) and a memory (an amount of change the backup has
+  reached twice before, unflagged or answered with *This was me*, is normal for it). A
+  backup is unusual when it lands 6 spreads above its level (4 when watching closely).
+  A quiet backup now warns at 5% of its files instead of 30%; a busy one whose changes
+  swing widely, or that is rebuilt every Monday, no longer cries wolf. The warning says
+  "480 files changed or deleted, 4.8% of them: 40 times what this backup usually changes
+  (0.12%)", and the *Unusual changes* cell on the Overview says what Sentry has learned
+  and where it would warn. Fixed limits stand in until a backup has run five times.
+  Setting up a backup now asks about it in a step of its own, *Should Flux Sentry keep
+  watch?*: normally (recommended), closely, or off, each with what it means (off stops
+  only the warnings; backups and snapshots are made just the same). A backup that's
+  watched shows a green **Flux Sentry active** tag on its page, with Sentry's own icon,
+  a shield with an eye.
+- **Flux Sentry looks before anything is written.** For backups in Flux's own formats
+  (plain folders and encrypted), the files are compared with the newest snapshot *before*
+  the backup starts. If they show unusual changes, the backup isn't made at all: nothing
+  of an attack reaches the backups, here or in any other place. The warning reads *Flux
+  Sentry stopped the last backup*, the newest snapshot is pinned, and the backup is on
+  hold as below. *This was me* lets the next backup take those changes without being
+  stopped for them again. Backups written by rsync or Borg are looked at right after
+  they're written, as before.
+- **Restore everything, in one step.** Flux Sentry's warning has **Restore
+  everything…**: a restore of all the backup covers, from the snapshot kept from before
+  the changes, back to where it was. It shows what it will do first; files that differ
+  now are kept aside, not deleted. When it finishes without errors the alarm is settled
+  and backups go on. The first backup after a settled alarm isn't stopped again for the
+  same changes or for what an attack left behind.
+- **Tripwire files.** Turn on *Plant tripwire files* (in the Flux Sentry step of setting
+  up a backup, or *What to keep*; `tripwires = true`; off by default) and Sentry plants a
+  small hidden file, `.flux-sentry-tripwire.txt`, in each folder the backup covers and
+  its first subfolders. Ransomware changes every file it finds: if a tripwire is changed
+  or removed, the next backup is stopped before it starts, however little else has
+  happened, for backups of every kind. They are set again when the alarm is settled
+  and removed when the setting is turned off or the backup deleted; Flux never deletes
+  one that isn't exactly as it planted it.
+- **Flux Sentry locks a backup down.** When a backup shows unusual changes, the backup is
+  put **on hold**: no further backup is made, by schedule or by hand, until you settle
+  it, since another one could only store more of the damage; and that backup isn't
+  passed on to the profile's **other places**, which keep their copies from before.
+  Settle it with **This was me** (the changes were yours) or the new **It's dealt
+  with** (they weren't, and you've restored what you need: backups go on, Sentry learns
+  nothing from that backup, and the snapshot from before stays pinned). The backup's
+  page shows *Flux Sentry · backups on hold* and its next backup as on hold; a
+  notification repeats it once a day so backups never stop unnoticed. New command:
+  `flux sentry <profile>` says what Sentry has learned and whether it holds the backup,
+  and settles it (`--this-was-me`, `--dealt-with`); `flux backup` refuses while on hold.
+- **Repair, not just detection.** A Vault can keep **repair data**: Reed–Solomon parity
+  for everything it stores, so that parts a drive damages (a bad sector, a flipped bit, a
+  stretch of garbage) are rebuilt instead of costing the files stored there. Turn it on
+  in *Settings › Where to keep it › How backups are stored › Repair data* (2, 5, 10 or 20%
+  more space; `[vault] parity = 5`). *Verify every byte* and the monthly verification
+  then repair what they find and say so; `flux check --read-data` says what could be
+  repaired and `flux check --repair` does it. With 5%, any 13 of each group of about 240
+  4 KiB blocks can be lost, or one stretch of up to 5% of a stored file. Packs, index
+  files, snapshot records, key slots and the Vault's `config` are all covered (the last
+  two are repaired before the Vault is opened, without the password); every repair is
+  checked against the same hashes and authentication as before, and only what fails its
+  own check is ever repaired. Verifying also adds repair data to what was stored
+  before, and the Overview says how much there is and what it covers. Copies in other
+  places carry it. It adds a `parity/` folder to the Vault without changing the Vault's
+  format: older versions of Flux and `flux-vault-recover` read the Vault as before
+  (docs/VAULT_FORMAT.md, *Repair data*).
+- **Restore tests with a stated confidence.** A new choice of files, *Enough to be sure*:
+  say what a pass must prove (*catch damage to 1% of the files or more, 99% certain*) and
+  Flux tests as many random files as that takes, 459 for those two, almost whatever the
+  size of the backup (fewer for a small one: the count is exact, from the hypergeometric
+  probability of missing every damaged file). The report says what passing proved: "if 1%
+  or more of its 184,000 files were damaged, this test would have found it (99%
+  certain)", on the Overview, in the log and from `flux restore-test`, which gains
+  `--damage` and `--certainty`; in a profile, `mode = "confidence"` with `damage` and
+  `certainty`. A test of so many random files says what it was worth too (ten files:
+  damage to 37% or more). A test stopped at a limit claims nothing. Samples are now drawn
+  with the system's randomness, every set of files equally likely.
+- **Settings at a glance.** A backup's Overview sums up its settings in a compact grid
+  (schedule, what's excluded, where, how it's stored, where the password is kept, what's
+  kept, restore tests, notifications…), with anything to fix in amber; a click opens that
+  setting's section of the Settings page (*When*, *What to keep*…) in a dialog right
+  there, without leaving the Overview; it's grouped (*When and what*, *Where and how*, *Safety and alerts*) and leaves
+  out what doesn't apply. *All backups* gains a **Settings** view: every backup's settings
+  side by side in a sortable table, one line per backup, across the whole window (the
+  headline above it shrinks to one line), with a choice of **Columns**.
+- **A 24-hour clock**: Preferences › App › *Clock* (12-hour, 24-hour, or like the
+  system), used wherever the app shows or takes a time.
+- **Closing the window keeps Flux in the system tray**, where its icon shows backups as
+  they run; quit from the tray's menu. The first time, a notification says where it went.
+  Turn it off in Preferences › App. Where no tray shows the icon, closing quits as before.
+- Starting Flux while it already runs brings its window back instead of a second copy.
+
+### Changed
+- **Flux Sentry has a dialog of its own.** Its settings sat in *What to keep*, among the
+  retention rules. The *Flux Sentry active* tag on a backup's page (and *Flux Sentry off*,
+  which is now shown too) and the *Unusual changes* cell of *Settings at a glance* open
+  one small dialog instead: what Sentry has learned of this backup, how closely it
+  watches (normally, closely, off), and the tripwire files. They are still in *What to
+  keep* as well.
+- *This was me* is remembered for every backup it was said of (before, only the latest):
+  Flux Sentry learns from those, and from no other flagged backup.
+- **Statuses agree, and only the serious is red.** The sidebar and *All backups* count the
+  same two things: backups that aren't protected, and protected ones with something worth
+  a look ("2 not protected · 3 to look at"); they used to give different numbers. Red ⚠ is
+  only for what isn't protected; the rest get a quiet amber dot and say what it is (*Low
+  on space*, *Not tested lately*, *A copy failed*) instead of "Check". News in a toast
+  ("Timer updated") has an "i", not a warning sign, and toasts no longer cover an
+  editor's Save button.
+- **What each check proves.** *Maintenance* is *Checks and upkeep*: *Is every snapshot
+  whole?* (Check), *Can files come back?* (a restore test) and *Is all the stored data
+  undamaged?* (Verify every byte), quickest first.
+- Warnings, errors and notes share one look everywhere, with their actions under them.
+- System backups no longer sit locked at the foot of the sidebar: set one up with *Back up
+  the whole computer* on the New backup page, and open the ones you have with *System
+  backups…* in the + menu; once unlocked, they're listed in the sidebar.
+- Toggles you switch on and off (a webhook's events, the tag filters in Snapshots) are
+  plainly on: green, outlined and ticked; before, on and off looked almost the same.
+- **A calmer Overview.** Problems sit right under the one-sentence answer; only the
+  answer, the history, the settings at a glance and space are raised as cards, while
+  places, recent backups and the restore test are flat lists, and the checklist and
+  checks stay folded.
+- **The recovery checklist does what it asks.** Each line of *Could you recover it on
+  another computer?* has a button beside it: *Back up now*, *Keep it elsewhere…* (shows or
+  copies the password from where Flux keeps it, saves a copy of the unlock file), *Export
+  the key…* (Borg), *Test a restore now*, *Add a place…*. A meter beside its heading
+  shows how many are ready, and what's left is marked as a thing to do, not a failure.
+- **Times are easy to type.** A backup's time (and the upload limits by time of day)
+  takes `9`, `930`, `21:30`, `9:30 pm`, `noon`…; ↑ and ↓ move it by 15 minutes (Shift: an
+  hour), and a clock button lists times to pick from. It replaces the system's time field,
+  which had to be filled in part by part. *Custom times* shows the next three runs of
+  the calendar expression as you type it.
+- A backup's schedule reads "Every day at 8:00 PM" or "Every 4 hours" in its header, not
+  `*-*-* 20:00:00` or "every 4h"; "in 60 minutes" is "in 1 hour".
+- Plain words first: places are tagged *Plain folders*, *Encrypted*, *rsync folders*,
+  *Borg repository* rather than engine names; a backup's settings say which profile it is
+  on the command line (`flux backup docs`); validation messages no longer quote config
+  syntax (the command line still names the setting).
+- **The man pages say more, with examples.** Each of the 74 pages describes what its
+  command does and changes, shows examples of basic use, its exit status and related
+  pages; `flux(1)` adds the environment variables and files. `flux <command> --help` ends
+  with the same examples. Notes such as the archive kinds are no longer run together into
+  one line.
+- *Leave some things out* in a backup's settings is now **Exclude Files/Directories**.
+
+- **Faster, and lighter on memory, where a performance check found it slow** (after
+  1.1; each of these was found by reading the code at the scale of millions of files,
+  thousands of snapshots and backups on a server, and is listed with what it was):
+  - **Flux Sentry's look before a backup no longer holds the file list four times
+    over.** It kept the whole previous snapshot, a whole scan, and a copy of each in a
+    table: about 4 GB for 3 million files, before every backup. The two lists are now
+    compared as they stream by, and only what differs is kept. The look after an rsync
+    or Borg backup works the same way.
+  - **…and no longer reads an encrypted backup's file list from the backup itself.**
+    That is one read per folder: tens of seconds on a local drive, hours on a server
+    (an estimated 5 to 7 hours for 2–3 million files), before each backup. It now uses
+    the file list the last backup left in this computer's cache, as the backup itself
+    does.
+
+  - **Encrypted backups on a server: restores, mounts and browsing fetch packs, not
+    pieces.** Every piece of every file, and every folder's list, was its own
+    open-read-close on the server: three round trips each. Restoring 2 million small
+    files came to an estimated 12 hours of waiting, and a snapshot of that size took
+    about 5 hours to list before a restore, a mount or a prune could begin (prune
+    walked every snapshot that way, holding the lock). The second piece wanted from a
+    pack now brings the whole pack, once, and the rest come from memory; a single file
+    is still fetched alone.
+  - **Getting a few files back from an encrypted backup reads only the folders on the
+    way to them**, not the whole snapshot's folders (twice over, to open one file from
+    the app; four times to compare one).
+  - **Snapshot records, index files and pack headers are read in batches.** Over SFTP,
+    a batch of files is opened in one round trip and read and closed in a second,
+    instead of three or four round trips for each. Listing 3,000 snapshots took about a
+    minute, several times in every backup; the quick check of a 2 TB backup spent about
+    an hour and a half on pack headers (two reads each, now one).
+  - **Restored files are made durable once, at the end**, for each drive they went to.
+    Restores from an encrypted backup or from a server synced every file as it was
+    written: on a spinning or USB disk, hours for a million files.
+  - **A backup to an encrypted place lets go of the previous snapshot's file list** as
+    soon as it has decided what to reuse, instead of holding it (a second full list,
+    with every file's pieces) until the backup ends.
+  - `flux-vault-recover verify` reads each folder's list once, however many snapshots
+    share it. With thousands of snapshots it re-read them all for each: hours before
+    any data was checked.
+
+  - **Plain-folder and rsync backups on a server list their snapshots in a second, not
+    a minute.** Each snapshot's notes were read one after another, four round trips
+    apiece: about 44 seconds for a year of daily snapshots, several times in every
+    backup, on every visit to the Overview, and again after each snapshot a prune
+    removed. They are read in batches now.
+  - **Restoring small files from a server fetches them in batches.** One file at a
+    time, a restore waited about a round trip per file whatever the line's speed: some
+    8 hours for a million files. Files up to 256 KiB now come 32 at a time.
+  - **A mounted snapshot on a server reads ahead.** Every read of a file through the
+    mount opened and closed it on the server: three round trips for 128 KiB, about
+    1.4 MB/s on any line. A file read through is now fetched 4 MiB at a time (a read
+    from somewhere in the middle still gets just what it asked for). Restore tests of
+    such backups read the same way.
+  - **`flux check` of an rsync backup no longer keeps every snapshot's list in
+    memory.** It held them all until the end, only to count files: about half a
+    gigabyte per snapshot of 2 million files, so 15 GB for a month of dailies.
+  - **`flux check --read-data` reads each stored file once.** An unchanged file is one
+    and the same file in every snapshot of a plain-folder or rsync backup, but it was
+    read again for each: a 1 TB backup with 400 snapshots meant reading about 400 TB.
+
+  - **Searching all snapshots, and a file's history, no longer load whole file lists.**
+    For every kind of backup but plain folders on a local drive, each snapshot's list
+    was read into memory in full, one per processor core at a time: an estimated 8 GB
+    for snapshots of 2 million files on 16 cores, inside the app. The lists now stream
+    from their index files, and an index is written as the list comes, not after it was
+    all held.
+  - **Borg, in a mount:** opening a file runs `borg extract` for the whole of it, which
+    reads through the archive first; file managers and viewers open the same file
+    several times. The last 16 extracted files (up to 2 GiB) are kept for the next
+    open.
+  - **Borg, after this computer's notes are gone** (a new machine, a cleared cache):
+    the statistics of every archive were fetched with one `borg info` each before a
+    backup could start. One `borg info` now asks about all of them.
+  - **A Borg restore gives back the room it borrows as it goes.** Borg extracts into a
+    staging folder and the files are then copied into place, so a restore needed twice
+    the room of what it restored. Each staged file is now removed once it's copied.
+
+  - **The file browser no longer chokes on big folders.** A folder was sent to the page
+    whole and drawn whole: a few megabytes and a few hundred thousand page elements for
+    10,000 items (a second or more with the window frozen), and likely the end of the
+    page for 100,000. It was fetched again each time the window came back to the front
+    and re-sorted with every letter typed in the filter. A folder now comes filtered
+    and in order, at most 2,000 items at a time, with a line saying how many there are
+    and that the filter finds the rest. *Only deleted* and *Restore N deleted items*
+    still count and cover the whole folder.
+  - **The tray icon is set when a backup starts and ends**, not five times a second for
+    as long as one runs (each time wrote a new image file and had the panel load it).
+  - **A long snapshot list draws without stalling.** Every date on the page built a new
+    formatter; with a couple of thousand snapshots that was most of a second each time
+    the list was drawn, which is whenever any backup finishes. Formatters are made once.
+  - **The app lets go of the snapshots you browsed** ten minutes after the last look.
+    It kept the file lists of the last four in memory for as long as it ran: around a
+    gigabyte after looking into four snapshots of a million files, in the tray for weeks.
+
+  - **Flux Sentry no longer costs a second pass over your files.** Its look before a
+    backup walked every folder, and the backup then walked them all again; with changes
+    detected by checksum, every file was *read* twice. The look now makes the backup's
+    own scan and hands it on, so the folders are walked (and the files read) once.
+    Measured on 60,000 files (1.1 GB, in memory, 16 cores), a backup after one edited
+    file: 0.20 s before, 0.15 s now, 0.15 s with Flux Sentry off; with checksums
+    0.66 s before, 0.40 s now, 0.35–0.40 s with it off. What Sentry adds is now the
+    comparing of two lists. (On a real disk the walk and the reading cost far more
+    than here, and it was all of that, twice.)
+
+### Fixed
+- The demo (the app in a browser) showed an empty Overview late in the evening during
+  the week after the clocks go back: its 30-day history named that 25-hour day twice.
+- **A scheduled backup that can't get its password says so before it fails.** With the
+  password set to *Ask every time*, nobody is there to type it when a backup starts on its
+  own, so those backups failed. The app now warns next to *When* and under *How backups
+  are stored*, with **Keep it in the keyring** (a key file for system backups): type the
+  password once, Flux checks it opens the backups and keeps it. `flux profile validate`
+  warns too. The old hint said such backups "wait for you"; they fail.
+- A password typed to set up a new key file is written only after it has opened (or
+  created) the backups, so a mistyped one is never kept.
+
+- **Keeping free space no longer removes snapshots it shouldn't.** A bug check after
+  1.1 found that *Keep this much free* (`min_free_space`, `min_free_inodes_percent`) could
+  take far more than it should:
+  - It ignored the safety floor: on a drive where deleting couldn't reach the minimum,
+    every snapshot but the newest, pinned and named ones went, whatever `safety_floor`
+    said. It now never takes the newest `safety_floor` complete snapshots or the
+    `keep_last` newest.
+  - A Mirror on a server removed old snapshots to make room for a backup even with
+    retention switched off (`enabled = false`). It no longer does, as on a local drive.
+  - With Flux Sentry on, the snapshot before the newest is the one to go back to after an
+    attack. A backup written by rsync or Borg that filled the drive could remove it for
+    space before Sentry had looked, and then no warning was raised. It stays now.
+  - A Borg backup below its minimum deleted every archive it was allowed to: Borg frees
+    nothing until `borg compact` has run, and Flux only ran it at the end. It now compacts
+    after each archive it removes for space and stops as soon as there is enough.
+  - **Free up space** in the app removed snapshots for space without asking, then said
+    *Nothing to remove*. It now asks first, and says how many went and why.
+    `flux prune --dry-run` says when older snapshots would also go for space.
+- **A `[retention]` table with no keep rule no longer means "keep only the newest".** A
+  hand-written table with just `keep_history_days` or `min_free_space` turned every
+  `keep_` rule to 0, without a word. Such a table now keeps the default rules, the same
+  as no table at all. A table that sets any `keep_` rule means what it says, as before.
+  Profiles written by Flux always had every rule and are read as they were.
+
+- **A prune cut short can no longer damage a Vault later.** A prune that was interrupted
+  after writing its new index, before removing every old index file (a dropped
+  connection, a power cut), left one behind. It was ignored until the *next* prune, and
+  then counted again, naming stored data that was gone: later backups could skip data as
+  "already stored" and make snapshots that couldn't be restored. A prune now takes such
+  leftovers along. A Vault this has already happened to shows it in `flux check`
+  ("pack … is missing").
+- **An rsync backup continued after an interruption is never called unchanged.** If only
+  the contents of files had changed, the run that continued an interrupted one sent
+  nothing new, was taken for "nothing changed", and the files already brought over were
+  deleted: no snapshot held the changes until the run after. It now makes the snapshot.
+- **A folder under `/mnt`, `/media` or `/run/media` that isn't on a drive of its own is
+  backed up.** Any such folder on the system disk (`/mnt/data` on a server, a folder on a
+  drive mounted at `/mnt` itself, a link to a folder elsewhere) was taken for an
+  unplugged drive and skipped, every time, with the backup still reported as fine. Only
+  an *empty* folder there (what an unplugged drive leaves), or one that's gone, counts as
+  a drive that isn't connected, as the guide always said.
+- **Copies of plain-folder and rsync backups are written out before they count.** A copy
+  to another place (*Copy the main backup*) became a snapshot there before its files
+  were safely on the drive, so a drive unplugged right after could hold a snapshot with
+  an empty `meta.json` or manifest; later runs took it for present and never repaired
+  it. Copies are now synced to the drive first, and a copy that lacks those files is
+  made again.
+
+- **With the main backup out of reach, Flux Sentry looks before the other places are
+  written.** When the main backup's drive was away (or its server down), Sentry had no
+  snapshot to compare the files with, the main backup failed, and the other places were
+  backed up without any look: an attack's files went straight to the copy kept
+  elsewhere. Each other place is now compared with its own newest snapshot first (right
+  after writing, for rsync and Borg); unusual changes stop it and every place after it,
+  and put the backup on hold.
+- **A restore into another folder no longer lifts Flux Sentry's hold.** *Restore
+  everything…* settled the alarm after any restore that finished without errors, also one
+  into another folder, where the files on the computer are still as the attack left
+  them. Only a restore back to where it was settles it now; after one into another
+  folder the app says backups stay on hold.
+- **The restore dialog says what will happen to files that differ.** With *Keep my files
+  when restoring over them* off for a backup (also what a Back In Time import sets when
+  it was off there), the dialog still said differing files are "kept, renamed" and
+  showed a plain *Restore* button, then replaced them. It now goes by what the restore
+  will do: the text says they're replaced and why, the button is the red *Restore and
+  replace N files*, and it waits for the preview. `flux restore` asks the same honest
+  question.
+- **A system backup's other places open in the app.** Their ids lost the `system:` mark
+  on the way to the page, so browsing or restoring from a system backup's second place
+  failed with "profile not found", or, with a backup of your own of the same name and
+  place, showed and acted on that one instead.
+- **A hook that leaves something running no longer hangs the backup.** A *before* hook
+  such as `ssh -f -N -L …` or `some-tool &` finishes at once, but what it started keeps
+  the hook's output open; Flux waited for that output to end, past the hook timeout, with
+  the backup's lock held, so scheduled backups stopped. A hook is now done when its
+  command is (its output is waited for two seconds more at most).
+- **`flux-vault-recover` no longer refuses everything over one damaged snapshot record.**
+  One unreadable record made `snapshots`, `files`, `restore` and `verify` fail for every
+  snapshot. The record is now said and left out, the others list and restore, and
+  `snapshots` and `verify` exit with 3.
+- **Importing from Back In Time keeps its one snapshot a year.** Back In Time's smart
+  remove always keeps one snapshot per year, for every year. The imported backup had no
+  yearly rule, so everything older than the monthly ones would have been removed. It now
+  gets `keep_yearly = 99`.
+- A plain-folder backup with a second plain-folder place showed more than 100% progress
+  for the second one (and stopped with an error in development builds). An error inside
+  a running backup that should never happen now ends the run instead of leaving it
+  waiting for ever.
+
+- **Flux Sentry, nine smaller faults** (a second bug check, of Sentry alone):
+  - *rsync and Borg:* after an alarm was dealt with and the files restored, the next,
+    clean backup was compared with the damaged snapshot, flagged as a second attack,
+    and the damaged snapshot pinned as "the one from before". It is now compared with
+    the newest snapshot that isn't itself marked unusual.
+  - A folder left out of a backup because its drive is away (plain folders on a server,
+    rsync, Borg) looked like a mass deletion and put the backup on hold. It isn't
+    counted as deleted.
+  - Sentry learned from the engine's statistics, which count a changed permission or
+    owner as a change, while its look counts only contents: two `chmod -R` runs made any
+    later amount of change look normal. It now records what its own look counted and
+    learns from that. This also gives Borg backups their deletions, which Borg's
+    statistics never have, so a regular clear-out is learned after *This was me*.
+  - It read "the last 60 runs", not the last 60 that made a snapshot: sixty failed or
+    unchanged runs (a drive away for a few days of an hourly backup) sent it back to the
+    fixed limits.
+  - With Flux Sentry turned off, an alarm from before still showed *Backups are on hold*
+    on the Overview and in `flux sentry --json`, and held the backup again when Sentry
+    was turned back on, however many backups had been made since. An alarm holds a
+    backup only until a backup is made after it.
+  - Tripwires on a drive that was away when an alarm was settled, or when the setting
+    was turned off, were forgotten: never watched again, and left behind. They are
+    remembered until the drive is back.
+  - Of two backups of the same folder, only the first got tripwires. They share them
+    now: either can set them again without stopping the other, and neither removes one
+    the other still watches. A tripwire put back by a restore of an older snapshot is
+    no longer taken for a changed one.
+  - Tripwires in a folder taken out of a backup stayed there, and stayed counted. They
+    are removed at the next backup.
+  - `flux profile delete` left the tripwire files in your folders (the app's delete
+    removed them). Both now remove them and close an alarm still open, so a backup made
+    later under the same name doesn't start out on hold.
+
+- **Flux Sentry, nine small faults** (the same check):
+  - The reminder that a backup is on hold, meant for once a day, came with every
+    scheduled attempt until an alarm had been settled once.
+  - *It's dealt with* promises that nothing is learned, but the backup made right after
+    it (which isn't looked at) was. It isn't any more.
+  - *This was me* said the snapshot that was kept "is no longer pinned" when it still
+    was: with the backups out of reach, or when that snapshot had a note of yours. The
+    pin Flux put on is now taken off (your note stays), and when it can't be, that is
+    what's said.
+  - A snapshot that couldn't be pinned (the drive read-only, a lock held) was reported
+    as "kept for sure (pinned)". The log, the notification and the Overview now say it
+    couldn't be, and to pin it yourself.
+  - The warning said the snapshot from before "is kept (pinned)" when there was none
+    (a first backup, or the backups out of reach).
+  - *Files involved* of a stopped backup read "in snapshot before:2026-…" (the alarm's
+    name), and files without an extension were listed as ".(none)".
+  - "It would warn at about…" could name a share that never warns: 100% for a backup
+    that changes much and widely, 5% for one with fewer files than a warning needs
+    changed. It now says such a backup is warned about by the marks of ransomware only.
+  - The *looks encrypted* sign couldn't see files under about 400 bytes (a short sample
+    never reaches the entropy a long one does), and they counted against it. The bar
+    now follows the length of what was read.
+  - A system backup with tripwire files turned on said they were planted, or would be
+    by the next backup. They aren't planted for system backups, and it says so.
+
+- Started while a copy is already running (hidden in the tray, say), the app asks that
+  copy to show its window and ends: it now says so in the terminal instead of ending
+  without a word.
+
+### Security
+- **A forged snapshot can no longer make a restore write outside its destination.**
+  Found by the bug check after 1.1, and the most serious thing it found. Someone able to
+  write to an unencrypted backup (a plain-folder one on a shared drive or server) could
+  list a symbolic link in its manifest and then files "below" it. A restore made the link
+  and wrote those files to wherever it pointed: for a system backup restored as root,
+  anywhere. Entries listed below a link are now skipped and reported. A link planted
+  among a backup's stored files is no longer followed when they are read either (it
+  could make a restore as root copy a file only root may read into the restored folder).
+  The threat model said both were so; now they are.
+- **A system backup saved as an archive is readable by root only.** Exporting a snapshot
+  of a system backup wrote the archive with ordinary permissions, so `/etc/shadow` and
+  root's keys in it could be read by every user who could reach the folder. The archive
+  and its checksum file are also made new now, never written through a link someone
+  left there under their name, and the staged files are read back without following
+  links. Your own exports keep the usual permissions. (To use a system backup's archive
+  as yourself, restore to a folder instead, or copy it with `sudo`.)
+- **The recovery guide's "restore everything" no longer changes `/`.** For rsync
+  backups, `FLUX-RECOVERY.txt` said `rsync … latest/data/ /` and to put `sudo` in front.
+  rsync then gave `/` the permissions and owner of the backup's private data folder,
+  locking every other account and service out of the system. The guide now names the
+  backup's top folders instead. Guides already on a drive are rewritten by the next
+  backup; if you ran the old command, `sudo chmod 755 / && sudo chown root:root /` puts
+  it right.
+- **Settings read from a drive can't put commands into scripts.** A profile's name and
+  exclusions went as they were into the recovery script, the exported rsync, Borg and
+  restic scripts and the borgmatic settings. With a line break in them (in a
+  `flux-profile.toml` on a drive anyone can write to, or an imported profile), the rest
+  became a command in the script. Control characters in them are now replaced, a
+  here-document's end marker is never a line of its contents, and a name with a line
+  break doesn't validate. The restic script's repository path is quoted (a folder with a
+  space in its name used to break it).
+- Repair data is computed from what's stored, after encryption, and says nothing the
+  stored files don't. A key slot's repair data is removed with its password. With a Flux
+  older than 1.1 on the same Vault: remove passwords with 1.1 or later (an older one
+  leaves the removed slot's repair data until space is next freed by a newer one).
+- **Restore tests leave nothing behind.** They used to restore their sample into a
+  temporary folder, so an encrypted backup's files sat there decrypted while it ran (and
+  after a crash). Now each file is read back as a restore reads it and checked as it
+  streams, a piece at a time, each piece wiped once checked: nothing is written anywhere,
+  and memory use is the same for ten files as for every file. Borg's files stream from
+  `borg extract --stdout`. A folder an earlier test left behind is removed. Restore tests
+  no longer check permissions and times, which needed the files restored.
+- `flux mount` of a Vault wipes each decrypted piece of a file from memory once it's done
+  with it (it shares the reader restore tests use).
+- The recovery checklist's new actions (show or copy the password, export the Borg key,
+  copy the unlock file) are for your own backups only: a system backup's password and
+  unlock file stay readable by root alone.
+
 ## [1.0.0] - 2026-11-09
 
 The 1.0 release. Your backups can be recovered anywhere: on a new computer from the
@@ -669,6 +1146,7 @@ compressed, encrypted) engines; local drives and SSH servers; systemd schedules
 hooks; the `flux` command line; the desktop app; system backups through a polkit helper;
 read-only mounts of snapshots (`flux mount`); man pages and packages.
 
+[1.1.0]: https://github.com/neuralpunk/flux-backup/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/neuralpunk/flux-backup/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/neuralpunk/flux-backup/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/neuralpunk/flux-backup/compare/v0.1.0...v0.2.0

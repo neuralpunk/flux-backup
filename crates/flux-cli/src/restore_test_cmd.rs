@@ -1,12 +1,13 @@
-//! `flux restore-test`: restore a sample of the newest snapshot into a temporary folder
-//! and check it.
+//! `flux restore-test`: read a sample of the newest snapshot back and check it as it
+//! streams (nothing is written anywhere).
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Args;
 
-use flux_core::profile::TestMode;
+use flux_core::Percent;
+use flux_core::profile::{CERTAINTY_RANGE, DAMAGE_RANGE, TestMode};
 use flux_core::progress::{Event, Progress};
 use flux_runner::restore_test::{self, TestResult};
 
@@ -16,13 +17,23 @@ use crate::{Ctx, output};
 #[derive(Args)]
 #[command(
     after_help = "Without a choice of files, the profile's own settings (`[restore_test]`, by default 10 random files).\n\
+    --damage and --certainty size the sample by what it must prove: `--damage 1%` tests as many random files as it takes \
+    to catch damage to 1% of the files or more, 99 times in 100 (459 files, almost whatever the size of the backup).\n\
     Exit status: 0 passed, 4 passed with notes, 1 failed."
 )]
 pub struct RestoreTestArgs {
     pub profile: String,
     /// Test this many random files.
-    #[arg(long, conflicts_with_all = ["percent", "full", "rolling"])]
+    #[arg(long, conflicts_with_all = ["percent", "full", "rolling", "damage", "certainty"])]
     pub files: Option<u32>,
+    /// Test enough random files to catch damage to this share of the files or more
+    /// (0.01% to 50%; 1% unless the profile says otherwise).
+    #[arg(long, value_name = "PERCENT", conflicts_with_all = ["percent", "full", "rolling"])]
+    pub damage: Option<Percent>,
+    /// With --damage: how sure the test must be of catching it (50% to 99.99%; 99%
+    /// unless the profile says otherwise).
+    #[arg(long, value_name = "PERCENT", conflicts_with_all = ["percent", "full", "rolling"])]
+    pub certainty: Option<Percent>,
     /// Test random files making up this percentage of the snapshot.
     #[arg(long, conflicts_with_all = ["full", "rolling"])]
     pub percent: Option<u8>,
@@ -76,6 +87,22 @@ pub fn run(ctx: &Ctx, args: RestoreTestArgs) -> anyhow::Result<ExitCode> {
     if let Some(n) = args.files {
         t.mode = TestMode::RandomFiles;
         t.files = n;
+    } else if args.damage.is_some() || args.certainty.is_some() {
+        t.mode = TestMode::Confidence;
+        if let Some(d) = args.damage {
+            t.damage = d;
+        }
+        if let Some(c) = args.certainty {
+            t.certainty = c;
+        }
+        anyhow::ensure!(
+            (DAMAGE_RANGE.0..=DAMAGE_RANGE.1).contains(&t.damage.millionths()),
+            "--damage takes 0.01% to 50%"
+        );
+        anyhow::ensure!(
+            (CERTAINTY_RANGE.0..=CERTAINTY_RANGE.1).contains(&t.certainty.millionths()),
+            "--certainty takes 50% to 99.99% (to be certain, use --full)"
+        );
     } else if let Some(pc) = args.percent {
         t.mode = TestMode::Percent;
         t.percent = pc.clamp(1, 100);
@@ -108,9 +135,13 @@ pub fn run(ctx: &Ctx, args: RestoreTestArgs) -> anyhow::Result<ExitCode> {
         };
         println!(
             "{mark} {} (snapshot {})",
-            restore_test::summary(&r),
+            restore_test::headline(&r),
             r.snapshot
         );
+        if let Some(g) = &r.guarantee {
+            let words = restore_test::guarantee_words(g);
+            println!("  I{}.", &words[1..]);
+        }
         for pr in &r.problems {
             println!(
                 "  {}: {}{}",

@@ -15,7 +15,10 @@ pub mod check;
 pub mod crypto;
 pub mod format;
 pub mod gc;
+pub mod gf256;
 pub mod pack;
+pub mod parity;
+pub mod protect;
 pub mod replicate;
 pub mod repo;
 
@@ -119,8 +122,34 @@ pub struct VaultSource<'a> {
 
 impl<'a> VaultSource<'a> {
     pub fn new(repo: &'a VaultRepo, snapshot_id: &str) -> Result<Self, VaultError> {
+        Self::for_paths(repo, snapshot_id, &[])
+    }
+
+    /// The snapshot as a source for restoring `paths` (absolute, as a restore names
+    /// them; none: everything): only they, what is below them and the folders on the
+    /// way are read from the Vault.
+    pub fn for_paths(
+        repo: &'a VaultRepo,
+        snapshot_id: &str,
+        paths: &[std::path::PathBuf],
+    ) -> Result<Self, VaultError> {
+        use std::os::unix::ffi::OsStrExt;
         let record = repo.read_record(snapshot_id)?;
-        let entries = repo.flatten(&record)?;
+        let under: Vec<Vec<u8>> = paths
+            .iter()
+            .map(|p| {
+                let b = p.as_os_str().as_bytes();
+                let b = b.strip_prefix(b"/").unwrap_or(b);
+                b.strip_suffix(b"/").unwrap_or(b).to_vec()
+            })
+            .collect();
+        // (A request for `/` is a request for everything.)
+        let under = if under.iter().any(Vec::is_empty) {
+            Vec::new()
+        } else {
+            under
+        };
+        let entries = repo.flatten_under(&record, &under)?;
         let content = entries
             .iter()
             .enumerate()
@@ -165,8 +194,7 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
             let loc = index.get(id).ok_or_else(|| {
                 io::Error::other(format!("data blob {} is missing", crypto::hex_id(id)))
             })?;
-            let data = pack::read_blob(self.repo.backend(), &self.repo.crypto, loc)
-                .map_err(io::Error::other)?;
+            let data = self.repo.read_blob(loc).map_err(io::Error::other)?;
             let mut rest = &data[..];
             while !rest.is_empty() {
                 if run.1 == 0 {
@@ -194,9 +222,24 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
                 .bytes_done
                 .fetch_add(holes, std::sync::atomic::Ordering::Relaxed);
         }
-        out.sync_all()?;
+        // (Made durable by the restore, once at its end: not here, file by file.)
         Ok(n + holes)
     }
+}
+
+/// The entry at `path` (no leading slash) of a Vault snapshot, if there is one: read by
+/// walking down to it, not by listing the snapshot.
+pub fn entry_at(
+    repo: &VaultRepo,
+    snapshot_id: &str,
+    path: &[u8],
+) -> Result<Option<Entry>, VaultError> {
+    let record = repo.read_record(snapshot_id)?;
+    Ok(repo
+        .flatten_under(&record, &[path.to_vec()])?
+        .into_iter()
+        .map(|(e, _)| e)
+        .find(|e| e.path == path))
 }
 
 /// The entries of a Vault snapshot, sorted by path (for diff, find and history).

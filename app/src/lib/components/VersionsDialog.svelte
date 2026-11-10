@@ -6,6 +6,7 @@
   import { bytes, dateTime, dayLabel } from "../format";
   import type { FileDiff, SnapshotMeta, Version } from "../types";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Modal from "./Modal.svelte";
 
   let { profile, path, onrestore, onclose }: { profile: string; path: string; onrestore: (snapshot: SnapshotMeta) => void; onclose: () => void } = $props();
@@ -108,7 +109,7 @@
       </label>
     </div>
     {#if diffError}
-      <div class="flex items-center gap-3 rounded-card bg-danger/10 p-4 text-sm text-danger"><Icon name="alert" /> {diffError}</div>
+      <Callout tone="bad">{diffError}</Callout>
     {:else if !diff}
       <div class="h-64 rounded-card bg-surface-2 motion-safe:animate-pulse"></div>
     {:else}
@@ -148,7 +149,7 @@
       {/if}
     {/if}
   {:else if error}
-    <div class="flex items-center gap-3 rounded-card bg-danger/10 p-4 text-sm text-danger"><Icon name="alert" /> {error}</div>
+    <Callout tone="bad">{error}</Callout>
   {:else if !versions}
     <div class="space-y-2">
       {#each [0, 1, 2] as i (i)}<div class="h-16 rounded-card bg-surface-2 motion-safe:animate-pulse"></div>{/each}

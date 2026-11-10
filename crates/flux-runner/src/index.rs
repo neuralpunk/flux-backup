@@ -11,7 +11,6 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
 use flux_core::{Paths, ProfileId};
-use flux_fs::entry::Entry;
 use flux_fs::snapshot::SnapshotMeta;
 use flux_mirror::manifest::{ManifestReader, ManifestWriter};
 
@@ -51,36 +50,71 @@ pub fn entries<'a>(
     }
     let dir = dir(paths, id);
     let path = dir.join(file_name(snap));
-    if path.exists() {
-        match ManifestReader::read_all(&path) {
-            Ok(v) => return Ok(Box::new(v.into_iter().map(Ok))),
-            Err(e) => {
-                tracing::debug!("dropping damaged index {}: {e}", path.display());
-                let _ = std::fs::remove_file(&path);
+    // The index streams from its file: a search of every snapshot runs on every core,
+    // and a whole file list held by each (as this used to give) is gigabytes at once.
+    if !path.exists() {
+        match write(&dir, &path, repo.entries(snap)?) {
+            Ok(()) => {}
+            // What couldn't be read from the backup is the caller's to know.
+            Err(Indexing::Repo(e)) => return Err(e),
+            // No room for an index, say: the backup's own list, as it comes.
+            Err(Indexing::Io(e)) => {
+                tracing::debug!("not indexing {}: {e}", snap.id);
+                return repo.entries(snap);
             }
         }
     }
-    let all: Vec<Entry> = repo.entries(snap)?.collect::<Result<_, _>>()?;
-    if let Err(e) = write(&dir, &path, &all) {
-        tracing::debug!("not indexing {}: {e}", snap.id);
+    match ManifestReader::open(&path) {
+        Ok(r) => {
+            let gone = path.clone();
+            Ok(Box::new(r.map(move |e| {
+                e.map_err(|e| {
+                    // Damaged: made anew the next time it's wanted.
+                    tracing::debug!("dropping damaged index {}: {e}", gone.display());
+                    let _ = std::fs::remove_file(&gone);
+                    RepoError::Mirror(e.into())
+                })
+            })))
+        }
+        Err(e) => {
+            tracing::debug!("dropping damaged index {}: {e}", path.display());
+            let _ = std::fs::remove_file(&path);
+            repo.entries(snap)
+        }
     }
-    Ok(Box::new(all.into_iter().map(Ok)))
 }
 
-fn write(dir: &std::path::Path, path: &std::path::Path, all: &[Entry]) -> std::io::Result<()> {
+enum Indexing {
+    Repo(RepoError),
+    Io(std::io::Error),
+}
+
+/// Write `entries` to the index file `path` as they come (none of them kept).
+fn write(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    entries: Entries<'_>,
+) -> Result<(), Indexing> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(dir)?;
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        .create(dir)
+        .map_err(Indexing::Io)?;
+    let tmp = path.with_extension(format!(
+        "tmp{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let result = (|| {
-        let mut w = ManifestWriter::create(&tmp).map_err(std::io::Error::other)?;
-        for e in all {
-            w.write(e).map_err(std::io::Error::other)?;
+        let io = |e| Indexing::Io(std::io::Error::other(e));
+        let mut w = ManifestWriter::create(&tmp).map_err(io)?;
+        for e in entries {
+            w.write(&e.map_err(Indexing::Repo)?).map_err(io)?;
         }
-        w.finish().map_err(std::io::Error::other)?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        std::fs::rename(&tmp, path)
+        w.finish().map_err(io)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(Indexing::Io)?;
+        std::fs::rename(&tmp, path).map_err(Indexing::Io)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);

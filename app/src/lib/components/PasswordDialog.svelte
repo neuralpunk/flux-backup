@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Callout from "./Callout.svelte";
   import { api } from "../api";
   import { app } from "../state.svelte";
   import { ApiError, isSystem } from "../types";
@@ -81,7 +82,7 @@
         </span>
       </label>
     {/if}
-    {#if error}<div class="rounded-lg bg-danger/10 p-3 text-sm text-danger">{error}</div>{/if}
+    {#if error}<Callout tone="bad">{error}</Callout>{/if}
     <div class="flex justify-end gap-2">
       <button type="button" class="btn" onclick={onclose}>Cancel</button>
       <button class="btn btn-primary" disabled={busy || !password || (mode === "create" && password !== confirm)}>

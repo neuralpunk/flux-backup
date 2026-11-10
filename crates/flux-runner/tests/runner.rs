@@ -618,6 +618,64 @@ fn restore_tests_find_damage() {
         rep.stopped_early && rep.result == TestResult::Warning && rep.tested < 20,
         "{rep:?}"
     );
+    assert_eq!(rep.guarantee, None, "cut short: nothing is claimed");
+
+    // Sized by what it must prove: damage to 20% of the 21 files (5 or more), 99% sure.
+    let sure = RestoreTest {
+        mode: TestMode::Confidence,
+        damage: "20%".parse().unwrap(),
+        ..RestoreTest::default()
+    };
+    let rep = restore_test::run(
+        &e.paths,
+        &e.id,
+        &e.profile,
+        &sure,
+        &repo,
+        &flux_core::progress::Progress::new(),
+        &flux_core::progress::silent,
+    );
+    let n = flux_runner::sample::sample_size(21, sure.damage, sure.certainty);
+    assert!(n < 21 && flux_runner::sample::miss_probability(21, 5, n) <= 0.01);
+    assert_eq!((rep.result, rep.tested), (TestResult::Passed, n), "{rep:?}");
+    let g = rep.guarantee.expect("a passing sample says what it proves");
+    assert_eq!((g.files, g.damaged), (21, 5));
+    assert!(
+        restore_test::summary(&rep).ends_with(
+            "if 20% or more of its 21 files were damaged, this test would have found it (99% certain)"
+        ),
+        "{}",
+        restore_test::summary(&rep)
+    );
+    // And it does find it: five damaged files, twenty tests, no miss expected (each
+    // misses with a chance under 1%; all twenty passing by luck: under 10^-40).
+    for i in 10..15 {
+        let f = mirror.data_dir(&snap.id).join(
+            e.root
+                .join(format!("src/file{i}.txt"))
+                .strip_prefix("/")
+                .unwrap(),
+        );
+        let len = fs::metadata(&f).unwrap().len() as usize;
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&f, "X".repeat(len)).unwrap();
+    }
+    let caught = (0..20)
+        .filter(|_| {
+            restore_test::run(
+                &e.paths,
+                &e.id,
+                &e.profile,
+                &sure,
+                &repo,
+                &flux_core::progress::Progress::new(),
+                &flux_core::progress::silent,
+            )
+            .result
+                == TestResult::Failed
+        })
+        .count();
+    assert!(caught >= 19, "caught {caught} of 20");
 
     // Not due again until the interval has passed.
     e.profile.restore_test.every = TestEvery::Week;
@@ -684,9 +742,157 @@ fn restore_tests_of_a_damaged_vault_fail() {
     );
 }
 
-/// Simulated ransomware: files renamed to .locked and ransom notes. The backup is flagged,
-/// its snapshot tagged, the one before pinned (with a note), pruning holds off; "This was
-/// me" dismisses it.
+/// Every file under `dir` (paths relative to it), to see what a step wrote.
+fn files_under(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    fn walk(
+        base: &std::path::Path,
+        d: &std::path::Path,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        for e in fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                walk(base, &p, out);
+            } else {
+                out.insert(p.strip_prefix(base).unwrap().display().to_string());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A restore test leaves nothing behind (1.1): the files are read back from an encrypted
+/// Vault and checked as they stream, never restored anywhere, so the only file it writes
+/// is its own report. A file bigger than one piece is checked whole, and a temporary
+/// folder a 1.0 restore test left behind (plain copies of backed-up files) is removed.
+#[test]
+fn restore_tests_leave_nothing_behind() {
+    use flux_core::profile::{ChangeDetection, RestoreTest, TestMode};
+    use flux_runner::restore_test::{self, TestResult};
+    let mut e = env();
+    let big: Vec<u8> = (0..3_500_000u32).map(|i| (i * 7 % 253) as u8).collect();
+    fs::write(e.root.join("src/big.bin"), &big).unwrap();
+    fs::write(e.root.join("src/secret.txt"), "the plans").unwrap();
+    let pw = e.root.join("pw");
+    fs::write(&pw, "correct horse\n").unwrap();
+    e.profile.engine = flux_core::Engine::Vault;
+    e.profile.options.change_detection = ChangeDetection::Checksum;
+    e.profile.vault = Some(flux_core::profile::VaultOptions {
+        password_source: flux_core::profile::PasswordSource::File { path: pw },
+        ..Default::default()
+    });
+    assert_eq!(e.run().record.status, RunStatus::Completed);
+    let left = e.paths.cache_dir.join("restore-tests/t-1-2");
+    fs::create_dir_all(&left).unwrap();
+    fs::write(left.join("secret.txt"), "the plans").unwrap();
+
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    repo.snapshots().unwrap();
+    let before = files_under(&e.root);
+    let full = RestoreTest {
+        mode: TestMode::Full,
+        compare_with_source: true,
+        ..RestoreTest::default()
+    };
+    let rep = restore_test::run(
+        &e.paths,
+        &e.id,
+        &e.profile,
+        &full,
+        &repo,
+        &Progress::new(),
+        &silent,
+    );
+    assert_eq!(rep.result, TestResult::Passed, "{rep:?}");
+    assert_eq!(rep.tested, 3, "f, big.bin and secret.txt: {rep:?}");
+    assert_eq!(rep.bytes, 3_500_000 + 9 + 4);
+    let after = files_under(&e.root);
+    let written: Vec<_> = after.difference(&before).collect();
+    let removed: Vec<_> = before.difference(&after).collect();
+    assert_eq!(
+        written,
+        ["home/state/restore-tests/t.json"],
+        "only the report"
+    );
+    assert_eq!(
+        removed,
+        ["home/cache/restore-tests/t-1-2/secret.txt"],
+        "and the folder a 1.0 test left behind is gone"
+    );
+    assert!(!e.paths.cache_dir.join("restore-tests").exists());
+
+    // Damage found as before: a byte changed in the source since is only a note…
+    fs::write(e.root.join("src/secret.txt"), "the PLANS").unwrap();
+    let rep = restore_test::run(
+        &e.paths,
+        &e.id,
+        &e.profile,
+        &full,
+        &repo,
+        &Progress::new(),
+        &silent,
+    );
+    assert_eq!(rep.result, TestResult::Warning, "{rep:?}");
+    // …and a cancelled test stops without counting the file it was in.
+    let p = Progress::new();
+    p.cancel();
+    let rep = restore_test::run(&e.paths, &e.id, &e.profile, &full, &repo, &p, &silent);
+    assert!(rep.stopped_early && rep.tested == 0, "{rep:?}");
+}
+
+/// Borg's files stream out of `borg extract --stdout`: no temporary copy (with the real
+/// borg, when it's installed).
+#[test]
+fn borg_restore_tests_stream() {
+    use flux_core::profile::{RestoreTest, TestMode};
+    use flux_runner::restore_test::{self, TestResult};
+    let has_borg = std::process::Command::new("borg")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).starts_with("borg 1."));
+    if !has_borg {
+        eprintln!("skipped: no borg 1.x");
+        return;
+    }
+    let mut e = env();
+    fs::write(e.root.join("src/a.txt"), "alpha").unwrap();
+    fs::write(e.root.join("src/b.bin"), vec![7u8; 1_500_000]).unwrap();
+    e.profile.engine = flux_core::Engine::Borg;
+    e.profile.borg = Some(flux_core::profile::BorgOptions {
+        encryption: flux_core::profile::BorgEncryption::None,
+        ..Default::default()
+    });
+    assert_eq!(e.run().record.status, RunStatus::Completed);
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    // The archive's file listing is cached as browsing caches it (names, no contents).
+    let snap = repo.snapshots().unwrap().pop().unwrap();
+    assert!(repo.entries(&snap).unwrap().count() >= 3);
+    let before = files_under(&e.root.join("home"));
+    let full = RestoreTest {
+        mode: TestMode::Full,
+        ..RestoreTest::default()
+    };
+    let rep = restore_test::run(
+        &e.paths,
+        &e.id,
+        &e.profile,
+        &full,
+        &repo,
+        &Progress::new(),
+        &silent,
+    );
+    assert_eq!(rep.result, TestResult::Passed, "{rep:?}");
+    assert_eq!((rep.tested, rep.bytes), (3, 4 + 5 + 1_500_000));
+    let after = files_under(&e.root.join("home"));
+    let written: Vec<_> = after.difference(&before).collect();
+    assert_eq!(written, ["state/restore-tests/t.json"], "only the report");
+}
+
+/// Simulated ransomware: files renamed to .locked and ransom notes. Flux Sentry sees
+/// them in the files before the backup is written: it isn't made, the newest snapshot is
+/// pinned (with a note), and backups are on hold until it's settled.
 #[test]
 fn unusual_changes_are_flagged() {
     let mut e = env();
@@ -721,6 +927,7 @@ fn unusual_changes_are_flagged() {
     fs::write(e.root.join("src/README_RESTORE_FILES.txt"), "pay").unwrap();
     let r = e.run();
     let u = r.record.unusual.clone().expect("flagged");
+    let flagged = r.record.clone();
     assert!(
         u.signals
             .iter()
@@ -728,9 +935,19 @@ fn unusual_changes_are_flagged() {
         "{:?}",
         u.signals
     );
+    // Stopped before anything was written: no second snapshot, nothing of the attack
+    // in the backups.
+    assert!(u.stopped && u.snapshot.starts_with("before:"), "{u:?}");
+    assert!(
+        matches!(&r.outcome, Err(flux_runner::RunError::Held(why)) if why.starts_with("not backed up")),
+        "{:?}",
+        r.outcome
+    );
+    assert_eq!(r.record.status, RunStatus::Skipped);
     let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
     let snaps = repo.snapshots().unwrap();
-    assert_eq!(snaps.len(), 2);
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(u.before.as_deref(), Some(snaps[0].id.as_str()));
     assert!(snaps[0].pinned, "the snapshot before is kept");
     assert!(
         snaps[0]
@@ -739,26 +956,219 @@ fn unusual_changes_are_flagged() {
             .unwrap()
             .starts_with(flux_runner::AUTO_PIN_NOTE)
     );
-    assert_eq!(snaps[1].tags, [flux_runner::UNUSUAL_TAG]);
 
-    // The next backup removes nothing (keep_last = 1 would remove the middle one).
+    // On hold: nothing more is backed up, by hand or by schedule, until it's settled.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     fs::write(docs.join("letter59.odt"), "edited").unwrap();
     let r = e.run();
-    assert!(r.record.unusual.is_none());
-    let events = runlog::run_events(&e.paths, &e.id, &r.record.run_id);
-    assert!(events.iter().any(|ev| matches!(&ev.event, flux_core::progress::Event::Info { message } if message.contains("found unusual changes"))), "{events:?}");
-    assert_eq!(repo.snapshots().unwrap().len(), 3);
+    assert!(
+        matches!(&r.outcome, Err(flux_runner::RunError::Held(why)) if why.contains("on hold") && why.contains("renamed to end in .locked")),
+        "{:?}",
+        r.outcome
+    );
+    assert_eq!(r.record.status, RunStatus::Skipped);
+    assert_eq!(repo.snapshots().unwrap().len(), 1, "no snapshot was made");
+    assert!(flux_runner::sentry_hold(&e.paths, &e.id).is_some());
 
-    // "This was me": the next backup prunes again. What stays: the pinned one, and the
-    // newest two (detection keeps the one before the newest for one more run).
-    flux_runner::dismiss_unusual(&e.paths, &e.id, &u.snapshot).unwrap();
+    // "This was me": backups go on, and the pin comes off. The next backup takes those
+    // very changes without being stopped for them again.
+    flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, true, Some(&repo))
+        .unwrap();
+    assert!(flux_runner::sentry_hold(&e.paths, &e.id).is_none());
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    fs::write(docs.join("letter58.odt"), "edited too").unwrap();
-    e.run();
+    let r = e.run();
+    assert!(
+        matches!(
+            r.outcome,
+            Ok(flux_fs::outcome::BackupOutcome::Created { .. })
+        ),
+        "{:?}",
+        r.outcome
+    );
+    assert!(r.record.unusual.is_none());
+    assert!(
+        files_in(&repo)
+            .iter()
+            .any(|p| p.ends_with("letter3.odt.locked"))
+    );
     let left = repo.snapshots().unwrap();
-    assert_eq!(left.len(), 3, "{left:?}");
-    assert!(left[0].pinned && !left[1].pinned);
+    assert!(
+        left.iter().all(|s| !s.pinned && s.tags.is_empty()),
+        "{left:?}"
+    );
+
+    // Flux Sentry learns from a backup's ordinary runs, and from unusual ones only once
+    // their owner has said they were theirs. Every such word is remembered, not only
+    // the latest.
+    let runs = || runlog::recent_runs(&e.paths, &e.id, 20);
+    let learns_from = |runs: Vec<runlog::RunRecord>| {
+        flux_runner::sentry_history(&e.paths, &e.id, runs)
+            .iter()
+            .any(|r| r.run_id == flagged.run_id)
+    };
+    assert!(learns_from(runs()), "dismissed: part of its normal");
+    flux_runner::dismiss_unusual(&e.paths, &e.id, "another-snapshot").unwrap();
+    assert!(flux_runner::unusual_dismissed(&e.paths, &e.id, &flagged));
+    assert!(learns_from(runs()));
+    // Not dismissed: left out.
+    fs::remove_file(
+        e.paths
+            .state_dir
+            .join(format!("unusual/{}.dismissed", e.id)),
+    )
+    .unwrap();
+    assert!(!learns_from(runs()));
+    assert_eq!(
+        flux_runner::sentry_history(&e.paths, &e.id, runs()).len(),
+        runs().len() - 1
+    );
+    // …and the alarm is open again, until it's dealt with: that lets backups go on
+    // without teaching Flux Sentry anything. (It holds the backup only while no backup
+    // has been made since: here one has, so the alarm's own run is asked.)
+    let alarm = std::slice::from_ref(&flagged);
+    assert!(flux_runner::open_unusual(&e.paths, &e.id, alarm).is_some());
+    assert!(flux_runner::sentry_hold(&e.paths, &e.id).is_none());
+    flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, false, None).unwrap();
+    assert!(flux_runner::open_unusual(&e.paths, &e.id, alarm).is_none());
+    assert!(!learns_from(runs()), "dealt with isn't \"mine\"");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("letter57.odt"), "edited again").unwrap();
+    assert!(e.run().outcome.is_ok());
+}
+
+/// The look before a backup compares the files with the newest snapshot as a scan sees
+/// them. A backup that records checksums (which a scan doesn't have) and one with a
+/// source's drive unplugged mustn't look like a mass change.
+#[test]
+fn the_look_before_a_backup_raises_no_false_alarm() {
+    use flux_core::profile::ChangeDetection;
+    let mut e = env();
+    let docs = e.root.join("src/docs");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..300 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    e.profile.options.change_detection = ChangeDetection::Checksum;
+    assert!(e.run().outcome.is_ok());
+    for round in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(docs.join("f0.txt"), format!("edited {round}")).unwrap();
+        let r = e.run();
+        assert!(
+            matches!(
+                r.outcome,
+                Ok(flux_fs::outcome::BackupOutcome::Created { .. })
+            ),
+            "round {round}: {:?}",
+            r.outcome
+        );
+        assert!(r.record.unusual.is_none());
+        let events = runlog::run_events(&e.paths, &e.id, &r.record.run_id);
+        assert!(
+            !events.iter().any(|ev| matches!(&ev.event, flux_core::progress::Event::Warning { message, .. } if message.contains("unusual"))),
+            "{events:?}"
+        );
+    }
+    // And a real mass change is still stopped: 200 of the 300 files rewritten.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    for i in 0..200 {
+        fs::write(
+            docs.join(format!("f{i}.txt")),
+            format!("overwritten, all of it, {i}"),
+        )
+        .unwrap();
+    }
+    let r = e.run();
+    let u = r.record.unusual.expect("stopped");
+    assert!(u.stopped, "{u:?}");
+    assert!(
+        u.signals[0].starts_with("200 files changed or deleted"),
+        "{:?}",
+        u.signals
+    );
+}
+
+/// Tripwire files: planted by the first backup, looked at before every one; one that is
+/// changed stops the backup, whatever else has (not) happened, and they are set again
+/// when it's settled and removed when the setting is turned off.
+#[test]
+fn a_tripped_tripwire_stops_the_backup() {
+    use flux_runner::tripwire;
+    let mut e = env();
+    let docs = e.root.join("src/docs");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..40 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file {i}")).unwrap();
+    }
+    e.profile.tripwires = true;
+    assert!(e.run().outcome.is_ok());
+    let wire = docs.join(tripwire::NAME);
+    assert!(wire.is_file() && e.root.join("src").join(tripwire::NAME).is_file());
+    assert_eq!(tripwire::load(&e.paths, &e.id).len(), 2);
+    // An ordinary day: nothing.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f1.txt"), "edited").unwrap();
+    let r = e.run();
+    assert!(
+        r.outcome.is_ok() && r.record.unusual.is_none(),
+        "{:?}",
+        r.outcome
+    );
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    assert_eq!(repo.snapshots().unwrap().len(), 2);
+
+    // One file encrypted in place, and it is the tripwire: far too little for any other
+    // signal, and enough.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(&wire, [0x5a; 300]).unwrap();
+    let r = e.run();
+    assert!(
+        matches!(r.outcome, Err(flux_runner::RunError::Held(_))),
+        "{:?}",
+        r.outcome
+    );
+    let u = r.record.unusual.expect("stopped");
+    assert!(u.stopped);
+    assert_eq!(
+        u.signals,
+        [format!("a tripwire file was changed ({})", wire.display())]
+    );
+    assert_eq!(u.affected, [wire.display().to_string()]);
+    assert_eq!(repo.snapshots().unwrap().len(), 2, "nothing was written");
+    assert!(repo.snapshots().unwrap()[1].pinned);
+
+    // Dealt with: the tripwire is set again (the changed file moved aside, never
+    // deleted), and backups go on.
+    flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, false, None).unwrap();
+    assert!(wire.is_file() && fs::read_to_string(&wire).unwrap().contains("tripwire"));
+    assert_eq!(
+        fs::read(docs.join(format!("{}.tripped", tripwire::NAME))).unwrap(),
+        [0x5a; 300]
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let r = e.run();
+    assert!(
+        r.outcome.is_ok() && r.record.unusual.is_none(),
+        "{:?}",
+        r.outcome
+    );
+
+    // Turned off: the next backup takes them away.
+    e.profile.tripwires = false;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f2.txt"), "edited").unwrap();
+    assert!(e.run().outcome.is_ok());
+    assert!(!wire.exists() && !e.root.join("src").join(tripwire::NAME).exists());
+    assert!(tripwire::load(&e.paths, &e.id).is_empty());
+}
+
+/// The paths of the newest snapshot's files.
+fn files_in(repo: &flux_runner::repo::AnyRepo) -> Vec<String> {
+    let snap = repo.snapshots().unwrap().pop().unwrap();
+    repo.entries(&snap)
+        .unwrap()
+        .map(|e| String::from_utf8_lossy(&e.unwrap().path).into_owned())
+        .collect()
 }
 
 /// A tiny local web server that records each request (method, path, body), answering 200.
@@ -1143,4 +1553,383 @@ fn zstd_decode(b: &[u8]) -> Vec<u8> {
 
 fn zstd_encode(b: &[u8]) -> Vec<u8> {
     zstd::stream::encode_all(b, 3).unwrap()
+}
+
+/// The main backup's drive is away, so Flux Sentry can't look at the files against its
+/// snapshots, and the main backup fails. The other places must not take the files
+/// unlooked-at for that: each is looked at against its own newest snapshot. A few changed
+/// files go there as always; what looks like an attack is stopped before it's written.
+#[test]
+fn other_places_are_looked_at_when_the_main_backup_is_out_of_reach() {
+    fn snapshots_in(dir: &std::path::Path) -> usize {
+        let mut n = 0;
+        for d in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = d.path();
+            if p.is_dir() && !p.is_symlink() {
+                if d.file_name() == "snapshots" {
+                    n += fs::read_dir(&p)
+                        .unwrap()
+                        .flatten()
+                        .filter(|s| !s.file_name().to_string_lossy().starts_with('.'))
+                        .count();
+                } else {
+                    n += snapshots_in(&p);
+                }
+            }
+        }
+        n
+    }
+    let mut e = env();
+    let docs = e.root.join("src/docs");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..300 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    let nas = e.root.join("nas");
+    fs::create_dir_all(&nas).unwrap();
+    e.profile
+        .destinations
+        .push(flux_core::profile::Destination {
+            name: "nas".into(),
+            label: None,
+            engine: flux_core::Engine::Mirror,
+            target: Target::Local {
+                path: nas.clone(),
+                fs_uuid: None,
+            },
+            offsite: true,
+            mode: flux_core::profile::CopyMode::default(),
+            vault: None,
+            rsync: None,
+            borg: None,
+        });
+    assert!(e.run().outcome.is_ok());
+    assert_eq!(snapshots_in(&nas), 1);
+
+    // The main drive goes away. An ordinary day's change still reaches the other place.
+    fs::rename(e.root.join("tgt"), e.root.join("tgt-unplugged")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f0.txt"), "edited").unwrap();
+    let r = e.run();
+    assert!(r.outcome.is_err(), "the main backup can't be made");
+    assert!(r.record.unusual.is_none(), "{:?}", r.record.unusual);
+    assert_eq!(snapshots_in(&nas), 2);
+
+    // 200 of the 300 files rewritten: nothing of it goes anywhere.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    for i in 0..200 {
+        fs::write(
+            docs.join(format!("f{i}.txt")),
+            format!("overwritten, all of it, {i}"),
+        )
+        .unwrap();
+    }
+    let r = e.run();
+    let u = r.record.unusual.expect("stopped");
+    assert!(u.stopped, "{u:?}");
+    assert_eq!(snapshots_in(&nas), 2, "the other place keeps what it had");
+    assert_eq!(r.record.destinations.len(), 1);
+    assert!(
+        r.record.destinations[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("Flux Sentry")),
+        "{:?}",
+        r.record.destinations
+    );
+    assert!(flux_runner::sentry_hold(&e.paths, &e.id).is_some());
+}
+
+fn have_rsync() -> bool {
+    std::process::Command::new("rsync")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+/// rsync and Borg backups are looked at after they're written, so the snapshot with the
+/// damage in it is the newest one. Once the alarm is dealt with and the files are back,
+/// the next backup must be compared with the snapshot from before the damage: against
+/// the damaged one it would look like a second attack, and the damaged snapshot would
+/// be pinned as "the one from before".
+#[test]
+fn a_clean_backup_after_a_dealt_with_alarm_is_not_flagged_again() {
+    if !have_rsync() {
+        eprintln!("skipping: no rsync");
+        return;
+    }
+    let mut e = env();
+    e.profile.engine = flux_core::Engine::Rsync;
+    let docs = e.root.join("src/docs");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..300 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    let first = e.run();
+    assert!(first.outcome.is_ok(), "{:?}", first.outcome);
+    // The files as they were, times and all (what a restore puts back).
+    let stash = e.root.join("stash");
+    let cp = |from: &std::path::Path, to: &std::path::Path| {
+        assert!(
+            std::process::Command::new("cp")
+                .arg("-a")
+                .arg(from)
+                .arg(to)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    cp(&docs, &stash);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    for i in 0..200 {
+        fs::write(
+            docs.join(format!("f{i}.txt")),
+            format!("overwritten, all of it, {i}"),
+        )
+        .unwrap();
+    }
+    let r = e.run();
+    let u = r.record.unusual.clone().expect("flagged");
+    assert!(
+        !u.stopped,
+        "an rsync backup is looked at after it's written"
+    );
+    let before = u.before.clone().expect("a snapshot from before");
+
+    // Dealt with: the files restored, the alarm settled.
+    fs::remove_dir_all(&docs).unwrap();
+    cp(&stash, &docs);
+    flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, false, None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f299.txt"), "one ordinary edit").unwrap();
+    let r = e.run();
+    assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+    assert!(
+        r.record.unusual.is_none(),
+        "the clean backup, flagged: {:?}",
+        r.record.unusual
+    );
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    let snaps = repo.snapshots().unwrap();
+    assert!(
+        snaps.iter().find(|s| s.id == before).unwrap().pinned,
+        "the snapshot from before stays the pinned one"
+    );
+    assert!(
+        !snaps.iter().find(|s| s.id == u.snapshot).unwrap().pinned,
+        "the damaged snapshot isn't kept as if it were the good one"
+    );
+    // What the look counted is what Sentry learns from.
+    assert_eq!(r.record.sentry_seen.map(|s| s.touched), Some(1));
+}
+
+/// A source whose drive is away is left out of an rsync backup's snapshot (it can't
+/// carry the files over). That is no deletion: 700 of 1000 files "gone" must not hold
+/// the backup.
+#[test]
+fn a_source_left_out_because_its_drive_is_away_is_no_mass_deletion() {
+    if !have_rsync() {
+        eprintln!("skipping: no rsync");
+        return;
+    }
+    let mut e = env();
+    e.profile.engine = flux_core::Engine::Rsync;
+    let docs = e.root.join("src/docs");
+    let photos = e.root.join("photos");
+    fs::create_dir_all(&docs).unwrap();
+    fs::create_dir_all(&photos).unwrap();
+    for i in 0..300 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    for i in 0..700 {
+        fs::write(photos.join(format!("p{i}.jpg")), format!("photo {i}")).unwrap();
+    }
+    e.profile.sources.paths.push(photos.clone());
+    assert!(e.run().outcome.is_ok());
+
+    // The photos' drive "isn't connected": the folder is on another filesystem than
+    // the one recorded for it.
+    e.profile
+        .sources
+        .volumes
+        .push(flux_core::profile::SourceVolume {
+            path: photos.clone(),
+            fs_uuid: "0000-NOT-THIS-ONE".into(),
+            when_missing: flux_core::profile::WhenMissing::Skip,
+            wait_for: None,
+        });
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f0.txt"), "edited").unwrap();
+    let r = e.run();
+    assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+    assert_eq!(r.record.sources_missing, [photos]);
+    assert!(
+        r.record.unusual.is_none(),
+        "left out, not deleted: {:?}",
+        r.record.unusual.map(|u| u.signals)
+    );
+}
+
+/// Flux Sentry learns from the last 60 backups that made a snapshot: runs that failed
+/// or found nothing changed don't push them out of what it reads. And an alarm from
+/// before other backups were made (Sentry was off meanwhile) isn't a hold any more.
+#[test]
+fn sentry_history_counts_backups_not_attempts() {
+    use flux_runner::runlog::RunRecord;
+    let e = env();
+    assert!(e.run().outcome.is_ok());
+    let made = runlog::recent_runs(&e.paths, &e.id, 1).remove(0);
+    let with = |status: RunStatus, n: usize| -> Vec<RunRecord> {
+        (0..n)
+            .map(|_| RunRecord {
+                status,
+                ..made.clone()
+            })
+            .collect()
+    };
+    // Newest first: 80 failed attempts, then 10 backups.
+    let mut runs = with(RunStatus::Failed, 80);
+    runs.extend(with(RunStatus::Completed, 10));
+    let history = flux_runner::sentry_history(&e.paths, &e.id, runs);
+    assert_eq!(
+        flux_runner::unusual::learn(&history).map(|b| b.runs()),
+        Some(10),
+        "the ten backups behind eighty failed attempts are what it knows"
+    );
+
+    // An alarm, then a backup made after it: nothing is held.
+    let mut alarm = made.clone();
+    alarm.unusual = Some(flux_runner::unusual::UnusualReport {
+        signals: vec!["something".into()],
+        affected: Vec::new(),
+        affected_total: 0,
+        by_folder: Vec::new(),
+        by_extension: Vec::new(),
+        snapshot: "then".into(),
+        before: None,
+        stopped: false,
+        before_pinned: false,
+        pinned_by_flux: false,
+        sentry: None,
+    });
+    assert!(flux_runner::open_unusual(&e.paths, &e.id, std::slice::from_ref(&alarm)).is_some());
+    let since = vec![made.clone(), alarm];
+    assert!(flux_runner::open_unusual(&e.paths, &e.id, &since).is_none());
+}
+
+/// "This was me" takes off the pin Flux put on the snapshot from before, also when that
+/// snapshot carries a note of its owner's (which stays), and says so truthfully when
+/// the backups can't be reached. "It's dealt with" on a stopped backup lets the next
+/// one through unlooked-at, and Sentry learns nothing from that one either.
+#[test]
+fn settling_takes_off_what_flux_put_on_and_learns_only_from_this_was_me() {
+    let e = env();
+    let docs = e.root.join("src/docs");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..300 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    assert!(e.run().outcome.is_ok());
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    let first = repo.snapshots().unwrap().pop().unwrap();
+    repo.change(
+        &first.id,
+        &flux_fs::snapshot::SnapshotChange {
+            note: Some(Some("before the move".into())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rewrite = |round: u32| {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        for i in 0..200 {
+            fs::write(
+                docs.join(format!("f{i}.txt")),
+                format!("overwritten, all of it, {i}, round {round}"),
+            )
+            .unwrap();
+        }
+    };
+
+    rewrite(1);
+    let u = e.run().record.unusual.expect("stopped");
+    assert!(u.stopped && u.before_pinned && u.pinned_by_flux, "{u:?}");
+    // The backups out of reach: the alarm is settled, the pin is said to be left.
+    let s =
+        flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, true, None).unwrap();
+    assert!(s.marks_left);
+    let s =
+        flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, true, Some(&repo))
+            .unwrap();
+    assert!(!s.marks_left);
+    let kept = repo.find(&first.id).unwrap();
+    assert!(!kept.pinned, "Flux's pin is off");
+    assert_eq!(
+        kept.note.as_deref(),
+        Some("before the move"),
+        "the owner's note stays"
+    );
+
+    // Another alarm, dealt with this time: the next backup isn't looked at, and isn't
+    // learned from.
+    let made = e.run();
+    assert!(made.outcome.is_ok(), "{:?}", made.outcome);
+    rewrite(2);
+    let u = e.run().record.unusual.expect("stopped again");
+    flux_runner::settle_unusual(&e.paths, &e.id, &e.profile, &u.snapshot, false, None).unwrap();
+    let after = e.run();
+    assert!(after.outcome.is_ok() && after.record.unusual.is_none());
+    let history =
+        flux_runner::sentry_history(&e.paths, &e.id, runlog::recent_runs(&e.paths, &e.id, 50));
+    assert!(
+        history.iter().all(|r| r.run_id != after.record.run_id),
+        "dealt with: nothing is learned, the unlooked-at backup included"
+    );
+    assert!(
+        history.iter().any(|r| r.run_id == made.record.run_id),
+        "the backup after \"this was me\" is"
+    );
+}
+
+/// Flux Sentry's look before a Vault backup reads the snapshot's file list from the
+/// cache the last backup left (the Vault gives it a folder at a time: hours over a
+/// network). It must be the very list the Vault holds.
+#[test]
+fn the_look_reads_a_vaults_file_list_from_the_cache() {
+    let mut e = env();
+    e.profile.engine = flux_core::Engine::Vault;
+    e.profile.vault = Some(flux_core::profile::VaultOptions {
+        encryption: false,
+        ..Default::default()
+    });
+    let docs = e.root.join("src/docs/deep/er");
+    fs::create_dir_all(&docs).unwrap();
+    for i in 0..40 {
+        fs::write(docs.join(format!("f{i}.txt")), format!("file number {i}")).unwrap();
+    }
+    assert!(e.run().outcome.is_ok());
+    let repo = flux_runner::repo::AnyRepo::open(&e.paths, &e.id, &e.profile, None).unwrap();
+    let snap = repo.snapshots().unwrap().pop().unwrap();
+    let list = |it: flux_runner::repo::Entries<'_>| -> Vec<flux_fs::entry::Entry> {
+        it.collect::<Result<_, _>>().unwrap()
+    };
+    let cached = list(repo.entries_for_look(&e.paths, &snap).unwrap());
+    assert_eq!(cached, list(repo.entries(&snap).unwrap()));
+    assert!(cached.len() > 40);
+    // And it is the cache that was read: without it, the list still comes (the slow way).
+    let cache = e.paths.cache_dir.join("vault");
+    assert!(cache.is_dir(), "the backup left its file list in the cache");
+    fs::remove_dir_all(&cache).unwrap();
+    assert_eq!(
+        list(repo.entries_for_look(&e.paths, &snap).unwrap()),
+        cached
+    );
+    // A changed file is seen against the cached list, and the next backup goes through.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(docs.join("f0.txt"), "edited").unwrap();
+    let r = e.run();
+    assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+    assert_eq!(r.record.sentry_seen.map(|s| s.touched), Some(1));
 }

@@ -87,7 +87,9 @@ export const api = {
   /** How a backup is doing, from its run log and timer (cheap; never asks for a password). */
   status: (id: string) => call<BackupStatus>("status", { id }),
   snapshots: (id: string) => call<SnapshotMeta[]>("snapshots", { id }),
-  listDir: (id: string, snapshot: string, path: string) => call<Listing>("list_dir", { id, snapshot, path }),
+  /** `filter`: only names containing it; `missing`: only what isn't on the computer any more. */
+  listDir: (id: string, snapshot: string, path: string, filter: string | null = null, missing = false) =>
+    call<Listing>("list_dir", { id, snapshot, path, filter, missing }),
   unlock: (id: string, password: string, create = false) => call<void>("unlock", { id, password, create }),
   /** Keep the unlocked Vault password in a root-only key file, for scheduled backups. */
   saveKeyFile: (id: string) => call<string>("save_key_file", { id }),
@@ -182,6 +184,12 @@ export const api = {
   setScheduler: (scheduler: Scheduler) => call<Preferences>("set_scheduler", { scheduler }),
   autostart: () => call<boolean>("autostart"),
   setAutostart: (on: boolean) => call<void>("set_autostart", { on }),
+  /** Keep the app in the tray when its window is closed (or quit). */
+  setCloseToTray: (on: boolean) => call<Preferences>("set_close_to_tray", { on }),
+  /** The next runs of a calendar expression (ISO times); rejects one Flux can't read. */
+  calendarPreview: (expr: string) => call<string[]>("calendar_preview", { expr }),
+  /** Is the app's icon shown in a system tray? */
+  trayAvailable: () => call<boolean>("tray_available"),
   find: (id: string, query: string) => call<FindResult>("find", { id, query }),
   versions: (id: string, path: string) => call<Version[]>("versions", { id, path }),
   estimate: (profile: Profile, system = false) => call<Estimate>("estimate", { profile, system }),
@@ -227,8 +235,15 @@ export const api = {
   readiness: (id: string) => call<ReadinessCheck[]>("readiness", { id }),
   /** Tick (or untick) a readiness question only you can answer. */
   setReadiness: (id: string, key: string, yes: boolean) => call<ReadinessCheck[]>("set_readiness", { id, key, yes }),
+  /** The password of one of your backups, to keep somewhere else. */
+  revealPassword: (id: string) => call<string>("reveal_password", { id }),
+  /** Export a Borg repository's key into `dir`; the path of the new file. */
+  exportBorgKey: (id: string, dir: string) => call<string>("export_borg_key", { id, dir }),
+  /** Save a copy of a Vault's unlock file into `dir`; the path of the copy. */
+  copyUnlockFile: (id: string, dir: string) => call<string>("copy_unlock_file", { id, dir }),
   /** "This was me": the unusual changes in `snapshot` were your own. */
-  dismissUnusual: (id: string, snapshot: string) => call<void>("dismiss_unusual", { id, snapshot }),
+  /** Settle unusual changes: "This was me", or (`resolved`) "It's dealt with". */
+  dismissUnusual: (id: string, snapshot: string, resolved = false) => call<{ marks_left: boolean } | null>("dismiss_unusual", { id, snapshot, resolved }),
   /** Forget the Vault's password in the app (lock it again now). */
   lockVault: (id: string) => call<void>("lock_vault", { id }),
   /** Open one of the project's pages in the web browser. */

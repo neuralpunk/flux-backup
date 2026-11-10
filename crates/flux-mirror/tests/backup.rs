@@ -653,3 +653,40 @@ fn missing_drive_keeps_its_files() {
         "v2 changed"
     );
 }
+
+/// `check --read-data` reads each stored file once. An unchanged file is the same file
+/// (a hard link) in every snapshot that has it: read once per snapshot, a check of a
+/// year of snapshots reads the whole backup hundreds of times over.
+#[test]
+fn check_reads_a_file_shared_by_snapshots_once() {
+    let mut e = env();
+    // With checksums recorded, so a changed byte can be told.
+    e.profile.options.change_detection = flux_core::profile::ChangeDetection::Checksum;
+    write(&e.src.join("same.bin"), &"x".repeat(100_000));
+    write(&e.src.join("changes.txt"), "one");
+    e.created();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(&e.src.join("changes.txt"), "three");
+    e.created();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(&e.src.join("changes.txt"), "fifth");
+    let last = e.created();
+    let repo = open_repo(&e.id, &e.profile).unwrap();
+    let c = flux_mirror::check::check(&repo, true, &Progress::new()).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    assert_eq!(c.snapshots, 3);
+    // same.bin once, and the three versions of changes.txt.
+    assert_eq!(c.bytes_read, 100_000 + 3 + 5 + 5);
+    // Damage is still found, in the one copy all three snapshots share.
+    let shared = e.in_snapshot(&last.id, &e.src.join("same.bin"));
+    let mut perm = fs::metadata(&shared).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
+    fs::set_permissions(&shared, perm).unwrap();
+    fs::write(&shared, "y".repeat(100_000)).unwrap();
+    let c = flux_mirror::check::check(&repo, true, &Progress::new()).unwrap();
+    assert!(
+        c.errors.iter().any(|m| m.contains("same.bin")),
+        "{:?}",
+        c.errors
+    );
+}

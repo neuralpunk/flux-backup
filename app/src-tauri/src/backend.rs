@@ -57,17 +57,32 @@ fn qualify_id(v: &mut Value) {
     }
 }
 
+/// A profile's summary: its own id and those of its other places (`etc+nas`). An id
+/// without the prefix is taken for one of your own backups: the page would ask for, and
+/// act on, a backup of yours that happens to have the same name.
+fn qualify_summary(p: &mut Value) {
+    if !p.is_object() {
+        return;
+    }
+    qualify_id(&mut p["id"]);
+    if let Some(places) = p.get_mut("destinations").and_then(Value::as_array_mut) {
+        for d in places {
+            qualify_id(&mut d["id"]);
+        }
+    }
+}
+
 /// Rewrite the ids in a helper reply to their `system:` form.
 fn qualify(method: &str, v: &mut Value) {
     match method {
         "profiles" => {
             if let Some(list) = v.as_array_mut() {
                 for p in list {
-                    qualify_id(&mut p["id"]);
+                    qualify_summary(p);
                 }
             }
         }
-        "overview" => qualify_id(&mut v["profile"]["id"]),
+        "overview" => qualify_summary(&mut v["profile"]),
         "duplicate_profile" => qualify_id(v),
         "get_profile" | "new_profile" | "save_profile" | "import_profile"
             if v.get("id").is_some() =>
@@ -239,7 +254,7 @@ commands! {
     overview(id: String) => Call::Overview { id };
     status(id: String) => Call::Status { id };
     snapshots(id: String) => Call::Snapshots { id };
-    list_dir(id: String, snapshot: String, path: String) => Call::ListDir { id, snapshot, path };
+    list_dir(id: String, snapshot: String, path: String, filter: Option<String>, missing: Option<bool>) => Call::ListDir { id, snapshot, path, filter, missing: missing.unwrap_or(false) };
     unlock(id: String, password: String, create: Option<bool>)
         => Call::Unlock { id, password, create: create.unwrap_or(false) };
     save_key_file(id: String) => Call::SaveKeyFile { id };
@@ -249,6 +264,7 @@ commands! {
     cancel_shutdown() => Call::CancelShutdown;
     diff_file(id: String, path: String, old: String, new: Option<String>) => Call::DiffFile { id, path, old, new };
     set_diff_tool(tool: Option<String>) => Call::SetDiffTool { tool };
+    set_close_to_tray(on: bool) => Call::SetCloseToTray { on };
     cancel(id: String) => Call::Cancel { id };
     restore(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
         => Call::Restore { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
@@ -292,7 +308,7 @@ commands! {
     remove_destination(id: String, name: String) => Call::RemoveDestination { id, name };
     restore_test(id: String) => Call::RestoreTest { id };
     restore_tests(id: String) => Call::RestoreTests { id };
-    dismiss_unusual(id: String, snapshot: String) => Call::DismissUnusual { id, snapshot };
+    dismiss_unusual(id: String, snapshot: String, resolved: bool) => Call::DismissUnusual { id, snapshot, resolved };
     set_webhooks(webhooks: Value) => Call::SetWebhooks { webhooks };
     test_webhook(webhook: Value) => Call::TestWebhook { webhook };
     find_backups(target: Value, password: Option<String>) => Call::FindBackups { target, password };
@@ -310,6 +326,9 @@ commands! {
         => Call::Recover { target, engine, kept, then, id, password };
     readiness(id: String) => Call::Readiness { id };
     set_readiness(id: String, key: String, yes: bool) => Call::SetReadiness { id, key, yes };
+    reveal_password(id: String) => Call::RevealPassword { id };
+    export_borg_key(id: String, dir: String) => Call::ExportBorgKey { id, dir };
+    copy_unlock_file(id: String, dir: String) => Call::CopyUnlockFile { id, dir };
 }
 
 /// Open two files in the comparison program chosen in the preferences (the program comes
@@ -609,6 +628,19 @@ mod tests {
         let mut o = json!({ "profile": { "id": "etc" } });
         qualify("overview", &mut o);
         assert_eq!(o["profile"]["id"], "system:etc");
+        // The other places of a system backup are system ids too: without the prefix
+        // they'd be looked up among your own backups.
+        let mut list =
+            json!([{ "id": "etc", "destinations": [{ "id": "etc+nas", "name": "nas" }] }]);
+        qualify("profiles", &mut list);
+        assert_eq!(list[0]["destinations"][0]["id"], "system:etc+nas");
+        let mut o = json!({ "profile": { "id": "etc", "destinations": [{ "id": "etc+usb" }, { "id": "" }] } });
+        qualify("overview", &mut o);
+        assert_eq!(o["profile"]["destinations"][0]["id"], "system:etc+usb");
+        assert_eq!(
+            o["profile"]["destinations"][1]["id"], "",
+            "an id that couldn't be made stays empty"
+        );
         let mut new = json!({ "id": "", "profile": {} });
         qualify("new_profile", &mut new);
         assert_eq!(new["id"], "", "a new profile has no id yet");
@@ -636,4 +668,24 @@ pub fn autostart() -> bool {
 #[tauri::command]
 pub fn set_autostart(on: bool) -> std::result::Result<(), String> {
     crate::autostart::set(on).map_err(|e| e.to_string())
+}
+
+/// The next runs of a schedule's calendar expression (`Mon,Wed,Fri 18:00`), to show under
+/// it while it's typed; an error says Flux can't read it (systemd may still: time zones,
+/// the last day of a month).
+#[tauri::command]
+pub fn calendar_preview(expr: String) -> std::result::Result<Vec<String>, String> {
+    let cal = flux_runner::calendar::Calendar::parse(&expr).map_err(|e| e.to_string())?;
+    let tz = jiff::tz::TimeZone::system();
+    Ok(cal
+        .upcoming(jiff::Timestamp::now(), &tz, 3)
+        .iter()
+        .map(|t| t.to_string())
+        .collect())
+}
+
+/// Is the app's icon shown in a system tray (so closing the window can leave it there)?
+#[tauri::command]
+pub fn tray_available() -> bool {
+    crate::tray::installed() && crate::session::tray_host()
 }

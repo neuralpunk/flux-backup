@@ -529,6 +529,96 @@ Version 1.0.0 everywhere; CHANGELOG's *Unreleased* becomes 1.0.0; AppStream; REA
 (no longer a beta caution); website, guide and screenshots. Publishing (sync to the public
 repository and the tag) only when the owner says so.
 
+## Toward 1.1: refinement (agreed 2026-11-09)
+
+The owner's list for 1.1: a refinement release that makes what's there better, with few new
+features. The rules for 1.0 still hold (the main experience stays simple; new tests are
+simulated; the CLI keeps parity; CHANGELOG *Unreleased* becomes 1.1.0 at the release).
+The version stayed 1.0.x until Phase 85, which made it 1.1.0.
+
+### Phase 78 — Clearer settings: exclusions, and passwords that can't be asked for
+*Leave some things out* becomes **Exclude Files/Directories**. When a backup starts by
+itself (a schedule, or when its drive is plugged in) but its password is set to *Ask every
+time*, those backups fail: warn at *When* and under *How backups are stored*, with a
+one-click fix (keep it in the keyring, typed once and checked; a key file for system
+backups), and in `flux profile validate`.
+
+### Phase 79 — Easier time entry, and a 24-hour clock
+Typing a backup's time is clunky. A time field that takes what people type ("9", "930",
+"9:30 pm", "21:30"), steps with the arrow keys, and offers common times; a Preferences
+choice of 12-hour or 24-hour clock (default: the system's), used wherever the app shows or
+takes a time.
+
+### Phase 80 — Close to the system tray
+Closing the window keeps Flux running in the system tray (the tray icon reopens it, its
+menu quits). On by default, with a choice in Preferences to quit on close instead; the
+first time, a short note says where Flux went.
+
+### Phase 81 — A recovery checklist you can act on
+Each line of *Could you recover it on another computer?* gets a button that does it: back
+up now (keeps the settings with the backups), show the recovery kit / password help, export
+the Borg key, test a restore, add a place kept elsewhere.
+
+### Phase 82 — Restore tests that leave nothing behind
+A restore test no longer writes restored files to a temporary folder. Each picked file is
+read back through the engine and checked as it streams (size, checksum, against the file
+now when asked), in a small fixed buffer that's wiped after use: nothing restored touches
+the disk, memory use stays the same for ten files or every file, and an encrypted backup
+stays encrypted at rest throughout. Borg's single-file reads stream from `borg extract
+--stdout` instead of a temporary file.
+
+### Phase 83 — At a glance: each backup's settings, and every backup in a table
+A compact summary of a backup's settings on its Overview (schedule and next run, where the
+password is kept, encryption, destinations, what's excluded, retention, restore tests,
+checks, notifications…), each line linking to its setting; and on *All backups*, a dense
+sortable table of the same for every backup. Modern and compact, not big tiles.
+
+### Phase 84 — Man pages with examples
+Every `flux` command's man page says more (what it does, what it changes, exit codes where
+they matter) and has an EXAMPLES section with basic usage; `flux(1)` gains an overview of
+common tasks.
+
+### Phase 85 — Release 1.1
+Version 1.1.0 everywhere; CHANGELOG; AppStream; README; guide and screenshots. Publishing
+only when the owner says so.
+
+## 1.1, continued: clarity and visual polish (agreed 2026-11-09)
+
+After Phase 85 the owner asked for every clarity and visual idea from the review of 1.1
+(not yet published, so they join 1.1.0's release notes; screenshots are retaken at the
+end).
+
+### Phase 86 — Statuses that agree and don't shout
+One count of what needs you (not protected, or protected with something to look at) for
+the sidebar, All backups' headline and the line under it. Status words that say what it is
+("Low on space", "Not tested lately") instead of "Check". A severity ladder: red ⚠ only
+for what isn't protected, an amber dot for something worth a look. Toasts: an "i" for
+news, and above an editor's Save bar.
+
+### Phase 87 — Plain words
+Durations in words ("every 4 hours", "in 1 hour"); storage named in plain words first,
+the engine names where they help; "profile" tied to "backup" in the app; validation
+messages without config syntax in the app.
+
+### Phase 88 — Checks explained, the checklist's progress, one warning card
+Check, Verify every byte and Restore test explained side by side; a progress meter for
+the recovery checklist, "to do" instead of ✕; one shared warning card.
+
+### Phase 89 — Custom times, previewed
+The next runs of a custom systemd calendar expression, shown as it's typed.
+
+### Phase 90 — All backups' table and the glance grid
+A compact headline in the Settings view; the table full width, short values on one
+line, a choice of columns; the glance grid in labelled groups, cells that don't apply
+left out.
+
+### Phase 91 — The Overview's order
+What's always shown and what folds away; only the answer at the top raised, the rest
+flat sections. The demo's checklist agrees with its offsite copy.
+
+### Phase 92 — Release 1.1, again
+CHANGELOG and AppStream, a *New in 1.1* row on the website, screenshots retaken.
+
 ## Out of scope for v1 (candidates later)
 S3/B2 and other cloud backends (Vault's backend trait is designed for them), SMB/NFS
 mount management, Windows/macOS. (Back In Time import was done in 0.3.)

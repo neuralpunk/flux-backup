@@ -678,6 +678,114 @@ fn flux_pw(home: &Path, pw: &str, args: &[&str]) -> Output {
         .expect("run flux")
 }
 
+/// A Vault that keeps repair data: damage on the drive is found by `flux check
+/// --read-data`, which says it can be repaired, and repaired by `flux check --repair`.
+#[test]
+fn check_repairs_a_damaged_vault() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    // A megabyte that doesn't compress.
+    let mut x = 88172645463325252u64;
+    let noise: Vec<u8> = (0..1 << 20)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    std::fs::write(src.join("big"), &noise).unwrap();
+    let pw = "s3cret pass";
+    let created = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "v",
+            "-t",
+            h.join("tgt").to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+            "--engine",
+            "vault",
+        ],
+    );
+    assert!(created.status.success());
+    let f = h.join("config/profiles/v.toml");
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("notify = true", "notify = false")
+        .replace("[vault]", "[vault]\nparity = 10");
+    assert!(text.contains("parity = 10"), "{text}");
+    std::fs::write(&f, text).unwrap();
+    assert!(flux_pw(h, pw, &["backup", "v"]).status.success());
+    let vault = h.join("tgt/flux-vault");
+    assert!(vault.join("parity/data").is_dir() && vault.join("parity/index").is_dir());
+
+    // 20 KiB of the pack with the file's data come back as garbage.
+    let pack = std::fs::read_dir(vault.join("data"))
+        .unwrap()
+        .flat_map(|d| std::fs::read_dir(d.unwrap().path()).unwrap())
+        .map(|f| f.unwrap().path())
+        .max_by_key(|p| std::fs::metadata(p).unwrap().len())
+        .unwrap();
+    let good = std::fs::read(&pack).unwrap();
+    let mut bad = good.clone();
+    bad[300_000..320_000].fill(0x55);
+    std::fs::set_permissions(&pack, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&pack, &bad).unwrap();
+
+    let o = flux_pw(h, pw, &["check", "v", "--read-data"]);
+    assert!(!o.status.success());
+    let out = stdout(&o);
+    assert!(out.contains("its repair data can rebuild it"), "{out}");
+    assert!(out.contains("flux check v --repair"), "{out}");
+    assert!(
+        std::fs::read(&pack).unwrap() == bad,
+        "a check alone writes nothing"
+    );
+
+    let o = flux_pw(h, pw, &["check", "v", "--repair"]);
+    let out = stdout(&o);
+    assert!(
+        o.status.success(),
+        "{out}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        out.contains("repaired: pack ") && out.contains("0 problems, 1 repaired"),
+        "{out}"
+    );
+    assert!(std::fs::read(&pack).unwrap() == good);
+    // The config and the key got their repair data too, and all is well afterwards.
+    assert!(vault.join("parity/config").is_file());
+    let o = flux_pw(h, pw, &["--json", "check", "v", "--read-data"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["errors"].as_array().unwrap().len(), 0);
+    let out = h.join("out");
+    let o = flux_pw(
+        h,
+        pw,
+        &[
+            "restore",
+            "v",
+            src.to_str().unwrap(),
+            "--to",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(std::fs::read(out.join("src/big")).unwrap() == noise);
+
+    // --repair is for Vaults.
+    let o = flux(h, &["check", "nope", "--repair"]);
+    assert!(!o.status.success());
+}
+
 #[test]
 fn vault_end_to_end() {
     let home = tempfile::tempdir().unwrap();
@@ -892,6 +1000,17 @@ fn ssh_targets_end_to_end() {
     std::fs::create_dir_all(src.join("d")).unwrap();
     std::fs::write(src.join("d/a.txt"), "alpha").unwrap();
     std::fs::write(src.join("big"), vec![7u8; 300_000]).unwrap();
+    // Many small files (and an empty one): a restore from a server fetches them in
+    // batches, several of them here.
+    std::fs::create_dir_all(src.join("many")).unwrap();
+    for i in 0..90 {
+        std::fs::write(
+            src.join(format!("many/n{i:02}.txt")),
+            format!("small file number {i}").repeat(i + 1),
+        )
+        .unwrap();
+    }
+    std::fs::write(src.join("many/empty"), "").unwrap();
     let s = src.to_str().unwrap();
     for (id, engine) in [("m", "mirror"), ("v", "vault"), ("r", "rsync")] {
         let target = format!("localhost:{}", h.join(format!("remote-{id}")).display());
@@ -949,6 +1068,14 @@ fn ssh_targets_end_to_end() {
             std::fs::read_to_string(out.join("src/d/b.txt")).unwrap(),
             "beta"
         );
+        for i in 0..90 {
+            assert_eq!(
+                std::fs::read_to_string(out.join(format!("src/many/n{i:02}.txt"))).unwrap(),
+                format!("small file number {i}").repeat(i + 1),
+                "{id}: n{i:02}"
+            );
+        }
+        assert_eq!(std::fs::read(out.join("src/many/empty")).unwrap(), b"");
         let o = run(&["check", id]);
         assert!(o.status.success(), "{id}: {}", stdout(&o));
     }
@@ -3119,9 +3246,37 @@ fn restore_test_by_hand() {
         (r["result"].as_str(), r["tested"].as_u64()),
         (Some("passed"), Some(7))
     );
+    // Sized by what it must prove: damage to 30% of the 7 files (3 of them) or more.
+    let o = flux(h, &["--json", "restore-test", "p", "--damage", "30%"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(r["mode"].as_str(), Some("confidence"));
+    assert_eq!(
+        r["tested"].as_u64(),
+        Some(5),
+        "C(4,5)/C(7,5) = 0 ≤ 1%; four would miss 1 time in 35"
+    );
+    assert_eq!(
+        (
+            r["guarantee"]["damaged"].as_u64(),
+            r["guarantee"]["certainty"].as_str()
+        ),
+        (Some(3), Some("99%"))
+    );
+    let o = flux(
+        h,
+        &["restore-test", "p", "--damage", "30%", "--certainty", "90%"],
+    );
+    assert!(
+        stdout(&o).contains("If 30% or more of its 7 files were damaged, this test would have found it (90% certain)."),
+        "{}",
+        stdout(&o)
+    );
+    let o = flux(h, &["restore-test", "p", "--damage", "80%"]);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("0.01% to 50%"));
     let o = flux(h, &["--json", "restore-test", "p", "--history"]);
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert_eq!(v.as_array().unwrap().len(), 4);
     assert!(stdout(&flux(h, &["restore-test", "p", "--history"])).contains("passed"));
 }
 
@@ -3646,8 +3801,10 @@ fn backups_from_every_release_are_read() {
                 exp["first"]["docs/a.txt"].as_str().unwrap(),
                 "{what}"
             );
-            // This Flux carries on into the old repository.
-            let o = run(&["backup", engine]);
+            // This Flux carries on into the old repository. Without pruning: the fixtures'
+            // snapshots are a second apart on the day they were made, so once that day is
+            // past `keep_within = "1day"`, `keep_daily` would remove one of them.
+            let o = run(&["backup", engine, "--no-prune"]);
             assert!(
                 o.status.success(),
                 "{what}: {}",
@@ -3658,4 +3815,109 @@ fn backups_from_every_release_are_read() {
             assert_eq!(snaps.as_array().unwrap().len(), 3, "{what}");
         }
     }
+}
+
+/// A run that was cut short leaves the files it brought over in `snapshots/.partial`,
+/// and the next run continues it. If only contents changed (nothing added or removed),
+/// that next run sends nothing and creates nothing: it must still make the snapshot, not
+/// call the backup unchanged and delete `.partial`, the only copy of the new contents.
+#[test]
+fn rsync_continued_backup_is_never_called_unchanged() {
+    if Command::new("rsync").arg("--version").output().is_err() {
+        eprintln!("skipping: no rsync");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("report.txt"), "first version").unwrap();
+    let target = h.join("drive");
+    std::fs::create_dir(&target).unwrap();
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "p",
+            "-t",
+            target.to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+            "--engine",
+            "rsync",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let f = h.join("config/profiles/p.toml");
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("notify = true", "notify = false");
+    std::fs::write(&f, text).unwrap();
+    let o = flux(h, &["backup", "p"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // The `snapshots` folder of the backup, wherever below the drive it is.
+    fn find_snapshots(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() && !p.is_symlink() {
+                if e.file_name() == "snapshots" {
+                    return Some(p);
+                }
+                if let Some(found) = find_snapshots(&p) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    let snapshots = find_snapshots(&target).expect("a snapshots folder");
+    let count = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("20"))
+            .count()
+    };
+    assert_eq!(count(&snapshots), 1);
+
+    // The file changes; a run brings it over and is cut short before the snapshot is
+    // made: `.partial/data` holds the new contents (with its time, as rsync leaves it).
+    std::fs::write(src.join("report.txt"), "second version, longer").unwrap();
+    let rel = src.strip_prefix("/").unwrap();
+    let staged = snapshots.join(".partial/data").join(rel);
+    std::fs::create_dir_all(&staged).unwrap();
+    let o = Command::new("cp")
+        .arg("-p")
+        .arg(src.join("report.txt"))
+        .arg(staged.join("report.txt"))
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+
+    let o = flux(h, &["backup", "p"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        count(&snapshots),
+        2,
+        "the continued backup became a snapshot: {}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    let mut ids: Vec<String> = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("20"))
+        .collect();
+    ids.sort();
+    let newest = snapshots
+        .join(ids.last().unwrap())
+        .join("data")
+        .join(rel)
+        .join("report.txt");
+    assert_eq!(
+        std::fs::read_to_string(&newest).unwrap(),
+        "second version, longer"
+    );
 }

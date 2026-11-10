@@ -66,6 +66,22 @@ Status legend: ☐ not started · ◐ in progress · ☑ done
 | 74 | 1.0: Fuzzing | ☑ | see `git log` |
 | 75 | 1.0: Panic audit | ☑ | see `git log` |
 | 76 | Release 1.0 | ☑ | see `git log` |
+| 77 | Pre-release bug check: the fixes | ☑ | see `git log` |
+| 78 | 1.1: Clearer settings: exclusions, passwords that can't be asked for | ☑ | see `git log` |
+| 79 | 1.1: Easier time entry, and a 24-hour clock | ☑ | see `git log` |
+| 80 | 1.1: Close to the system tray | ☑ | see `git log` |
+| 81 | 1.1: A recovery checklist you can act on | ☑ | see `git log` |
+| 82 | 1.1: Restore tests that leave nothing behind | ☑ | see `git log` |
+| 83 | 1.1: At a glance: settings summary and the all-backups table | ☑ | see `git log` |
+| 84 | 1.1: Man pages with examples | ☑ | see `git log` |
+| 85 | Release 1.1 | ☑ | see `git log` |
+| 86 | 1.1: Statuses that agree and don't shout | ☑ | see `git log` |
+| 87 | 1.1: Plain words | ☑ | see `git log` |
+| 88 | 1.1: Checks explained, checklist progress, one warning card | ☑ | see `git log` |
+| 89 | 1.1: Custom times, previewed | ☑ | see `git log` |
+| 90 | 1.1: All backups' table and the glance grid | ☑ | see `git log` |
+| 91 | 1.1: The Overview's order | ☑ | see `git log` |
+| 92 | Release 1.1, again | ☑ | see `git log` |
 
 ## Log
 
@@ -2210,3 +2226,1005 @@ issues. Fixed in rounds, each with its tests and a commit.
       `1h 30m` opens as 90 minutes with Save disabled, changing it writes `95min`
 - [x] After all rounds: fmt, clippy -D warnings, 331 tests, svelte-check, vite build; the
       guide page rebuilt from docs/USER_GUIDE.md
+
+### Phase 78 — 1.1: Clearer settings: exclusions, passwords that can't be asked for (2026-11-09)
+1.1 is a refinement release (docs/PLAN.md, *Toward 1.1*); the version stays 1.0.x until
+Phase 85.
+- [x] *Leave some things out* is now **Exclude Files/Directories** (the settings row and
+      its dialog, the guide); its summary says "Nothing excluded"; Preferences' list is
+      *Excluded from new backups*
+- [x] `Profile::runs_on_its_own()` (a schedule, or when the drive is plugged in);
+      `validate_in(User)` warns on `vault.password_source` / `borg.password_source` when
+      such a backup's password is *Ask every time* ("scheduled backups will fail"), so
+      `flux profile validate|create|edit` say it too. System scope keeps its own warning
+      (one, not two). The misplaced doc comments of `validate`, `validate_in` and
+      `password_source` put back where they belong
+- [x] App: a warning card at *When* and under *How backups are stored* (Vault and Borg;
+      Borg's own copy of the issue hidden while it shows), with **Keep it in the keyring**
+      (system backups: **Use a key file**). The old hints said scheduled backups "wait for
+      you": they fail; reworded
+- [x] An existing backup that asked and now keeps its password (keyring or a new key file)
+      asks for it once in Settings, without "Repeat it" (`storeNow`); Save checks it opens
+      the backups (`set_password`) and keeps it. `set_password` now writes a new key file
+      only after the password has opened or created the backups, so a mistyped one is
+      never written (tested)
+- [x] Tests: the warning (by hand, on connect, on a schedule, system scope, keyring,
+      unencrypted), the key file not written for a wrong password. 332 tests; fmt,
+      clippy, svelte-check, vite build. Checked in the demo (headless Chrome, dark and
+      light): the card on both pages, the fix, and the type-once password field
+- [x] USER_GUIDE (*A scheduled backup can't ask*; the renamed row), CHANGELOG
+
+### Phase 79 — 1.1: Easier time entry, and a 24-hour clock (2026-11-09)
+- [x] `app/src/lib/timeparse.ts` (pure): `parseTime` reads "9", "930", "2130", "9:30",
+      "9.30", "9h30", "9 30", "9pm", "9:30 p.m.", "12am", "noon", "midnight", "24:00";
+      refuses "9:3" (9:03 or 9:30?), "25", "13pm"; `showTime` for either clock;
+      `scheduleWords` turns the backend's `*-*-* 20:00:00` / `Mon..Fri *-*-* 07:30:00` /
+      `Sun *-*-* …` into "every day at 8:00 PM" / "weekdays at 07:30" / "every Sunday at …"
+- [x] `clock.svelte.ts`: Preferences › App › **Clock** (12-hour, 24-hour, like the system;
+      kept in local storage like the theme); `hourCycle()` in every formatter that shows a
+      time (`dateTime`, `shortDateTime`, `time`, the pause's "until …"), so a change
+      shows at once everywhere
+- [x] `form/TimeInput.svelte` replaces WebKit's `<input type="time">` (daily, weekly,
+      weekdays) and the upload-limit windows' From/To text boxes: type freely (committed on
+      Enter or leaving the field; unreadable text outlined red, then put back), ↑/↓ 15
+      minutes (Shift: an hour), PageUp/PageDown an hour, whole quarters first; a clock
+      button lists every half hour (and the current time) in a popover. The stored value
+      stays "HH:MM"
+- [x] The schedule tag in a backup's header and the first-backup card on the Overview
+      read "Every day at 8:00 PM" instead of the systemd expression; the editor's summaries
+      use the chosen clock. The demo's sample schedules now match their settings (20:00)
+- [x] `npm test`: node's own test runner over `app/tests/*.test.ts`, no new dependency
+      (parsing, refusing, both clocks, every minute of the day round-trips, schedules in
+      words, intervals). 6 tests
+- [x] Checked in the demo (headless Chrome): "930p" → 9:30 PM, ↑ → 9:45 PM, "zz" outlined
+      and put back, the list picks 7:00 AM, 24-hour shows 20:00 and Preferences says so
+- [x] CI runs `npm test`. fmt, clippy, 332 Rust tests, svelte-check, vite build; USER_GUIDE (*Typing a
+      time*, the clock in Preferences), CHANGELOG
+
+### Phase 80 — 1.1: Close to the system tray (2026-11-09)
+- [x] `Settings.quit_on_close` (default off: closing keeps the app in the tray) and
+      `told_about_tray`; service `Preferences.close_to_tray`, `set_close_to_tray`
+      (protocol `SetCloseToTray`); other preferences saved later leave it alone (tested)
+- [x] The window's close (the title bar's ✕, Alt+F4) is caught in `on_window_event`:
+      the window hides when the tray icon was made **and** a StatusNotifier host is
+      registered on the session bus (`session::tray_host`); otherwise it quits as before,
+      so the app is never left running where nobody can reach it. The first time, a
+      desktop notification says where Flux went. `--hidden` at login also needs a host
+- [x] One copy at a time (`app/src-tauri/src/session.rs`): the first owns
+      `io.github.neuralpunk.FluxBackup` on the session bus and answers `Activate` by
+      showing its window; a second start asks it to and exits (`--hidden`: exits quietly).
+      zbus 6 was already in the build (flux-runner), so no new crates are downloaded;
+      without a session bus every copy runs on its own, as before
+- [x] Preferences › App › *Keep running in the tray when the window is closed* (Tauri
+      `tray_available`; without a tray it's off and says why)
+- [x] Tests: the setting; `cargo test -p flux-gui` runs the hand-over and the tray-host
+      check against a private `dbus-daemon` (a stand-in watcher answers
+      `IsStatusNotifierHostRegistered`), never the desktop's own bus. 333 Rust tests;
+      fmt, clippy (workspace and GUI), svelte-check, vite build. Demo checked
+- [x] USER_GUIDE, README, CHANGELOG
+
+### Phase 81 — 1.1: A recovery checklist you can act on (2026-11-09)
+- [x] Each line of *Could you recover it on another computer?* has a button beside it:
+      **Back up now** (settings not kept or not current), **Keep it elsewhere…** (the
+      password), **Export the key…** (Borg), **Test a restore now** / *Test again*,
+      **Add a place…** (opens Settings with the add-a-place dialog: `openSettings(id,
+      "add-destination")`). "I have" / "Not any more" stay for what only you can tell.
+      The list reloads after a backup or a test (`app.revision`); all ready shows green
+- [x] `KeepPasswordDialog`: the password masked until *Show*, *Copy* (clipboard cleared
+      after 30 s), *Save a copy…* of a Vault's unlock file, *I've kept it elsewhere*
+      ticks the line. One asked for each time: says it isn't kept anywhere
+- [x] Service: `reveal_password` (typed this session, else from the keyring, file or
+      command; never one asked each time), `export_borg_key` (`BorgRepo::export_key`,
+      `borg key export` into a new `borg-key-<id>.txt`, never over a file; ticks
+      `key_exported`), `copy_unlock_file` (a new 0600 file, `name-2.ext` when taken).
+      All three refuse system backups (`not_here`): the helper runs as root, and a
+      system backup's secrets stay root-only
+- [x] The checklist's texts no longer point elsewhere ("in Settings › …", "Run borg key
+      export…"): the button does it. New icons: eye, eyeOff
+- [x] Tests: the password from a file, refused when asked each time, the one typed this
+      session; the unlock file copied 0600 and never over another; system scope refused;
+      Borg key export with the real borg (skipped without borg 1.x). 335 Rust tests;
+      fmt, clippy, svelte-check, vite build. Checked in the demo (dark and light): the
+      list, the dialog, Add a place
+- [x] USER_GUIDE (a table of the lines and their buttons), CHANGELOG
+
+### Phase 82 — 1.1: Restore tests that leave nothing behind (2026-11-09)
+The owner's concern: a restore test restored its sample into a temporary folder, so an
+encrypted backup's files sat decrypted on disk (and any backup's files were copied
+somewhere they shouldn't be), and "every file" could fill a disk or, held in memory, run
+out of it. Options weighed: a tmpfs or an encrypted spill file with a throwaway key.
+Chosen: nothing restored at all. A restore test only needs to know each file reads back
+whole and right, and that can be checked as it streams.
+- [x] `restore_test::read_through`: each picked file is read the way a restore reads it,
+      in 1 MiB pieces, into a BLAKE3 hasher; each piece is `Zeroizing` (wiped once seen).
+      Mirror and rsync read the snapshot's file in place, SFTP reads ranges, a Vault
+      decodes and authenticates chunk by chunk under its shared lock, Borg streams `borg
+      extract --stdout` (`BorgRepo::stream_file`, `BorgStream`: a borg that fails partway
+      is an error at the end, dropped early it's killed). Memory is one piece plus one
+      Vault chunk, whatever the mode
+- [x] Checks as before: couldn't read back, size, recorded checksum (failures); differs
+      from the file now (a note; only a regular file there now, never through a link).
+      Permissions and times can't be checked without restoring: no longer reported
+      (`MetadataDiffers` stays for old reports). Limits and cancelling stop inside a file
+      too; a file cut short isn't counted
+- [x] The folder a 1.0 restore test left behind after a crash (`cache/restore-tests`,
+      plain copies) is removed by the next test
+- [x] `view::load_entries` and `view::open_file` (generic over `Arc` or a reference) shared
+      with `flux mount`; a Vault reader wipes its last decoded chunk when dropped, and
+      the pieces it assembles
+- [x] Tests: an encrypted Vault with a 3.5 MB file (several pieces) passes, and the only
+      file the test writes in the whole tree is its report; the 1.0 leftover folder is
+      removed; a source changed since is a note; a cancelled test counts nothing; Borg
+      streamed with the real borg, nothing written besides the report and the listing
+      cache browsing makes too. The earlier tests (damaged Mirror file, damaged Vault pack,
+      limits) pass unchanged. 337 Rust tests; fmt, clippy, svelte-check, vite build
+- [x] Wording everywhere ("read back and checked", "Nothing is written anywhere"): the
+      Overview, the settings page, the checklist, `flux restore-test --help`, the guide
+      (*Nothing is written anywhere*), CHANGELOG (Security)
+- [ ] Not changed: `flux mount` of a Borg archive still extracts each opened file to a
+      temporary file (it needs random access); candidates later
+
+### Phase 83 — 1.1: At a glance: settings summary and the all-backups table (2026-11-09)
+- [x] `app/src/lib/glance.ts` (pure): a backup's settings as label, short value, detail,
+      tone (`warn` to fix, `off` not used) and the settings page that changes it:
+      schedule (in the chosen clock, with catch-up / mains power / metered), backs up,
+      excluded, where, other copies (offsite said), stored as, password (where it's kept,
+      unlock file, hashing; amber when asked each time on a backup that runs by itself),
+      keeps, restore tests, upkeep, unusual changes, notifications (and webhooks), network
+      (servers only), hooks
+- [x] `SettingsGlance` on the Overview, under the 30-day history: a hairline grid of
+      compact cells (label over value, two lines at most, a chevron on hover), auto-fill
+      columns (three at 1200 px, two at 900); "N needs a look" in its heading; *All
+      settings*; folds, remembered on this computer. A cell opens its settings page
+- [x] `SettingsTable` on *All backups*: a *Status / Settings* switch (remembered). One row
+      per backup, the name sticky while the columns scroll, a fade when more columns are
+      to the right; sortable by any column (ascending, descending, off; `aria-sort`);
+      the filters apply; system backups that can't be read yet say "Unlock system backups
+      to see their settings". A cell opens its setting, the name the backup
+- [x] The pure modules import each other as `./x.ts` (`allowImportingTsExtensions`,
+      `noEmit`), so node runs their tests without a bundler
+- [x] Tests: `app/tests/glance.test.ts` (a Vault with the keyring, the password warning by
+      hand / on a schedule / on connect, Mirror over SSH with an offsite copy, rolling
+      tests, webhooks, hooks, an interval with metered). 9 app tests; svelte-check, vite
+      build. Checked in the demo at 900, 1200 and 1440 px, dark and light, with and
+      without a warning
+- [x] USER_GUIDE (*Settings at a glance*), CHANGELOG
+
+### Phase 84 — 1.1: Man pages with examples (2026-11-09)
+- [x] `crates/flux-cli/src/manual.rs`: a page for each of the 74 commands: a description
+      of what it does and what it changes (the one-line summary stays in NAME), examples
+      of basic use (2 to 6 each; 8 on `flux(1)`), its exit status (0, 1, 2 for a wrong
+      command line, and 3 / 4 / the restore test's and check's own where they apply), and
+      SEE ALSO. `flux(1)` adds snapshot naming, ENVIRONMENT and FILES
+- [x] Rendered with clap_mangen's own NAME, SYNOPSIS, OPTIONS, SUBCOMMANDS and VERSION,
+      and the manual's sections in roff (examples in `.EX` blocks, `\-` for hyphens).
+      clap_mangen put `after_help` in an "EXTRA" section and reflowed it into one line;
+      such notes (archive kinds, export formats) are now a NOTES section kept as written
+- [x] `flux <command> --help` ends with the same examples (`with_examples` adds them to
+      every subcommand before parsing); the "Examples:" blocks written into seven
+      commands' `after_help` moved into the manual, so there's one list
+- [x] Checked against the code while writing: what `--exact` and a differing file do on
+      restore, key ids, `--memory` in MiB, `unlock --force`, `profile duplicate`'s
+      `<id>-copy`, `profile edit` exits 0 when you give up, the timers' names
+- [x] Tests: every visible command has a page with a description and examples; every
+      example is parsed by the real command line (after `sudo` / `X=y`, before `>`);
+      every SEE ALSO page exists; the pages render their sections and escape options;
+      `--help` shows the examples. 339 Rust tests; fmt, clippy. Read through `man -l`
+- [x] USER_GUIDE (*Help on the command line*), README, CHANGELOG
+
+### Phase 85 — Release 1.1 (2026-11-09)
+- [x] Version 1.1.0: workspace (every crate, `flux`, the helper, flux-vault-recover), the
+      app's package.json and lock file, tauri.conf.json
+- [x] CHANGELOG: *Unreleased* is now **1.1.0 — 2026-11-09**, with a summary; compare link
+- [x] AppStream: 1.1.0 release notes; `appstreamcli validate` passes (its one pedantic
+      note, the capitals in the app id, was there before)
+- [x] README: status 1.1, *What 1.1 refines*, two new screenshots in the gallery (settings
+      at a glance, every backup's settings); the website's and the guide page's version
+      labels say 1.1 (the *New in 1.0* section stays as it is)
+- [x] Screenshots retaken at 1200×780 with the demo clock at 4 PM where the screen
+      changed: overview (dark and light: the schedule tag in words, the glance grid),
+      settings (*Exclude Files/Directories*), All backups (the Status / Settings switch),
+      storage and readiness (the checklist's buttons), Preferences (Clock, the tray); new:
+      glance-dark, table-dark. In docs/screenshots and site/assets/screenshots; reviewed
+      one by one (a toast over Preferences: retaken)
+- [x] No `v1.1` fixture: 1.1 writes exactly the 1.0 formats (only `flux_version` differs),
+      which the `v1.0` fixture already covers
+- [x] Checks: fmt, clippy -D warnings (workspace and GUI), 339 Rust tests and the GUI
+      crate's 2, svelte-check, 9 app tests, Vite build; `packaging/prepare-dist.sh` builds
+      flux 1.1.0, the helper, a static flux-vault-recover 1.1.0, 74 man pages (read with
+      `man -l`) and completions. The release `flux` end to end: an encrypted Vault backed
+      up, `restore-test --full --compare-source` passed, and the only file it wrote was
+      its report
+- [ ] Publishing, by the owner's word only: sync to the public repository, tag `v1.1.0`
+
+### Phase 86 — 1.1: Statuses that agree and don't shout (2026-11-09)
+The owner asked for every idea from the clarity and visual review of 1.1 (docs/PLAN.md,
+*1.1, continued*); Phases 86–92.
+- [x] `app/src/lib/attention.ts` (pure): one count everywhere. *Not protected* (no good
+      copy: failed, at risk, never backed up; a first backup running isn't counted) and
+      *needs a look* (protected, with a warning). The sidebar said "2 need attention"
+      while All backups said "3 of 5 are protected … and 4 more need a look": now "2 not
+      protected · 3 to look at", and "And 1 more isn't protected, and 3 need a look below."
+- [x] Status words from the health warning's kind instead of "Check" / "At risk": Low on
+      space, Not tested lately, Drive not seen, A copy failed, Source missing, Overdue,
+      Restore test failed, Unusual changes (the time is still the last good copy's)
+- [x] `StatusGlyph`: red ⚠ only for not protected, a quiet amber dot (and ordinary text)
+      for something worth a look, a tick, a spinner, a clock. The sidebar and All backups'
+      rows use it; the headline names its first backup in red or amber
+- [x] Toasts: an "i" for news ("Timer updated") instead of ⚠; `use:liftToasts` on the
+      editor's Save bars keeps them above it (`--toast-lift`, cleared when it closes)
+- [x] Tests: `app/tests/attention.test.ts` (the demo's counts, looks only, nothing, a
+      first backup running, kind labels). 12 app tests; svelte-check. Checked in the demo
+- [x] USER_GUIDE (the status marks), CHANGELOG
+
+### Phase 87 — 1.1: Plain words (2026-11-09)
+- [x] Durations in words: `durationWords` ("4h" → "4 hours", "1h 30m" → "1 hour 30
+      minutes"); schedules ("Every 4 hours", in the header, the glance grid, the table and
+      the editor's choices and summary); `ago` says "in 1 hour", not "in 60 minutes"
+- [x] Storage in plain words where it's a tag: `storageWords` (Plain folders, Encrypted,
+      rsync folders, Borg repository) on the Overview's places and the editor's other
+      places; the engine names stay in settings, the command line and the docs
+- [x] "Profile" tied to "backup": under the name in Settings, "Saved as the profile docs ·
+      on the command line, flux backup docs" (`--system` for a system backup)
+- [x] Validation messages without config syntax (the command line already prints the
+      setting's name in front of each): the times a calendar schedule runs, the time
+      between backups, a drive Flux knows for "when plugged in", an empty drive id, a
+      system backup's key file
+- [x] Tests: durations and schedules in words (13 app tests); 339 Rust tests. Checked in
+      the demo
+- [x] CHANGELOG
+
+### Phase 88 — 1.1: Checks explained, checklist progress, one warning card (2026-11-09)
+- [x] *Maintenance* is **Checks and upkeep**: each check titled by the question it answers
+      (Is every snapshot whole? Can files come back? Is all the stored data undamaged?),
+      quickest first, the restore test among them; *Verify every byte* worded the same in
+      Settings' upkeep and the glance grid. The guide has the three side by side
+- [x] The recovery checklist: a segment meter beside its heading (one per line, green when
+      ready, seen folded too); a line not ready yet is an empty dashed ring, a thing to do,
+      instead of ✕ or ?
+- [x] `Callout`: one shape for every warning, error and note (warn, bad, info, ok; an
+      optional title, actions under the text or beside it when `compact`). It replaces the
+      hand-made boxes: the password warning, the size-limit banner, unusual changes,
+      retention's confirmation and a check's result on the Overview, the drive not
+      connected, a new backup history and settings errors in the editor, the export's
+      notes, the restore's empty folders, and the error boxes of Snapshots, Versions,
+      Preferences, the recovery kit and the password dialog
+- [x] svelte-check, 13 app tests, vite build; checked in the demo (dark and light)
+- [x] USER_GUIDE (the three checks), CHANGELOG
+
+### Phase 89 — 1.1: Custom times, previewed (2026-11-09)
+- [x] `Calendar::upcoming` (flux-runner's own reader of systemd calendar expressions, the
+      one cron uses): the next N runs in a time zone; tested (Mon,Wed,Fri 18:00, a date
+      already past)
+- [x] Tauri `calendar_preview`: the next three runs in the system's time zone, or why
+      Flux can't read it. Under *Custom times*, as it's typed (200 ms after the last key):
+      "Next: Mon, Nov 9, 6:00 PM · Wed… · Fri…" in the chosen clock; one Flux can't read
+      (a time zone, `~`) says so, and that systemd may still read it; one that never runs
+      again says that. The demo previews "[days] HH:MM"
+- [x] 340 Rust tests; clippy (workspace and GUI); svelte-check. Checked in the demo
+- [x] USER_GUIDE (*Custom times*), CHANGELOG
+
+### Phase 90 — 1.1: All backups' table and the glance grid (2026-11-09)
+- [x] Settings view of *All backups*: the headline in one line ("3 of 5 backups are
+      protected. Photo library: Failed 2 days ago · Open it") instead of the 30 px hero;
+      the page uses the whole width (the status view keeps its 1080 px)
+- [x] The table: one line per row (the full value and its detail on hover); short forms
+      from `glance` (`short`): keeps "7d · 4w · 12m · 5y", schedules "Daily 8:00 PM",
+      "Mondays 07:30", "On plug-in"; next "On plug-in" / "By hand"
+- [x] **Columns** (in the filter row): any of 15 columns, a ✓ on those shown, *Reset
+      columns*; remembered (`flux.tableColumns`). With *Other copies* shown, *Where*
+      no longer adds "+2"
+- [x] The glance grid in three labelled groups (When and what, Where and how, Safety and
+      alerts: `GLANCE_GROUPS`); cells that say nothing about this backup (`idle`: no
+      password for plain folders, no hooks, no upkeep) left out of the grid, kept in the
+      table
+- [x] Tests: short forms, idle cells, every item in exactly one group (14 app tests);
+      svelte-check. Checked at 1200 and 1440 px
+- [x] USER_GUIDE, CHANGELOG
+
+### Phase 91 — 1.1: The Overview's order (2026-11-09)
+- [x] Three tiers. Raised: the answer and anything wrong (unusual changes, further
+      problems, now right under the sentence instead of below the glance grid), the
+      30-day history, the glance grid, space. Flat (`.rows-flat`: hairlines, no box):
+      where it's kept, recent backups, the restore test and the recovery guide. Folded:
+      the recovery checklist, checks and upkeep. The Vault upgrade note is a `Callout`
+- [x] The glance grid stays open by default (it's the overview the owner asked for; it
+      still remembers being folded), and fits each group: three across, four as two by
+      two, a short last row's final cell stretched, so no empty cells
+- [x] The demo's checklist counts its offsite copy as the backend does
+- [x] svelte-check, vite build; the whole Overview checked at 900 and 1200 px, dark and
+      light (a block moved the wrong way on the first try hid the history and grid:
+      found in the screenshot, fixed)
+- [x] CHANGELOG
+
+### Phase 92 — Release 1.1, again (2026-11-09)
+- [x] CHANGELOG's 1.1.0 summary and entries cover Phases 86–91; AppStream release notes
+      updated (`appstreamcli validate` passes); README *What 1.1 refines* gains *Clearer at
+      a glance*
+- [x] Website: **New in 1.1** chips (restore tests that write nothing, settings at a
+      glance, every backup side by side, the checklist, statuses that agree, times as you
+      write them, custom times previewed, the tray, man pages), then *And in 1.0*; the
+      guide page's nav says *New in 1.1*
+- [x] Screenshots retaken (1200×780, demo clock at 4 PM): overview dark and light, glance,
+      settings, All backups, the table, storage and readiness, Preferences; in docs and
+      on the site. Reviewed one by one
+- [x] (Done in Phase 96.) The other 16 screenshots (snapshots, activity, search, versions, restore, space,
+      export, new backup, recover, templates, rules, calendar, archive, compat, recovery
+      kit, system) still show 1.0's sidebar (amber triangles, "Check"): their screens
+      didn't change otherwise. To retake when the owner wants every image current
+- [x] Checks: `cargo fmt` (two lines from Phases 87 and 89 weren't formatted: formatted
+      here), clippy -D warnings (workspace and GUI), 340 Rust tests and the GUI crate's 2,
+      svelte-check, 14 app tests, Vite build
+- [ ] Publishing, by the owner's word only
+- [x] After the release, from the owner: a webhook's event toggles were barely different on
+      and off (`bg-selected` #3b3b40 against `surface-3` #3d3d42). `.chip-toggle`: on is
+      green (tinted, outlined, bold) with a ✓; used there and for Snapshots' tag
+      filters, which had the same problem. Checked dark and light. The Columns menu's last
+      item is now *Reset columns*
+- [x] From the owner: clicking a glance cell (Keeps, say) opened its dialog but switched
+      the page underneath to Settings, which was jarring. `ProfileEditor` gains
+      `dialogOnly`: just that group's dialog over the current page, with its own Cancel and
+      Save (Escape cancels; an error elsewhere is said in the dialog, never jumped to).
+      Every glance cell opens its dialog in place, including three new ones (*What to back
+      up*, *Where to keep it*, *Other copies*: the editor's section snippets moved to the
+      top so a dialog can show them; places are added and removed at once, so that one
+      has Done). The same in place for the All backups table, *Change the limit* and the
+      checklist's *Add a place…* (`DestinationDialog` directly); `openSettings(…,
+      "add-destination")` removed. Checked: all 11 cells, Save, Cancel, Escape, the table,
+      Add a place, and the Settings page and wizard after the move
+- [x] From the owner: a cell opened a partial group (Schedule opened *More schedule
+      options*). Each cell now opens its **section** of the Settings page in a dialog
+      (`dialogOnly: "section:when"`): What to back up, Where to keep it (with encryption
+      and the password field, so *Keep it in the keyring* works there too), Also keep
+      copies elsewhere, When, What to keep, More: the same snippets as the page
+      (`keepRows`, `moreRows` new). A group opened from a section shows in the same dialog
+      with **Back** (one Modal: two in a row closed, and so cancelled, in between; the
+      group content is the `pageBody` snippet). Checked: all cells of a Mirror and a Vault
+      backup, When → More schedule options → Back → a new time → Save (the cell then reads
+      7:30 AM, still on the Overview), and the Settings page's own dialogs
+- [x] From the owner: the settings table's header row looked like the rows. It's now a
+      band of its own (the foreground mixed 9% into the rows' colour: a step lighter in
+      dark, grey in light), bold, with a firmer line under it. Checked dark and light
+- [x] From the owner: the locked "System backups" entry at the foot of the sidebar was
+      just hanging around. Gone; the sidebar's *System backups* section shows only once
+      unlocked and with system backups in it. Setting one up: **Back up the whole
+      computer** at the end of the New backup page (explained, then the administrator
+      password, then the system backup's setup: `unlockSystem("new")`, the follow-up
+      taken when Continue is clicked, as closing the explanation forgets it). Reaching the
+      ones there are: **System backups…** in the + menu (**Lock system backups** while
+      unlocked). Checked both paths, and that cancelling starts nothing
+
+### Phase 93 — 1.1: Restore tests with a stated confidence (2026-11-09)
+From `docs/MATH_IDEAS.md` (1), asked by the owner with 2 and 4, a phase each.
+- [x] The arithmetic (`flux-runner/src/sample.rs`): the chance of missing all *D* damaged
+      files of *N* with a sample of *n* is C(N−D, n)/C(N, n), summed in logarithms over
+      the shorter of its two products; `sample_size` is the smallest *n* that brings it
+      to 1 − certainty for D = ⌈share·N⌉ (by halving; it only falls with *n*);
+      `detectable` is the inverse (the fewest damaged files a sample of *n* would catch)
+- [x] Tested against whole-number binomials: every (N, D, n) up to N = 40, and the
+      smallest *n* by brute force for N up to 100 at six shares and six certainties; the
+      figures in the notes (459 at 1%/99% from 10⁶ files up, 448 of 10,000, 368 of 1,000,
+      99 of 100); a simulation of 4,000 tests of a damaged backup misses as often as the
+      formula says
+- [x] Sampling: xoshiro256++ seeded from the system (`getrandom`), unbiased range
+      (Lemire), the first *n* steps of a Fisher–Yates shuffle; replaces the xorshift
+      seeded from the clock, for *some files at random* and *a share* as well
+- [x] `Percent` in flux-core (millionths; "1%", "99.9%", or a bare number in TOML);
+      `[restore_test]` gains `mode = "confidence"`, `damage` (0.01–50%, default 1%) and
+      `certainty` (50–99.99%, default 99%), validated; not written when at their defaults
+- [x] Reports carry a `guarantee` (files, damaged, damage, certainty) when the test
+      passed, read its whole sample, and the sample was uniform (confidence, random
+      files): not for one stopped at a limit (big files end those sooner), a share by
+      size, or rolling. In the log and notifications, `flux restore-test` (a line of its
+      own; `--damage`, `--certainty`), the Overview and the toast
+- [x] App: *Enough to be sure* first under *Which files*, with the two choices and the
+      number of files they take; the glance cell and table say "catches 1% damage"; the
+      demo's Home folder uses it. Checked in headless Chrome (Overview, the dialog,
+      changing the share: 459 → 4,603)
+- [x] Found on the way: the demo's Overview was empty tonight (the 30-day history named
+      1 November, 25 hours long, twice: a duplicate key). Its days are calendar days now
+- [x] USER_GUIDE (with a table of sample sizes and what the statement doesn't say), the
+      man page, README, CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 94 — 1.1: Repair, not just detection (2026-11-09)
+From `docs/MATH_IDEAS.md` (2).
+- [x] Decided: parity in files of its own (`parity/<the file's path>`) rather than a
+      Vault format 3. The Vault's format doesn't change, so the 1.x freeze holds: Flux
+      1.0 and `flux-vault-recover` read a Vault with repair data as before and ignore it
+- [x] Decided: our own code rather than `reed-solomon-simd`, so the format is specified
+      exactly and independent of a library. GF(2⁸) mod 0x11d (`gf256.rs`: log/exp tables
+      built at compile time, a 64 KiB product table, Gauss–Jordan inversion); tested
+      against the definition for all 65,536 products, inverses, associativity and
+      distributivity
+- [x] The code (`parity.rs`): 4 KiB blocks dealt to interleaved stripes, a systematic
+      Cauchy Reed–Solomon code per stripe (k + m ≤ 256), a hash for every data and
+      parity block (the damaged ones are then known, so all m parity blocks go to
+      rebuilding), the file's BLAKE3, the head stored twice. Tests: any m blocks of a
+      stripe rebuilt and m + 1 refused (40 random choices); a flipped bit, runs of m·G
+      blocks, truncation, damage to the parity file and to either head; 60 random files,
+      shares and damage patterns (repaired exactly when no stripe loses more than m,
+      refused otherwise, never wrong); junk and every single-bit change of a head
+      rejected without a panic
+- [x] Speed (release, 16 threads): 16 MiB encoded in 18 ms at 5% (about 900 MiB/s), 27 ms
+      at 10%, 42 ms at 20%; 200 damaged blocks rebuilt in 30 ms
+- [x] In the Vault (`protect.rs`): written with each pack (from the bytes in memory),
+      index file, snapshot record and key slot when `repo.parity` is set; removed with
+      them (pruning, deleting snapshots, removing a password); `tidy` (when space is
+      freed, and when repairing) removes parity whose file is gone and adds it for
+      `config`, keys, index files and records that lack it
+- [x] Repairing: only what fails its own check (a pack's hash is its name; an object must
+      open), and the result must pass it; unreadable ranges are read around block by
+      block; stale parity (a record rewritten by a Flux without repair data) is written
+      again, never used on a sound file. `config` and key slots are repaired before the
+      Vault is opened, without the password
+- [x] `check_with(repair)`: packs first when repairing, so the rest checks the repaired
+      Vault; reports `repaired`, `repairable`, `parity_added`; a check without repair
+      writes nothing and says what could be repaired; the parity of sound files is
+      verified too and rewritten when damaged; packs without parity get it (they are
+      read anyway)
+- [x] `[vault] parity` (0–50); `flux check --repair`; the app's *Verify every byte* and
+      the monthly verification repair when the backup keeps repair data (a notification
+      says so); copies carry `parity/`; storage statistics count it and say what it
+      covers
+- [x] App: *Repair data* under *How backups are stored* (None, 2, 5, 10, 20%), the glance
+      cell's detail, the storage line, Verify's result. Checked in headless Chrome
+- [x] Tests (`flux-vault/tests/repair.rs`, 8): damaged packs rebuilt byte for byte and a
+      half-missing one refused; index, record, config and key rebuilt; damaged parity
+      rewritten; a Vault without repair data gets it; pruning and key removal take the
+      parity along; a sound file is never turned back into an older self; copies and
+      unencrypted Vaults; sectors that return read errors. CLI: `check --repair`
+- [x] Not done, on purpose: `flux-vault-recover` doesn't repair (it stays small; repair
+      with Flux); a stored file that is gone entirely isn't rebuilt (parity is per file:
+      that's what a second place is for); the percentage of existing parity isn't
+      changed when the setting is
+- [x] Security notes (THREAT_MODEL): parity says nothing the stored files don't; a key
+      slot's parity goes with its password; with an older Flux on the same Vault, remove
+      passwords with 1.1
+- [x] VAULT_FORMAT (*Repair data*: the code, the file, repairing), FORMATS, USER_GUIDE,
+      man page, README, CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 95 — 1.1: Flux Sentry (2026-11-09)
+From `docs/MATH_IDEAS.md` (4). The name was chosen by the owner before any of it was
+written ("Flux Sentry algorithm, or just Sentry for shorthand"; Tidewatch, Riptide, Pulse
+and High-Water Mark were the other candidates).
+- [x] The algorithm (`flux-runner/src/sentry.rs`), per backup, from its last 60 runs that
+      made a snapshot: each run's change is y = ln((changed + deleted + ½) / (files + 1));
+      a **level** μ, an exponentially weighted moving average of y (α = 0.2) with a
+      clamped step (±3σ: one wild run moves it by at most α·3σ), started at the median of
+      the first five runs; a **spread** σ, 1.4826 × the median absolute forecast error of
+      the last 30 runs, kept within [0.3, ln 20 / k]; a **memory**: a share this backup
+      has reached (to 80%) in two earlier runs isn't unusual
+- [x] A run is unusual when (y − μ) / σ ≥ k (6; 4 closely), with at least 100 files and
+      5% of them (30 and 2%, closely), and unknown to the memory. So: 6 times the usual
+      for a steady backup (3.3 closely), up to 20 times for an erratic one
+- [x] It replaces the fixed limits (30% and 5 times the median) of the "much more change
+      than usual" signal in `unusual.rs` once a backup has five runs; they stand in until
+      then. The other signals (renames, ransomware's extensions, notes, encrypted text)
+      are unchanged
+- [x] It learns only from runs that weren't flagged, or were and then dismissed
+      (`sentry_history`); dismissals are all remembered now (`unusual/<id>.dismissed`
+      holds the last 100, one a line; a file from before reads as one line)
+- [x] Tests: the level and spread recovered from lognormal histories; a quiet backup
+      warns at 6% where the fixed limit waited for 30%, a busy one doesn't at 35%; the
+      Monday rebuild is unusual twice and normal the third time, without moving the
+      level; a backup whose habits change is followed; one wild run moves the level by
+      under 35%; ordinary runs of 40 random backups (16,000 of them, floors off) raise
+      under one alarm in a thousand
+- [x] The report carries Sentry's reading; the warning reads "400 files changed or
+      deleted, 8.0% of them: 15 times what this backup usually changes (0.55%)"
+- [x] App: the Overview's callout is *Flux Sentry found unusual changes…*; the glance
+      cell reads *Flux Sentry on watch* with what it has learned ("Knows this backup from
+      34 backups: 3.1% of its files usually change; it would warn at about 41%…");
+      *This was me* says Sentry takes it as normal; the setting's words. Checked in
+      headless Chrome
+- [x] A note for the owner: "Sentry" by itself is also the name of a well-known
+      error-monitoring product; "Flux Sentry" is used throughout, never the bare word
+      as a product name
+- [x] USER_GUIDE (*How Flux Sentry knows what's usual*), README, the website (safety
+      section, *New in 1.1* chips), AppStream notes, CHANGELOG (and its 1.1 summary);
+      site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 96 — 1.1: Flux Sentry in setup and on the page; screenshots (2026-11-10)
+From the owner: ask about Flux Sentry while a backup is set up (recommended: normally),
+say briefly what the three levels are, show a green "Flux Sentry active" on the backup's
+page, give it an icon of its own (a shield), and bring the website, the docs and the
+screenshots up to date.
+- [x] The icon (`sentry` in `Icon.svelte`, `site/assets/sentry.svg`): a shield with an eye
+      in it. Three were drawn (a pulse, an eye, a rising line in a shield) and compared at
+      full size and at 13 px; the eye reads as "on watch" and stays clear small
+- [x] Setup: a step of its own between *When* and *Review*, **Should Flux Sentry keep
+      watch?**: *Normally* (tagged Recommended, the default), *Closely*, *Off*, each with
+      what it means; *Review* lists it, and the last screen says it's on watch. First it
+      sat under *Protection*, below the storage choices, where it would be missed
+- [x] From the owner: *Off* said "keeps no snapshot back for you", which read as if
+      backups stopped. It now says backups and snapshots are made just the same and only
+      the warnings are off
+- [x] The backup's page: a green **Flux Sentry active** tag (" · closely" when so) beside
+      where and when; `ProfileSummary` carries `sentry`. The setting's row in *What to
+      keep* has the icon, the name and what the two levels mean
+- [x] Website: the safety chapter is Flux Sentry's (its name and icon above the heading,
+      new lead and facts, a panel on setup, the tag and *This was me*); crop sizes in the
+      details mosaic updated
+- [x] Screenshots: `site/shots.mjs` retakes all of them from the demo (headless Chrome,
+      1200×780 at scale 2, the clock at 4 PM): the 24 in docs/screenshots (and the site's
+      copies), the six full screens and six crops in site/assets/screens, and one new
+      (`sentry-dark`, the setup step). All reviewed on contact sheets; retaken after
+      review: the calendar (October, the 25th), recover (the Vault opened first), system
+      (after its toast), the crops (10 px around them as before, the space card down to
+      its chart, the whole of *Where the time went* from a Vault's backup)
+- [x] USER_GUIDE (the setup step, a table of the three levels, the tag), README (gallery,
+      highlights), CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 97 — 1.1: Flux Sentry holds a backup (2026-11-10)
+From the owner: lock the backups down when Sentry finds unusual changes; no new backup
+until the user resolves it (restoring files, or saying it was them).
+- [x] **The hold** (`run_backup`): while a backup's latest flagged run isn't settled, no
+      backup is made, scheduled or by hand (`RunError::Held`, not recorded in the
+      history, like other skips); dry runs still run; turning Flux Sentry off for the
+      profile lifts it. A scheduled run that's held tells the webhooks (skipped) and, at
+      most once a day (`unusual/<id>.reminded`), the desktop: backups that stopped
+      unnoticed would be worse than what stopped them
+- [x] **The other places stay clean**: the look for unusual changes moved into
+      `run_inner`, before the destinations; when something is found they aren't backed
+      up to or copied to that time (recorded as skipped, with the reason)
+- [x] **Two ways to settle** (`settle_unusual`): *This was me* (as before: learned by
+      Sentry, the tag and the pin removed) and the new *It's dealt with*
+      (`unusual/<id>.resolved`: backups go on, nothing learned, the pin and tag stay).
+      `unusual_settled` replaces `unusual_dismissed` where it decides about pruning
+- [x] `flux sentry <profile>`: how it watches, what it has learned, whether it holds
+      (exit 1 then) and why; `--this-was-me`, `--dealt-with`. `flux backup` fails with
+      what to do while on hold (a scheduled one is skipped, exit 0). Man page
+- [x] Service and app: `dismiss_unusual` takes `resolved`; `ProfileSummary.held`;
+      *Back up now* refuses (`held`) and is disabled with the reason; the page's tag
+      turns amber, *Flux Sentry · backups on hold*; the callout says backups are on hold
+      and has *It's dealt with* beside *This was me*; "Next" reads *on hold until it's
+      settled*. Checked in headless Chrome; `unusual`, `health`, `table` retaken
+- [x] Tests: after a flagged backup the next is refused and makes no snapshot; *This
+      was me* lets backups go on and takes off the tag and pin; unsettled again, *dealt
+      with* lifts the hold without teaching Sentry
+- [ ] Not tested: a flagged backup with other places (the skip is by inspection); the
+      daily reminder's timing
+- [ ] More precautions, put to the owner (none built): a look at the sources *before* a
+      backup is written; tripwire files; holding every backup of the computer when one
+      is flagged; ejecting the backup drive; a guided "restore everything from before"
+- [x] USER_GUIDE, CHANGELOG, the website's facts; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 98 — 1.1: Flux Sentry looks before a backup is written (2026-11-10)
+From the owner's choice of the precautions put to them (1, 3 and 5), a phase each.
+- [x] `look_before` (in `run_inner`, after the "before" hook, which may be what mounts
+      the backups): the sources are scanned as the backup would scan them (same filters,
+      the backups themselves left out, sources whose drive is away carried over from the
+      last snapshot) and compared with the newest snapshot by `unusual::analyze`, with
+      the same history and the same read of changed text files
+- [x] Unusual: the backup isn't made (`RunError::Held`, recorded as skipped with the
+      report: `stopped`, `snapshot = "before:<time>"`, `before` = the newest snapshot,
+      which is pinned); notification, log and the `unusual_changes` webhook say it was
+      stopped. Nothing unusual: the backup runs, and isn't looked at again afterwards
+- [x] Only for Mirror and Vault, whose snapshots record files as a scan sees them. rsync
+      and Borg, and a backup with no snapshot yet, keep the look after the backup
+- [x] Snapshots made with checksum change detection carry hashes a scan doesn't have:
+      compared by size and time (their hashes set aside), or every file would look
+      changed
+- [x] *This was me* after a stopped backup: the next one isn't looked at (`owner_cleared`:
+      the latest flagged run was stopped, dismissed, and no backup has been made since),
+      or it would be stopped for the very same changes
+- [x] Wording for the stopped case: the Overview's callout, health, `flux sentry`
+- [x] Tests: the attack of `unusual_changes_are_flagged` is now stopped with one
+      snapshot, nothing of it stored; *This was me* then backs the changes up unflagged;
+      a checksum backup of 300 files raises nothing over three ordinary runs, and 200
+      rewritten files are stopped
+- [ ] Not looked at in the app: the stopped wording of the callout (the demo's flagged
+      backup is an rsync one, looked at after it was written)
+- [ ] Cost: one more scan of the sources per backup (the engine scans again). Not
+      measured on a large home folder
+- [x] USER_GUIDE, CHANGELOG, the website's fact; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 99 — 1.1: Tripwire files (2026-11-10)
+- [x] `flux-runner/src/tripwire.rs`: `.flux-sentry-tripwire.txt` (a note saying what it
+      is, and a random token) in each source folder and its first 8 visible subfolders;
+      where they are and the BLAKE3 of each in `sentry/<id>.tripwires.json`. Planted
+      with `create_new` (a file of that name Flux didn't plant is left alone), only for
+      a person's own backups (not system ones)
+- [x] Decided: **off by default** (`tripwires = true` turns it on). It writes files into
+      the owner's folders, which nobody should find there unasked; the setup step and
+      *What to keep* offer it
+- [x] Looked at before every backup (`look_before`), for every engine: changed (the hash
+      differs) or removed (gone, its folder still there) stops the backup like any
+      unusual change (`stopped`, hold, pin, notification), with the signal first and the
+      rest of the look added where it can be had. A folder that is gone takes its
+      tripwire along silently; a source whose drive is away says nothing
+- [x] Settling (either way) sets them again: a changed one is moved aside as
+      `….tripped` (never deleted: it may be someone's file by now) and a new one
+      planted. Turning the setting (or Sentry) off removes them at the next backup;
+      deleting the profile removes them at once. Only ones still exactly as planted
+      are ever removed
+- [x] `flux sentry` says how many there are; the glance cell and the review say so
+- [x] Tests: planting, the folders chosen, a second planting adding nothing, a new
+      folder; changed, removed, a deleted folder, an unchanged rewrite, a drive away;
+      rearm; removal that leaves a changed one; someone else's file of that name; system
+      scope. End to end: one changed tripwire, 300 bytes, stops a backup that nothing
+      else would have, nothing is written, the newest snapshot is pinned; dealt with
+      sets it again and backups go on; turned off, they are gone
+- [ ] Known limits, in the guide or here: looked at when a backup runs, not in between;
+      a fixed name an attacker could skip; planted in the first 8 subfolders only
+- [x] Screenshot `sentry-dark` retaken (the toggle); USER_GUIDE, CHANGELOG, the website;
+      site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 100 — 1.1: Restore everything from before (2026-11-10)
+- [x] The warning's first button, **Restore everything…**: the restore dialog for the
+      snapshot kept from before (`u.before`) and every source of the profile, opened on
+      *Back to where it was*, with a note saying what it does. The dialog's own preview
+      and choices are all there; its defaults are the careful ones (files that differ are
+      kept aside, nothing added since is removed)
+- [x] `RestoreDialog` gains `startAt`, `note` and `onrestored`. A restore without errors
+      settles the alarm as *dealt with* (not *mine*: Sentry learns nothing); with errors
+      it stays on hold
+- [x] After the files are back, what the attack left (renamed files, ransom notes) would
+      stop the next backup again. The one-time pass after a stopped backup now holds for
+      either way of settling (`owner_cleared`: stopped, settled, no backup since); the
+      snapshot from before stays pinned
+- [x] The buttons in order of use: Restore everything, Show the files, Browse the
+      snapshot before, This was me, It's dealt with (five wrapped to a second line with
+      the longer label)
+- [x] Checked in headless Chrome against the demo: the callout, the dialog with its
+      note and preview, a restore, the alarm settled and the page back to *Flux Sentry
+      active*. `unusual` retaken
+- [ ] Not built: the same from the command line (`flux sentry` prints the `flux restore`
+      command for the snapshot from before; settling is `--dealt-with`)
+- [ ] Not tested with a real restore of a home folder: the guided path was run only in
+      the demo; the restore itself is the existing one
+- [x] USER_GUIDE, CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 101 — 1.1 bug check: free-space pruning and retention (2026-11-10)
+A bug check of every crate and the app after 1.1 found 1 critical and 18 high issues (and
+two borderline ones). Fixed in four phases, each with its tests and a commit. This one:
+snapshots removed that should have been kept.
+- [x] `retention::space_candidates` never offers the `keep_last` newest (the newest
+      whatever it says), the newest `safety_floor` complete snapshots, or anything when
+      retention is switched off. Fixes the floor being ignored, and the snapshot Flux
+      Sentry needs (kept by `keep_last >= 2`) going for space before the look
+- [x] Mirror over SSH: `make_room` returns at once when `retention.enabled` is false
+- [x] Borg: free space is read after `borg compact` (once per archive removed for space),
+      so the loop stops when there is room; a failed compact ends the removals and is
+      the error
+- [x] App: *Free up space* asks when the trial run says the free-space minimum isn't met;
+      the outcome counts snapshots removed for space; the page refreshes for them.
+      `flux prune --dry-run` says older snapshots would go for space
+- [x] `[retention]` is read through `RetentionFile` (keep rules optional): none written
+      keeps the defaults, any written means what it says. What Flux writes round-trips
+- [x] Tests: `space_candidates` (floor, `keep_last`, already removed, switched off);
+      `prune::apply` with a floor that can't be met and one that is met after two; the
+      partial table. 379 Rust tests
+- [ ] Not tested against a real Borg repository below its minimum: the compact-then-read
+      order is covered by reading, the stop-when-met loop by the `apply` test
+- [ ] Not checked in a browser: the new confirmation was type-checked only
+- [x] USER_GUIDE (what the free-space minimum never takes; the partial table), CHANGELOG;
+      site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+
+### Phase 102 — 1.1 bug check: backups that weren't whole (2026-11-10)
+- [x] Vault: `Index::load` records superseded index files still on disk (`stale`);
+      `gc_locked` supersedes and removes them with the rest, so a leftover of an
+      interrupted prune never counts again. tests/faults.rs fails an index removal on
+      cue; the test fails without the fix (two index files left)
+- [x] rsync: a run that continues `snapshots/.partial` is never "unchanged" (its stats
+      say what this run sent, not what the snapshot holds). CLI test with real rsync;
+      fails without the fix ("Nothing changed since…")
+- [x] Sources under `/run/media`, `/media`, `/mnt`: missing only when gone or an *empty*
+      folder not on a drive of its own (`drive_absent_under`, testable with any root and
+      mount lookup); a link is judged where it leads
+- [x] Mirror/rsync replicas: `syncfs` before the rename, the snapshots folder synced
+      after; a copy without the snapshot folder's own files (`meta.json`, the manifest),
+      or with one cut to nothing, is removed and copied again (`looks_whole`)
+- [ ] A Vault already damaged this way is not repaired: `flux check` reports the missing
+      packs; the snapshots that need them are lost
+- [ ] `looks_whole` doesn't look into `data/`: files cut short deep in an old replica
+      copy are found by `flux check --read-data` only. New copies can't get that way
+- [ ] The target-side twin (`target_check::looks_unmounted`) still refuses a folder with
+      files under `/mnt` on the system disk; it says so and how to allow it
+- [x] USER_GUIDE, VAULT_FORMAT, CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, 383 Rust tests
+
+### Phase 103 — 1.1 bug check: restore safety, export as root, generated scripts (2026-11-10)
+- [x] Critical: a restore skips and reports every entry listed below a link
+      (`select`: the snapshot's links are collected, items with a link among their
+      ancestors dropped). Test with a forged source (a link, files below it, one of them
+      a hard-link follower): with the guard off, three files land where the link points
+- [x] Stored files are opened below their folder with no link followed (`open_below`,
+      `Copier::copy_below`: openat2 BENEATH | NO_SYMLINKS, a component walk without it);
+      used by Mirror, rsync (local) and Borg's staging
+- [x] Export: the staging folder is made new, 0700, and held open; staged files are read
+      through it (`open_below_dir`); the archive is `create_new`; as root the archive
+      and checksum file are 0600. `write_atomic` makes its temporary file new everywhere
+- [x] rsync recovery guide: "restore everything" names the top folders of the sources;
+      a backup of `/` keeps `data/` with the chmod/chown line to run after
+- [x] Scripts and settings for other tools are made from `script_safe(profile)` (control
+      characters out of the name and exclusions); here-document markers via
+      `heredoc_tag`; `RESTIC_REPOSITORY` quoted; a name with a control character is a
+      validation error
+- [ ] Mirror over SSH reads stored files through SFTP, which follows links on the
+      server: someone who can write there can already read what that login can
+- [ ] Not run as root: the 0600 archive and the staging checks were tested as a user
+      (the planted-link test) and by reading
+- [ ] The export of a system backup still isn't offered differently in the app: it
+      works, and says nothing about the archive being root's
+- [x] Tests: forged entries below a link; `open_below`; export through planted links;
+      the guide's command; hostile names and patterns against every generated script
+      (fails without `script_safe`). 387 Rust tests
+- [x] THREAT_MODEL (exports as root, symlinks, saved settings), CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests
+
+### Phase 104 — 1.1 bug check: Flux Sentry, the app, hooks, and two smaller ones (2026-11-10)
+- [x] Sentry, main out of reach: when the main backup failed without a look, each
+      independent place is compared with its own newest snapshot before it's written
+      (`compare_with`, Mirror and Vault) or right after (`check_unusual`, rsync and
+      Borg); a finding stops it and the places after it. Test: main drive renamed away,
+      a small change goes to the other place, 200 of 300 files rewritten don't (fails
+      with the look switched off)
+- [x] Sentry, hold: `RestoreDialog.onrestored` says where the restore went; only *back
+      to where it was* settles the alarm; the note and tooltip no longer promise files
+      are kept aside
+- [x] Restore dialog: `replacing`/`neverKeeps` from the preview's `keep_existing`; the
+      option's text, the red button and its label follow it; a restore in place waits
+      for the preview. `flux restore` asks with what will really happen
+- [x] System backups' other places: `qualify_summary` gives `destinations[].id` the
+      `system:` prefix in `profiles` and `overview` replies (unit test)
+- [x] Hooks: readers hand over what they've read; after the command ends its output is
+      waited for 2 s at most, a background process is left running. Test: `sleep 30 &`
+- [x] `flux-vault-recover`: `snapshots_and_damaged`; unreadable records are warned
+      about and left out, `snapshots` and `verify` exit 3. The tampered-record test now
+      has a second snapshot that lists and restores
+- [x] Back In Time import: smart remove sets `keep_yearly = 99`
+- [x] Found on the way: progress counters are reset for each other place (a Mirror main
+      with a Mirror place tripped a debug assertion: 610 of 305 entries); the status
+      server is stopped by a drop guard, so a panic in a run ends it instead of hanging
+- [ ] The looks at other places use the main backup's history for Mirror and Vault, but
+      fixed limits for rsync and Borg places (they have no run history of their own)
+- [ ] A finding at another place names a snapshot of *that* place as the one from
+      before; *Restore everything…* looks for it in the main backup, which was out of
+      reach: restore from the other place's page instead
+- [ ] Not checked in a browser or against a real helper: the dialog and the system ids
+      were type-checked and unit-tested only
+- [x] USER_GUIDE (Sentry, hooks, system exports, the recovery tool), CHANGELOG; site
+      guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, 389 Rust tests, svelte-check, app tests,
+      Vite build
+
+### Phase 105 — 1.1 bug check, Flux Sentry: the medium ones (2026-11-10)
+A second pass over Flux Sentry alone, for medium and low faults (9 and 9), and a
+performance pass over everything (6 critical, 13 high). Fixed in phases 105–111.
+- [x] rsync/Borg after a dealt-with alarm: `check_unusual` compares with the newest
+      snapshot not tagged *unusual changes*. Test with real rsync: flagged, restored
+      (`cp -a` of a stash), settled, one edit: not flagged, the right snapshot pinned
+- [x] Sources left out because their drive is away (`left_out`: missing and not carried
+      over) are dropped from the "before" list in `compare_with` and `check_unusual`.
+      Test: 700 of 1000 files on a "missing" volume, rsync
+- [x] `RunRecord.sentry_seen`: what the look counted (`analyze_counted`); `learn` uses
+      it before the engine's statistics. Covers metadata-only runs and Borg's missing
+      deletions
+- [x] `sentry_history`: failed/skipped/unchanged runs don't count toward the 60;
+      callers read 300 records (`SENTRY_READ`)
+- [x] `open_unusual`: an alarm holds only while no backup has been made since it; the
+      Overview, the all-backups status and `flux sentry` show no hold with Sentry off
+- [x] Tripwires: `is_tripwire` (a whole one with any token is sound: shared between
+      backups, or put back by a restore), `of_others` (never remove one another backup
+      watches), `out_of_reach` (kept through `rearm` and `remove`), strays under a
+      removed source are removed by `plant`. Four new unit tests
+- [x] `forget_profile` (tripwires, the file index, an open alarm closed) from both
+      `flux profile delete` and the app's delete
+- [ ] The run history of a deleted profile stays, and a profile later made under the
+      same id reads it (Sentry's normal, Activity)
+- [ ] A tripwire is recognised by its form: someone who knows it can replace one with
+      another well-formed one unnoticed (they could as well leave it alone)
+- [ ] The two rsync tests weren't run against the code from before the fix
+- [x] USER_GUIDE, CHANGELOG; site guide rebuilt
+- [x] Checks: `cargo fmt`, clippy -D warnings, 396 Rust tests
+
+### Phase 106 — 1.1 bug check, Flux Sentry: the small ones (2026-11-10)
+- [x] The hold reminder's stamp: its folder is made; a stamp from the future doesn't
+      silence it
+- [x] `sentry_history` leaves out the backup made unlooked-at after a stopped alarm that
+      was *dealt with*
+- [x] `UnusualReport.before_pinned` and `.pinned_by_flux` (from `raise_alarm`, which says
+      when a pin or tag failed); `settle_unusual` returns `Settled { marks_left }`, unpins
+      by `pinned_by_flux` (a note of the owner's stays); the app's toast and `flux sentry`
+      say when the pin is left
+- [x] Overview: the callout by `u.before` and `u.before_pinned`; *Files involved* names
+      the snapshot from before for a stopped backup; "no extension"
+- [x] `Baseline::alarm_share` is `None` past 100% or under the minimum file count;
+      `flux sentry` and the glance cell say "at the marks of ransomware" then
+- [x] `looks_random`: the entropy bar follows the sample's length (8 − 255/(2n ln 2),
+      less a quarter bit, at most 7.5). Test with 256–65536 random bytes, text, base64
+- [x] System backups: `flux sentry` and the glance cell say tripwires aren't planted
+- [x] (An older tripwire put back by a restore: fixed with phase 105's `is_tripwire`)
+- [x] Tests: the runner test (pin with a note, marks left, learning after each way of
+      settling), `looks_random`, `alarm_share`. 398 Rust tests
+- [ ] The reminder and the pin-failure wording are untested (no fault injection for
+      `repo.change`)
+- [ ] Not checked in a browser
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+
+### Phase 107 — 1.1 performance: Flux Sentry's look (2026-11-10)
+- [x] `unusual::diff`: a merge of two path-sorted streams into `Diff` (files before, and
+      the changed, added and deleted entries without their xattrs); `analyze_diff` reads
+      the signals from it. `analyze`/`analyze_counted` (slices, any order) sort and call
+      it. A list out of order gives no answer
+- [x] `compare_with`: the snapshot streams against the scan; sources whose drive is away
+      are skipped on the snapshot's side (carried over or left out alike), so nothing of
+      the snapshot is held. `check_unusual`: both snapshots stream; a listing out of
+      order (another tool's) is sorted first
+- [x] `AnyRepo::entries_for_look`: a Vault's list from `cached_file_list` when it is this
+      snapshot's; the Vault's own trees otherwise
+- [x] Tests: the diff; the cached list equals the Vault's, and the look counts one
+      changed file against it. 400 Rust tests
+- [ ] The sources are still scanned twice (the look, then the engine): handing the
+      look's scan to the engines touches their core path and was left for later. The
+      second walk finds the folders in the kernel's cache
+- [ ] With a source's drive away, the share is now of the files that are there (those
+      on the missing drive no longer count in the total)
+- [ ] Nothing was measured: the memory and time figures are from struct sizes and
+      round-trip counts
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests
+
+### Phase 108 — 1.1 performance: the Vault, above all on a server (2026-11-10)
+- [x] `Sftp::read_many` (`ReadReq`): up to 32 files opened in one round trip, read
+      (ranges of up to 1 MiB, or whole files of up to 256 KiB with an `FSTAT` for the
+      size) and closed in a second; anything else falls back to the plain read. Tested
+      against OpenSSH's sftp-server: whole files, ranges, a missing file, an empty one,
+      past the end, too big, more than a batch
+- [x] `Backend::read_many` (in parallel locally; batches across the pool's sessions over
+      SFTP) and `Backend::remote`. Used by `record_listing`, `Index::load`, and
+      `pack::read_headers` (the last 64 KiB of each pack: length and header in one read)
+- [x] `VaultRepo::read_blob`: on a remote backend the second blob wanted from a pack
+      fetches the pack whole (8 held, others wait for a fetch under way); used by
+      `load_tree`, `VaultSource` and the mount's reader. Test with a counting "remote"
+      backend: 1000 files in 50 folders and a 6 MiB file restore with no more whole
+      reads than there are packs, and a handful of single ones
+- [x] `flatten_under` / `VaultSource::for_paths` / `AnyRepo::entry_at`: only the trees
+      on the way to and below what is wanted. Test: one file back in under depth + 6
+      reads
+- [x] Restore: no `sync_all` per file (Vault, Mirror over SSH, rsync over SSH); one
+      `syncfs` per destination filesystem at the end of `flux_fs::restore`
+- [x] Vault backup: `parent_flat` and `reusable` dropped after the plan
+- [x] `flux-vault-recover verify`: trees deduplicated by (id, format)
+- [ ] Not run against a real server: the round-trip counts are from the code, the
+      batched read was exercised on a local sftp-server only
+- [ ] Snapshot listings are still read afresh each time they're asked for (in two round
+      trips a batch, not cached): a cache would have to know when another process
+      pinned or renamed a snapshot
+- [ ] Vault backup memory: the new list is still built a second time for the cache
+      (`flat`) and serialised in one piece; the blob index is as it was
+- [ ] Big files restore a pack (about 13 pieces) per fetch, still one after another
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, 401 Rust tests
+
+### Phase 109 — 1.1 performance: plain folders and rsync on a server, and check (2026-11-10)
+- [x] `RemoteMirror::snapshots` and `RsyncRepo::snapshots` read every `meta.json` with
+      `read_many` (`Store::read_many` for the rsync store)
+- [x] `flux_transport::SmallFiles`: the small files of a restore, fetched 32 at a time
+      from where one is asked for; threads wanting a file already being fetched wait
+      for it; at most 1024 held. `RestoreSource::will_restore` tells a source which
+      files are coming. Used by `RemoteSource` and `RsyncSource` (on a server)
+- [x] `RemoteFile` (mount, restore test) reads 4 MiB ahead while a file is read through
+- [x] rsync `check`: a snapshot's list is counted, read and dropped; files read are
+      remembered by (device, inode). Mirror `check`: by (device, inode, expected hash)
+- [x] Tests: the SSH end-to-end test (real sftp-server and rsync, no network) restores
+      91 small files for Mirror, Vault and rsync; `check` reads a shared file once and
+      still finds it damaged. 402 Rust tests
+- [ ] A snapshot removed on a server still lists the snapshots once more to move
+      `latest` (now about a second)
+- [ ] Mirror's `check --read-data` still reads on every core at once, also on a
+      spinning disk
+- [ ] Throughput wasn't measured on a real line: the figures are round trips counted
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests
+
+### Phase 110 — 1.1 performance: find, history, and Borg (2026-11-10)
+- [x] `index::entries` streams the index file (`ManifestReader::open`) and writes a new
+      one from the repository's list as it comes; an index that turns out damaged is
+      removed when the damage is met
+- [x] Borg: `extract_file` keeps the last 16 extracted files open (2 GiB at most);
+      `adopt` asks `borg info --json --glob-archives '*'` once when more than one
+      archive lacks statistics (checked against borg 1.4.5: every archive's stats in one
+      reply); a staged file is removed after it's copied into place
+- [ ] Borg still extracts everything asked for before the restore decides what is
+      already identical, and the bytes are still written twice where staging and
+      destination can't share them (no reflink): only the room is given back. Extracting
+      just the files that differ needs the folders' own entries staged another way
+- [ ] The first listing of an rsync snapshot on a server and of a Borg archive is still
+      built in memory in full (`listing::scan_remote`, `borg::parse_listing`), and the
+      listing caches of both hand out whole lists; the index above keeps find and
+      history from asking them twice
+- [ ] `borg delete` is still one process per archive in a prune
+- [ ] No new tests: the existing find, history and Borg tests (real borg) cover the
+      changed paths' results, not their memory or the number of borg processes
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, 402 Rust tests
+
+### Phase 111 — 1.1 performance: the app (2026-11-10)
+- [x] `list_dir` takes `filter` and `missing`, answers at most `LISTING_MAX` (2,000)
+      items, folders first then by name, with `total`, `matching` and `missing`. The
+      browser shows what comes, asks again 200 ms after typing stops, says "the first
+      2,000 of N", and finds an item a search points at by its name when its folder is
+      too big. *Restore N deleted items* asks for the deleted ones itself. Selection
+      counts through a set, not a scan per selected item
+- [x] Tray: `set_running` returns unless the busy state changed
+- [x] `format.ts`: one `Intl.DateTimeFormat` per set of options (and one number
+      formatter), the year looked up once a minute; `monthLabel`
+- [x] `Service.browsed`: the browse cache is cleared 10 minutes after the last listing
+      (from `expire_idle`, which the app calls every half minute)
+- [x] Tests: `list_dir` order, counts, filter and only-missing (service). 402 Rust
+      tests; svelte-check, the app tests and the Vite build pass
+- [ ] **Not checked in a browser or the built app**: the browser's new effects (filter
+      debounce, the stale-answer guard, the highlight fallback) were type-checked only
+- [ ] The snapshot list is still drawn whole and fetched whole on every change; with
+      formatters cached that is what's left of its cost
+- [ ] A folder of 100,000 still costs 100,000 `lstat`s per listing on the computer
+      (as before), for the "deleted" marks and count
+- [ ] The helper for system backups keeps its own browse cache until it stops (15
+      idle minutes)
+- [x] CHANGELOG
+
+### Phase 112 — 1.1 performance: one scan for Flux Sentry and the backup (2026-11-10)
+The item phase 107 left: the sources were scanned for the look and again for the backup.
+- [x] `flux_mirror::scan_for_backup` / `backup_scanned`, the same for Mirror over SSH
+      (`remote::`) and the Vault (`backup::`): the scan an engine would make, and a
+      backup that takes it. `backup` is `backup_scanned(None)`
+- [x] `look_before` makes that scan (`scan_as_engine`: the engine's exclusions, the
+      run's progress and reporter), compares the snapshot's list with it, and returns
+      it in `Looked::Fine` / `Looked::CouldNot`; `engine_backup` passes it on. No scan
+      to hand over (Sentry off, the owner's word instead of a look, rsync, Borg): the
+      engine scans as before. A tripped tripwire, and the looks at other places, scan
+      quietly for themselves (`scan_for_look`)
+- [x] Tripwires are planted (or removed) before the look instead of after it, so the
+      one scan, and the snapshot, hold them; a changed or removed one is never
+      replanted by that (the look still finds it)
+- [x] Measured, release build, 60,040 files / 1.1 GB on tmpfs, one file edited, three
+      runs each: default 0.20 s → 0.15 s (Sentry off: 0.15 s); checksum 0.66 s → 0.40 s
+      (off: 0.35–0.40 s)
+- [ ] Not measured on a spinning disk, a cold cache, or millions of files
+- [ ] No test asserts that the sources are scanned once (nothing a run reports tells
+      the two apart); the existing Sentry and backup tests pass with the shared scan
+- [ ] A sampled first pass (stat a few thousand files of the last snapshot, look fully
+      only if they show change) was considered and not built: with one scan the look
+      adds a list comparison, and a sample would add stats to every backup to save
+      nothing the backup doesn't need anyway
+- [x] CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, 402 Rust tests
+
+### Phase 113 — 1.1: Flux Sentry's own dialog (2026-11-10)
+- [x] `SentryDialog.svelte`: what Sentry knows (from the page that opens it, or asked
+      for with `overview`), the three ways of watching as radio rows, the tripwire
+      switch (said not to be planted for system backups), a note when the backup is on
+      hold; saves the profile with those two fields changed
+- [x] Opened from the *Unusual changes* glance cell (instead of the whole *What to
+      keep* section) and from the header's Sentry tag, now a button with a chevron
+      (`.tag-button`); *Flux Sentry off* is shown as a tag too, so it can be turned on
+      from there
+- [x] Looked at in headless Chrome against the demo, dark and light: opened from both
+      places, changed, saved (the header then says *closely*, the toast says what was
+      set). That found Save failing with the profile held as a reactive proxy: it is
+      held raw now
+- [ ] Not looked at in the built app (WebKitGTK), nor with a system backup or a backup
+      on hold
+- [ ] The all-backups table's Sentry cell still goes to the settings page
+- [x] USER_GUIDE, CHANGELOG; site guide rebuilt
+- [x] Checks: svelte-check, app tests, Vite build

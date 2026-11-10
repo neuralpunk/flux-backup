@@ -4,6 +4,9 @@ export type Engine = "mirror" | "vault" | "rsync" | "borg";
 /** Compatibility mode: the backups are written by a standard tool, in its own format. */
 export const isCompat = (e: Engine | undefined | null) => e === "rsync" || e === "borg";
 export const engineLabel: Record<Engine, string> = { mirror: "Mirror", vault: "Vault", rsync: "rsync", borg: "Borg" };
+/** How backups are stored, in plain words first (the engine's name is for settings and
+ * the command line). */
+export const storageWords: Record<Engine, string> = { mirror: "Plain folders", vault: "Encrypted", rsync: "rsync folders", borg: "Borg repository" };
 export type Kind = "dir" | "file" | "symlink" | "fifo" | "char_device" | "block_device" | "socket";
 export type SnapshotStatus = "complete" | "complete_with_errors";
 export type RunStatus =
@@ -125,6 +128,11 @@ export interface ProfileSummary {
   offsite?: boolean;
   /** More places the backups go. */
   destinations?: DestinationSummary[];
+  /** Flux Sentry: how unusual changes are watched for (older helpers don't send it). */
+  sentry?: "off" | "normal" | "high";
+  /** On hold: Flux Sentry found unusual changes that aren't settled; no backup is made
+   * until they are. */
+  held?: boolean;
 }
 
 export interface Overview {
@@ -147,6 +155,9 @@ export interface Overview {
   restore_test?: { every: TestEvery; last: TestReport | null; last_passed: string | null };
   /** Unusual changes found and not yet dismissed. */
   unusual?: UnusualReport | null;
+  /** What Flux Sentry has learned of this backup: the share of its files that usually
+   * changes, the share at which it would warn, and how many backups it learned from. */
+  sentry?: { usual: number; warns_at: number | null; runs: number } | null;
 }
 
 /** What unusual-change detection found in a backup. */
@@ -159,10 +170,19 @@ export interface UnusualReport {
   /** The snapshot with the changes, and the one before it (kept). */
   snapshot: string;
   before?: string | null;
+  /** Seen in the files before the backup was written: it wasn't made, and `snapshot`
+   * names the alarm, not a snapshot. */
+  stopped?: boolean;
+  /** The snapshot from before is pinned (false: there was none, or it couldn't be). */
+  before_pinned?: boolean;
+  /** Flux pinned it for this alarm. */
+  pinned_by_flux?: boolean;
+  /** Flux Sentry's reading of the amount of change (when it had history to judge by). */
+  sentry?: { usual: number; share: number; times: number; score: number; runs: number; seen: number; unusual: boolean } | null;
 }
 
 export type TestEvery = "off" | "backup" | "week" | "month";
-export type TestMode = "random_files" | "percent" | "full" | "rolling";
+export type TestMode = "random_files" | "percent" | "full" | "rolling" | "confidence";
 
 /** `[restore_test]` in a profile. */
 export interface RestoreTestSettings {
@@ -170,6 +190,10 @@ export interface RestoreTestSettings {
   mode?: TestMode;
   files?: number;
   percent?: number;
+  /** `confidence`: the share of damaged files a test must not miss ("1%")… */
+  damage?: string;
+  /** …and how sure it must be of catching it ("99%"). */
+  certainty?: string;
   window?: string | null;
   max_runtime?: string | null;
   max_read?: string | null;
@@ -180,6 +204,15 @@ export interface TestProblem {
   path: string;
   problem: "could_not_restore" | "size_differs" | "content_differs" | "metadata_differs" | "differs_from_source";
   detail?: string | null;
+}
+
+/** What a restore test that passed proves: had `damaged` or more of the snapshot's
+ * `files` (a share `damage`) been damaged, it would have found it, `certainty` sure. */
+export interface TestGuarantee {
+  files: number;
+  damaged: number;
+  damage: string;
+  certainty: string;
 }
 
 /** A restore test's report. */
@@ -196,6 +229,7 @@ export interface TestReport {
   problems: TestProblem[];
   problems_total: number;
   error?: string | null;
+  guarantee?: TestGuarantee | null;
 }
 
 /** A health warning, in words. */
@@ -269,7 +303,14 @@ export interface DirEntry {
 
 export interface Listing {
   path: string;
+  /** The items asked for, folders first then by name: the first 2,000 when there are more. */
   entries: DirEntry[];
+  /** Items in the folder. */
+  total: number;
+  /** Items the filter lets through (`entries` is the first of them). */
+  matching: number;
+  /** Items in the folder that aren't on the computer any more. */
+  missing: number;
 }
 
 export interface ProgressSnapshot {
@@ -383,6 +424,8 @@ export interface Preferences {
   /** The one used now, [command, name], and the known ones installed. */
   diff_tool_used?: [string, string] | null;
   diff_tools?: [string, string][];
+  /** Closing the window keeps the app in the system tray (absent from older backends). */
+  close_to_tray?: boolean;
 }
 
 export type Scheduler = "systemd" | "cron";
@@ -543,6 +586,8 @@ export interface Profile {
   restore_test?: RestoreTestSettings;
   /** Missing: "normal". */
   unusual_changes?: "off" | "normal" | "high";
+  /** Flux Sentry plants tripwire files in the folders this backs up. */
+  tripwires?: boolean;
   webhooks?: Webhook[];
 }
 
@@ -678,6 +723,12 @@ export interface CheckSummary {
   bytes_read: number;
   errors: string[];
   warnings: string[];
+  /** Damage that was rebuilt from repair data. */
+  repaired?: string[];
+  /** Of the errors, how many the repair data could rebuild. */
+  repairable?: number;
+  /** Stored files given repair data they lacked. */
+  parity_added?: number;
 }
 
 export interface PruneSummary {
@@ -744,6 +795,8 @@ export interface VaultOptions {
   /** Missing: standard. */
   hashing?: PasswordHashing;
   hide_sizes?: boolean;
+  /** Repair data kept with what's stored, in percent of it (missing or 0: none). */
+  parity?: number;
   lock_after_minutes?: number | null;
   unlock_file?: string | null;
   /** Keep flux-vault-recover next to the Vault on a drive (missing: yes). */
@@ -958,4 +1011,9 @@ export interface Storage {
   compression_saved: number | null;
   shared_with: number;
   basis: string;
+  /** Vaults with repair data: what it takes (part of `stored_bytes`), and how many of
+   * the stored files have it. */
+  repair_bytes?: number | null;
+  packs?: number;
+  packs_with_repair?: number;
 }

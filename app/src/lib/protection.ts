@@ -1,10 +1,11 @@
 // Is a backup protecting you, in words? One answer used by the sidebar, All backups and a
 // backup's own overview, so they never disagree.
 
+import { kindLabel, type Tone } from "./attention";
 import { ago } from "./format";
 import type { BackupStatus, ProfileSummary } from "./types";
 
-export type Tone = "ok" | "warn" | "bad" | "run" | "idle";
+export type { Tone };
 
 export interface Protection {
   tone: Tone;
@@ -49,13 +50,14 @@ export function protection(p: ProfileSummary, s: BackupStatus | undefined, perce
       detail: h || !lastGood ? why : `${why} The last good copy is from ${ago(lastGood)}.`,
     };
   }
-  if (danger) return { tone: "bad", protected: false, short: shortOf(danger.text, lastGood), detail: withHint(danger) };
+  if (danger) return { tone: "bad", protected: false, short: shortOf(danger, lastGood), detail: withHint(danger) };
   // Runs, but none that made a backup (the first one was stopped, or skipped): there is
   // no copy, so it protects nothing, whatever else is fine.
   if (!lastGood) {
     return { tone: "warn", protected: false, short: "Not backed up yet", detail: warning ? withHint(warning) : "No backup has finished yet." };
   }
-  if (warning) return { tone: "warn", protected: true, short: `Check · ${lastGood ? ago(lastGood) : "never"}`, detail: withHint(warning) };
+  // Says what it is ("Low on space · 59 minutes ago"); the time is the last good copy's.
+  if (warning) return { tone: "warn", protected: true, short: `${kindLabel(warning.kind) ?? "Needs a look"} · ${ago(lastGood)}`, detail: withHint(warning) };
   if (r?.status === "completed_with_errors") {
     return { tone: "warn", protected: true, short: `Some files skipped · ${ago(r.finished)}`, detail: "The last backup skipped files it couldn't read; they're listed in Activity." };
   }
@@ -66,14 +68,15 @@ function withHint(h: { text: string; hint: string | null }) {
   return h.hint ? `${h.text} ${h.hint}` : h.text;
 }
 
-function shortOf(text: string, lastGood: string | null) {
-  return lastGood ? `At risk · ${ago(lastGood)}` : text.split(".")[0]!;
+function shortOf(h: { kind?: string; text: string }, lastGood: string | null) {
+  return lastGood ? `${kindLabel(h.kind) ?? "At risk"} · ${ago(lastGood)}` : h.text.split(".")[0]!;
 }
 
 /** When a backup runs next, in words: the same everywhere ("in 5 hours", "when its drive
  * is connected", "when you start it"). `pausedUntil`: schedules are paused. */
 export function nextRun(p: ProfileSummary, s: BackupStatus | undefined, pausedUntil: string | null = null): string {
   if (p.running) return "running now";
+  if (p.held) return "on hold until it's settled";
   if (pausedUntil) return `paused ${pausedUntil}`;
   const at = s?.next_run;
   if (at && Number.isFinite(Date.parse(at))) return ago(at);

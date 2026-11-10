@@ -222,7 +222,13 @@ pub struct BorgRepo {
     profile_id: String,
     cache: ListingCache,
     cache_dir: PathBuf,
+    /// Files lately extracted for reading (a mount), kept open: (archive, path) → file.
+    extracted: std::sync::Mutex<std::collections::VecDeque<(String, Vec<u8>, std::fs::File)>>,
 }
+
+/// Extracted files kept for the next open of the same file, and their sizes in all.
+const EXTRACTED_KEPT: usize = 16;
+const EXTRACTED_BYTES: u64 = 2 << 30;
 
 impl BorgRepo {
     /// The repository of a profile (nothing is read yet). `passphrase`: for encrypted
@@ -260,6 +266,7 @@ impl BorgRepo {
         Ok(Self {
             store,
             cache: ListingCache::new(&paths.cache_dir, "borg", &key),
+            extracted: Default::default(),
             cache_dir: paths
                 .cache_dir
                 .join("compat")
@@ -440,6 +447,27 @@ impl BorgRepo {
             Some(a) => format!("{}::{a}", self.url),
             None => self.url.clone(),
         }
+    }
+
+    /// Export the repository's key to `to` (a new file): with it and the passphrase, a
+    /// repository whose own copy of the key is damaged still opens.
+    pub fn export_key(&self, to: &Path) -> Result<(), CompatError> {
+        if to.exists() {
+            return Err(CompatError::Failed(format!(
+                "{} already exists",
+                to.display()
+            )));
+        }
+        self.run_simple(
+            &[
+                "key".into(),
+                "export".into(),
+                self.arg(None),
+                to.display().to_string(),
+            ],
+            "key export",
+        )?;
+        Ok(())
     }
 
     /// Create the repository.
@@ -772,6 +800,44 @@ impl BorgRepo {
 
     /// A temporary file holding the contents of `e` from archive `id` (for mounting).
     pub fn extract_file(&self, id: &str, e: &Entry) -> std::io::Result<std::fs::File> {
+        // Extracted a moment ago? Borg has no way to read part of a file: each open is
+        // a `borg extract` of the whole of it, which goes through the whole archive
+        // first. A file manager or a viewer opens the same file several times over.
+        {
+            let mut kept = self
+                .extracted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(i) = kept.iter().position(|(a, p, _)| a == id && *p == e.path) {
+                let hit = kept.remove(i).expect("found");
+                let file = hit.2.try_clone();
+                kept.push_back(hit);
+                if let Ok(f) = file {
+                    return Ok(f);
+                }
+            }
+        }
+        let f = self.extract_file_now(id, e)?;
+        if let Ok(again) = f.try_clone() {
+            let mut kept = self
+                .extracted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            kept.push_back((id.to_owned(), e.path.clone(), again));
+            // (The files are unlinked already: closing one frees its space.)
+            let size = |k: &std::collections::VecDeque<(String, Vec<u8>, std::fs::File)>| {
+                k.iter()
+                    .map(|(_, _, f)| f.metadata().map_or(0, |m| m.len()))
+                    .sum::<u64>()
+            };
+            while kept.len() > EXTRACTED_KEPT || (kept.len() > 1 && size(&kept) > EXTRACTED_BYTES) {
+                kept.pop_front();
+            }
+        }
+        Ok(f)
+    }
+
+    fn extract_file_now(&self, id: &str, e: &Entry) -> std::io::Result<std::fs::File> {
         std::fs::create_dir_all(&self.cache_dir)?;
         let mut cmd = self.command();
         cmd.args(["extract", "--stdout"])
@@ -795,6 +861,30 @@ impl BorgRepo {
         f
     }
 
+    /// Read a file of an archive as `borg extract --stdout` writes it, without putting it
+    /// anywhere on disk (a restore test reads it this way). A borg that fails partway is
+    /// an error at the end of the stream, not a short file.
+    pub fn stream_file(&self, id: &str, e: &Entry) -> std::io::Result<BorgStream> {
+        let mut cmd = self.command();
+        cmd.args(["extract", "--stdout"])
+            .arg(self.arg(Some(id)))
+            .arg(std::ffi::OsStr::new(
+                std::str::from_utf8(&e.path).map_err(std::io::Error::other)?,
+            ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn()?;
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("borg's output wasn't piped"))?;
+        Ok(BorgStream {
+            child,
+            out,
+            ended: false,
+        })
+    }
+
     /// Fill in statistics for archives made without Flux (`borg info`, once each).
     pub fn adopt(&self, snaps: &[SnapshotMeta], report: Reporter<'_>) {
         let mut cached = self.load_cached();
@@ -803,17 +893,49 @@ impl BorgRepo {
             .iter()
             .filter(|s| !cached.contains_key(&s.id))
             .collect();
+        // Several to ask about (this computer's notes are gone, or the backups were
+        // made elsewhere): one `borg info` for all the archives, not a borg started,
+        // the repository opened and its cache checked once for each of them.
+        let all: Option<Value> = (missing.len() > 1)
+            .then(|| {
+                self.run_simple(
+                    &[
+                        "info".into(),
+                        "--json".into(),
+                        "--glob-archives".into(),
+                        "*".into(),
+                        self.arg(None),
+                    ],
+                    "info",
+                )
+                .ok()
+                .and_then(|r| serde_json::from_slice::<Value>(&r.stdout).ok())
+            })
+            .flatten();
         for s in missing {
-            let Ok(r) = self.run_simple(
-                &["info".into(), "--json".into(), self.arg(Some(&s.id))],
-                "info",
-            ) else {
-                continue;
+            let from_all = all.as_ref().and_then(|v| {
+                v["archives"]
+                    .as_array()?
+                    .iter()
+                    .find(|a| a["name"].as_str() == Some(s.id.as_str()))
+                    .cloned()
+            });
+            let one = match from_all {
+                Some(a) => a,
+                None => {
+                    let Ok(r) = self.run_simple(
+                        &["info".into(), "--json".into(), self.arg(Some(&s.id))],
+                        "info",
+                    ) else {
+                        continue;
+                    };
+                    let Ok(v) = serde_json::from_slice::<Value>(&r.stdout) else {
+                        continue;
+                    };
+                    v["archives"][0].clone()
+                }
             };
-            let Ok(v) = serde_json::from_slice::<Value>(&r.stdout) else {
-                continue;
-            };
-            let st = &v["archives"][0]["stats"];
+            let st = &one["stats"];
             let files = st["nfiles"].as_u64().unwrap_or(0);
             cached.insert(
                 s.id.clone(),
@@ -1203,7 +1325,14 @@ impl flux_fs::restore::RestoreSource for BorgSource {
             .staging
             .as_ref()
             .ok_or_else(|| std::io::Error::other("nothing was extracted"))?;
-        copier.copy_to(&staging.join(e.rel_path()), out, progress)
+        let n = copier.copy_below(staging, e.rel_path(), out, progress)?;
+        // Copied: its extracted twin has done its work. Removing it as the restore goes
+        // keeps the room needed near the size of what's restored, not twice that.
+        // (Hard-linked files are restored as links to the first one, not from here.)
+        if e.nlink <= 1 {
+            let _ = std::fs::remove_file(staging.join(e.rel_path()));
+        }
+        Ok(n)
     }
 
     fn path_only(&self, e: &Entry) -> bool {
@@ -1656,11 +1785,25 @@ fn prune_inner(
 ) -> Result<prune::PruneReport, CompatError> {
     let snaps = repo.snapshots()?;
     let mut doomed: Vec<String> = Vec::new();
+    // `borg delete` frees nothing until `borg compact` has run: the free space is only
+    // worth reading after it. Without this, a floor that isn't met sees no deletion help
+    // and takes every snapshot it may.
+    let uncompacted = std::cell::Cell::new(false);
+    let compact_failed = std::cell::RefCell::new(None);
     let mut r = prune::apply(
         &snaps,
         policy,
         dry_run,
-        &|| repo.store.free_space(),
+        &|| {
+            if uncompacted.replace(false)
+                && let Err(e) = repo.compact()
+            {
+                // Free space unknown: nothing more is removed for it.
+                *compact_failed.borrow_mut() = Some(e);
+                return None;
+            }
+            repo.store.free_space()
+        },
         &mut |id| {
             repo.run_simple(
                 &[
@@ -1673,12 +1816,18 @@ fn prune_inner(
             )?;
             repo.cache.forget(id);
             doomed.push(id.to_owned());
+            uncompacted.set(true);
             Ok(())
         },
         report,
     )?;
     if !doomed.is_empty() {
-        repo.compact()?;
+        if let Some(e) = compact_failed.take() {
+            return Err(e);
+        }
+        if uncompacted.get() {
+            repo.compact()?;
+        }
         let mut m = repo.load_cached();
         for d in &doomed {
             m.remove(d);
@@ -1823,6 +1972,39 @@ mod listed {
             assert!(get("repo-a", "8 t2", &right).is_none(), "newer transaction");
             assert!(get("repo-b", "7 t1", &right).is_none(), "other repository");
         }
+    }
+}
+
+/// A file streaming out of `borg extract --stdout` ([`BorgRepo::stream_file`]). Dropped
+/// before the end, borg is stopped.
+pub struct BorgStream {
+    child: std::process::Child,
+    out: std::process::ChildStdout,
+    ended: bool,
+}
+
+impl std::io::Read for BorgStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.out.read(buf)?;
+        if n == 0 && !self.ended && !buf.is_empty() {
+            self.ended = true;
+            let status = self.child.wait()?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!(
+                    "borg extract failed ({status})"
+                )));
+            }
+        }
+        Ok(n)
+    }
+}
+
+impl Drop for BorgStream {
+    fn drop(&mut self) {
+        if !self.ended {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
     }
 }
 

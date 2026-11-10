@@ -12,10 +12,7 @@ use crate::{Ctx, output};
 #[derive(Args)]
 #[command(
     after_help = "Compatibility-mode profiles (engine rsync) keep this kit next to \
-    their backups too, as FLUX-RECOVERY.txt and flux-backup.sh.\n\nExamples:\n  \
-    flux recovery home\n  \
-    flux recovery home --script > flux-backup.sh\n  \
-    flux recovery home --save /run/media/me/USB"
+    their backups too, as FLUX-RECOVERY.txt and flux-backup.sh."
 )]
 pub struct RecoveryArgs {
     pub profile: String,
@@ -74,10 +71,7 @@ pub fn run(ctx: &Ctx, args: RecoveryArgs) -> anyhow::Result<ExitCode> {
     after_help = "Without --pick, lists the backups found. With it, sets that backup \
     up on this computer: the saved settings (folders, exclusions, rules) if they were kept \
     with it, reaching the backups where they were found.\n\nAn encrypted Vault's backups \
-    are listed once its password is given (FLUX_PASSWORD, or typed).\n\nExamples:\n  \
-    flux recover /run/media/me/Backup\n  \
-    flux recover nas:/srv/backup --pick 2\n  \
-    flux recover /run/media/me/Backup --pick 1 --carry-on --id home"
+    are listed once its password is given (FLUX_PASSWORD, or typed)."
 )]
 pub struct RecoverArgs {
     /// Where the backups are: a drive's folder, `[user@]host:/path` or `ssh://…`.

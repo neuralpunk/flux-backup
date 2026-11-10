@@ -176,8 +176,26 @@ pub fn export(
 
     // The files' contents, restored next to the archive (removed whatever happens).
     let staging = Staging(dir.join(format!(".flux-export-{}-{}", std::process::id(), snap.id)));
+    // A folder of our own, made new and private (as root this is someone else's folder
+    // as often as not), and held open: the files are read back from *this* folder,
+    // whatever is done to its name meanwhile, and no link in it is followed.
     let _ = fs::remove_dir_all(&staging.0);
-    fs::create_dir_all(&staging.0).map_err(|e| format!("{}: {e}", staging.0.display()))?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging.0)
+            .map_err(|e| format!("{}: {e}", staging.0.display()))?;
+    }
+    let staging_dir = {
+        use rustix::fs::{Mode, OFlags};
+        rustix::fs::open(
+            &staging.0,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| format!("{}: {e}", staging.0.display()))?
+    };
     let mut errors: Vec<String> = Vec::new();
     for (i, w) in wanted.iter().enumerate() {
         let r = RestoreRequest {
@@ -208,13 +226,15 @@ pub fn export(
     let staged = |e: &Entry, i: usize| -> PathBuf {
         let w = &wanted[i];
         let base = w.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1);
-        staging
-            .0
-            .join(i.to_string())
-            .join(std::ffi::OsStr::from_bytes(
-                &e.path[base.min(e.path.len())..],
-            ))
+        // Relative to the staging folder.
+        PathBuf::from(i.to_string()).join(std::ffi::OsStr::from_bytes(
+            &e.path[base.min(e.path.len())..],
+        ))
     };
+    // As root, what is exported is root's to read (a system backup holds /etc/shadow):
+    // the archive and its checksums are for root only, like the files of a restore. Your
+    // own exports get the usual permissions.
+    let private = flux_core::sys::is_root();
 
     progress.set_phase(Phase::Transferring);
     let total: u64 = entries
@@ -237,7 +257,16 @@ pub fn export(
     };
     let mut manifest: Vec<(String, Vec<u8>)> = Vec::new();
     let result = (|| -> io::Result<()> {
-        let file = File::create(&partial)?;
+        // Made new, never an existing file or a link someone put there.
+        let _ = fs::remove_file(&partial);
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(if private { 0o600 } else { 0o666 })
+                .open(&partial)?
+        };
         let mut w = Writer::new(req.format, file)?;
         let mut links: HashMap<(u64, u64), Vec<u8>> = HashMap::new();
         let (mut symlinks, mut specials, mut copies) = (0u64, 0u64, 0u64);
@@ -262,7 +291,10 @@ pub fn export(
                         }
                     }
                     let path = staged(e, *i);
-                    let mut f = match File::open(&path) {
+                    let opened = staging_dir
+                        .try_clone()
+                        .and_then(|d| flux_fs::fsops::open_below_dir(d, &path));
+                    let mut f = match opened {
                         Ok(f) => f,
                         Err(err) => {
                             errors.push(format!("/{}: {err}", String::from_utf8_lossy(&e.path)));
@@ -339,7 +371,8 @@ pub fn export(
         for (name, digest) in &manifest {
             text.push_str(&manifest_line(name, digest));
         }
-        flux_core::store::write_atomic(&path, text.as_bytes(), 0o644).map_err(|e| e.to_string())?;
+        flux_core::store::write_atomic(&path, text.as_bytes(), if private { 0o600 } else { 0o644 })
+            .map_err(|e| e.to_string())?;
         outcome.manifest = Some(path);
     }
     for e in &errors {

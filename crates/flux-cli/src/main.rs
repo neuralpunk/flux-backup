@@ -2,19 +2,21 @@
 
 mod backup_cmd;
 mod lifecycle_cmd;
+mod manual;
 mod mount_cmd;
 mod output;
 mod profile_cmd;
 mod recovery_cmd;
 mod restore_test_cmd;
 mod schedule_cmd;
+mod sentry_cmd;
 mod ssh_cmd;
 mod target_spec;
 mod vault_cmd;
 
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use flux_core::{Paths, Scope};
 
 /// Exit status used when a profile fails validation.
@@ -90,9 +92,13 @@ enum Command {
     Log(lifecycle_cmd::LogArgs),
     /// Verify a profile's backups.
     Check(vault_cmd::CheckArgs),
-    /// Restore a sample of the newest snapshot into a temporary folder and check every
-    /// restored file (also run after backups, as `[restore_test]` says).
+    /// Read a sample of the newest snapshot back, as a restore would, and check every file
+    /// as it streams; nothing is written anywhere (also run after backups, as
+    /// `[restore_test]` says).
     RestoreTest(restore_test_cmd::RestoreTestArgs),
+    /// What Flux Sentry knows of a backup, whether it holds it after unusual changes, and
+    /// settling those (`--this-was-me`, `--dealt-with`).
+    Sentry(sentry_cmd::SentryArgs),
     /// Print diagnostics for a bug report: versions, tools, the profile (secrets hidden)
     /// and its recent runs.
     Diagnostics { profile: String },
@@ -159,7 +165,14 @@ pub struct Ctx {
 
 fn main() -> ExitCode {
     quiet_broken_pipe();
-    let cli = Cli::parse();
+    // `--help` ends with the manual's examples.
+    let cli = match manual::with_examples(Cli::command())
+        .try_get_matches()
+        .and_then(|m| Cli::from_arg_matches(&m))
+    {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
     init_logging(cli.verbose);
 
     let scope = if cli.system {
@@ -198,6 +211,7 @@ fn main() -> ExitCode {
         Command::Log(a) => lifecycle_cmd::run_log(&ctx, a),
         Command::Check(a) => vault_cmd::run_check(&ctx, a),
         Command::RestoreTest(a) => restore_test_cmd::run(&ctx, a),
+        Command::Sentry(a) => sentry_cmd::run(&ctx, a),
         Command::Recovery(a) => recovery_cmd::run(&ctx, a),
         Command::Recover(a) => recovery_cmd::recover(&ctx, a),
         Command::Diagnostics { profile } => {
@@ -314,26 +328,9 @@ fn config_path(ctx: &Ctx) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `flux.1`, plus `flux-<sub>.1` (and `flux-<sub>-<subsub>.1`) for every visible subcommand.
+/// Every man page: see [`manual`].
 fn manpages(dir: &std::path::Path) -> anyhow::Result<ExitCode> {
-    std::fs::create_dir_all(dir)?;
-    fn write(cmd: clap::Command, name: &str, dir: &std::path::Path) -> anyhow::Result<usize> {
-        let cmd = cmd.name(name.to_owned());
-        let mut buf = Vec::new();
-        clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
-        std::fs::write(dir.join(format!("{name}.1")), buf)?;
-        let mut n = 1;
-        for sub in cmd
-            .get_subcommands()
-            .filter(|s| !s.is_hide_set() && s.get_name() != "help")
-        {
-            n += write(sub.clone(), &format!("{name}-{}", sub.get_name()), dir)?;
-        }
-        Ok(n)
-    }
-    let mut cmd = Cli::command();
-    cmd.build();
-    let n = write(cmd, "flux", dir)?;
+    let n = manual::write_pages(Cli::command(), dir)?;
     eprintln!("wrote {n} man pages to {}", dir.display());
     Ok(ExitCode::SUCCESS)
 }

@@ -3,6 +3,7 @@
 
 import type { DirEntry, Found, Issue, JobMessage, Listing, Overview, PreviewRow, Profile, ProfileSummary, RunRecord, SnapshotMeta, SnapshotStats } from "./types";
 import { type TestReport, type Destination, type Webhook, ApiError } from "./types";
+import { fraction, sampleBound } from "./confidence";
 
 const DAY = 86_400_000;
 const now = Date.now();
@@ -93,12 +94,12 @@ function run(profile: string, s: SnapshotMeta | undefined, status: RunRecord["st
 }
 
 const profiles: ProfileSummary[] = [
-  { id: "home", sources: ["~"], scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", size_limit: "4GB", errors: [], last_run: null, running: false },
+  { id: "home", sources: ["~"], scope: "user", name: "Home folder", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "*-*-* 20:00:00", size_limit: "4GB", errors: [], last_run: null, running: false },
   { id: "docs", sources: ["~/Documents"], scope: "user", name: "Documents → NAS", engine: "vault", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 4h", errors: [], last_run: null, running: false },
   { id: "photos", sources: ["~/Pictures"], scope: "user", name: "Photo library", engine: "vault", target: "/run/media/me/Archive", remote: false, schedule: "manual + when drive connected", errors: [], last_run: null, running: false },
-  { id: "plain", sources: ["~/Projects"], scope: "user", name: "Projects (rsync)", engine: "rsync", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "plain", sources: ["~/Projects"], scope: "user", name: "Projects (rsync)", engine: "rsync", target: "/run/media/me/BackupDisk", remote: false, schedule: "*-*-* 20:00:00", errors: [], last_run: null, running: false },
   { id: "borg", sources: ["~/.local/share/mail", "~/Notes"], scope: "user", name: "Mail & Notes (Borg)", engine: "borg", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 12h", errors: [], last_run: null, running: false },
-  { id: "system:etc", sources: ["/etc"], scope: "system", name: "System settings", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "daily", errors: [], last_run: null, running: false },
+  { id: "system:etc", sources: ["/etc"], scope: "system", name: "System settings", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "*-*-* 20:00:00", errors: [], last_run: null, running: false },
 ];
 profiles[0]!.last_run = run("home", snapshots.home!.at(-1), "completed");
 profiles[1]!.last_run = run("docs", snapshots.docs!.at(-1), "completed");
@@ -121,11 +122,13 @@ function demoUnusual() {
   const s = snapshots.plain!;
   const files = Array.from({ length: 48 }, (_, i) => `/home/me/Projects/thesis/chapter${i + 1}.odt`);
   return {
-    signals: ["48 files renamed to end in .locked", "3 files that look like ransom notes (HOW_TO_DECRYPT.txt)"],
+    signals: ["99 files changed or deleted, 58% of them: 19 times what this backup usually changes (3.1%)", "48 files renamed to end in .locked", "3 files that look like ransom notes (HOW_TO_DECRYPT.txt)"],
     affected: files.flatMap((f) => [f, `${f}.locked`]).concat(["/home/me/Projects/HOW_TO_DECRYPT.txt"]),
     affected_total: 99,
     by_folder: [["/home/me/Projects/thesis", 96], ["/home/me/Projects", 3]] as [string, number][],
     by_extension: [["locked", 48], ["odt", 48], ["txt", 3]] as [string, number][],
+    // (An rsync backup: looked at after it was written. Flux's own formats are looked
+    // at before, and such a backup isn't made at all: `stopped`.)
     snapshot: s.at(-1)!.id,
     before: s.at(-2)!.id,
   };
@@ -134,7 +137,7 @@ let unusualDismissed = false;
 
 /** Demo restore tests, newest first. */
 const restoreTests: Record<string, unknown[]> = {
-  home: [{ started: new Date(now - 3 * DAY).toISOString(), finished: new Date(now - 3 * DAY + 4000).toISOString(), snapshot: "", mode: "random_files", result: "passed", picked: 10, tested: 10, bytes: 3_250_000, stopped_early: false, problems: [], problems_total: 0 }],
+  home: [{ started: new Date(now - 3 * DAY).toISOString(), finished: new Date(now - 3 * DAY + 4000).toISOString(), snapshot: "", mode: "confidence", result: "passed", picked: 459, tested: 459, bytes: 216_500_000, stopped_early: false, problems: [], problems_total: 0, guarantee: { files: 184_000, damaged: 1_840, damage: "1%", certainty: "99%" } }],
 };
 
 /** Every profile, and each destination as a profile of its own (`home+usb`). */
@@ -155,6 +158,7 @@ let prefs = {
   scheduler: "systemd" as "systemd" | "cron",
   one_at_a_time: false,
   diff_tool: null as string | null,
+  close_to_tray: true,
   webhooks: [{ url: "https://ntfy.sh/flux-laptop-backups", preset: "ntfy" }] as Webhook[],
 };
 const DIFF_TOOLS: [string, string][] = [["meld", "Meld"]];
@@ -220,6 +224,7 @@ function demoVerdict(prof: Profile, path: string): { in: boolean; text: string }
 }
 const prefsView = () => ({
   notify_success: prefs.notify_success,
+  close_to_tray: prefs.close_to_tray,
   default_exclude: prefs.default_exclude ?? FLUX_EXCLUDE,
   default_exclude_custom: prefs.default_exclude != null,
   pause: pausedUntil === undefined ? null : { until: pausedUntil },
@@ -453,7 +458,7 @@ function spaceFor(id: string): Overview["space"] {
 /** Deleted since the snapshots were made, so the browser marks them. */
 const deletedNow = new Set(["/home/me/Documents/Taxes", "/home/me/Documents/passport-scan.png", "/home/me/notes-old.md"]);
 
-function listing(path: string): Listing {
+function listing(path: string, filter: string | null = null, onlyMissing = false): Listing {
   const items = tree[path] ?? [];
   const entries: DirEntry[] = items.map(([name, kind, size], i) => {
     const full = path === "/" ? `/${name}` : `${path}/${name}`;
@@ -469,7 +474,11 @@ function listing(path: string): Listing {
       on_disk: !deletedNow.has(full),
     };
   });
-  return { path, entries };
+  const f = (filter ?? "").trim().toLowerCase();
+  const wanted = entries
+    .filter((e) => (!f || e.name.toLowerCase().includes(f)) && (!onlyMissing || e.on_disk === false))
+    .sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  return { path, entries: wanted.slice(0, 2000), total: entries.length, matching: wanted.length, missing: entries.filter((e) => e.on_disk === false).length };
 }
 
 function fullProfile(p: ProfileSummary): Profile {
@@ -489,6 +498,7 @@ function fullProfile(p: ProfileSummary): Profile {
         : { trigger: "calendar", on_calendar: "*-*-* 20:00:00", catch_up: true, skip_on_battery: false, on_connect: false },
     options: { preserve_acl: true, preserve_xattr: true, symlinks: "preserve", change_detection: "metadata", continue_on_errors: true, snapshot_if_unchanged: false, nice: 10, io_priority: "best_effort_low", notify: true, backup_before_restore: true, threads: 0 },
     hooks: { pre_backup: [], post_backup: [], on_error: [] },
+    ...(p.id === "home" ? { restore_test: { every: "month" as const, mode: "confidence" as const } } : {}),
     vault: p.engine === "vault" ? { compression_level: 3, encryption: true, password_source: { from: "keyring" } } : null,
     borg: p.engine === "borg" ? { encryption: "repokey-blake2", compression: "zstd,3", password_source: { from: "keyring" }, remote_path: null, extra_args: [] } : null,
   };
@@ -512,7 +522,7 @@ function validate(p: Profile): Issue[] {
   p.sources.paths.forEach((x, i) => !x.startsWith("/") && err(`sources.paths[${i}]`, `${x} is not absolute`));
   if (p.target.kind === "local" && !p.target.path.startsWith("/")) err("target.path", "choose a drive or folder");
   if (p.target.kind === "ssh" && !p.target.host.trim()) err("target.host", "host must be a non-empty name without spaces");
-  if (p.schedule.trigger === "calendar" && !p.schedule.on_calendar?.trim()) err("schedule.on_calendar", "a calendar schedule needs on_calendar");
+  if (p.schedule.trigger === "calendar" && !p.schedule.on_calendar?.trim()) err("schedule.on_calendar", "choose the times it runs (for example: daily, or Mon..Fri 18:00)");
   if (p.schedule.on_connect && !(p.target.kind === "local" && p.target.fs_uuid)) err("schedule.on_connect", "backup on connect needs a drive (fs_uuid)");
   return v;
 }
@@ -630,7 +640,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "profiles":
       // `?empty=1`: a new computer, no backups yet (the welcome screen).
       if (typeof location !== "undefined" && new URLSearchParams(location.search).get("empty") === "1") return [];
-      return structuredClone(profiles.filter((p) => p.scope === "user" || systemUnlocked));
+      return structuredClone(profiles.filter((p) => p.scope === "user" || systemUnlocked)).map((p) => ({ ...p, sentry: stored[p.id]?.unusual_changes ?? "normal", held: p.id === "plain" && !unusualDismissed && (stored[p.id]?.unusual_changes ?? "normal") !== "off" }));
     case "system_status":
       return { available: true, unlocked: systemUnlocked };
     case "system_unlock":
@@ -675,8 +685,10 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       if (id === "home" && o.recent_runs[0]) o.recent_runs[0].destinations = p.last_run?.destinations;
       if (id === "plain" && !unusualDismissed) {
         o.unusual = demoUnusual();
-        o.health = [{ level: "danger", kind: "unusual", text: `Unusual changes in snapshot ${o.unusual.snapshot}: ${o.unusual.signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }, ...o.health];
+        o.health = [{ level: "danger", kind: "unusual", text: `Backups are on hold: Flux Sentry found unusual changes in snapshot ${o.unusual.snapshot}: ${o.unusual.signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }, ...o.health];
       }
+      // What Flux Sentry has learned of each backup (the demo's Projects is the busy one).
+      if ((stored[id]?.unusual_changes ?? "normal") !== "off") o.sentry = id === "plain" ? { usual: 0.031, warns_at: 0.41, runs: 34 } : { usual: 0.0042, warns_at: 0.05, runs: 34 };
       const tests = (restoreTests[id] ?? []) as TestReport[];
       o.restore_test = { every: stored[id]?.restore_test?.every ?? (id === "home" ? "month" : "off"), last: tests[0] ?? null, last_passed: tests.find((t) => t?.result !== "failed")?.started ?? null };
       return o;
@@ -689,7 +701,14 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         const d = new Date(t);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       };
-      const days = Array.from({ length: 30 }, (_, i) => ({ date: day(now - (29 - i) * DAY), state: "none" as "ok" | "failed" | "none", bytes: 0 }));
+      // Calendar days, not 24-hour steps: the day the clocks go back is 25 hours long,
+      // and stepping by hours named it twice (late in the evening, for a week after).
+      const daysAgo = (k: number) => {
+        const d = new Date(now);
+        d.setDate(d.getDate() - k);
+        return d.getTime();
+      };
+      const days = Array.from({ length: 30 }, (_, i) => ({ date: day(daysAgo(29 - i)), state: "none" as "ok" | "failed" | "none", bytes: 0 }));
       for (const x of s) {
         const d = days.find((d) => d.date === day(Date.parse(x.finished)));
         if (d) (d.state = "ok"), (d.bytes += (stored ? x.stats?.stored_bytes : x.stats?.copied_bytes) ?? 0);
@@ -720,7 +739,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return structuredClone(snapshots[id] ?? []);
     case "list_dir":
       needsUnlock();
-      return listing((args.path as string) || "/");
+      return listing((args.path as string) || "/", (args.filter as string | null) ?? null, !!args.missing);
     case "unlock":
       if (args.password !== "demo") throw new ApiError("wrong_password", "Wrong password (try “demo”).");
       unlocked = new Set([...unlocked, id]);
@@ -1104,6 +1123,32 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "set_autostart":
       autostartOn = args.on as boolean;
       return null;
+    case "set_close_to_tray":
+      prefs = { ...prefs, close_to_tray: args.on as boolean };
+      return prefsView();
+    case "tray_available":
+      return true;
+    case "calendar_preview": {
+      // The demo reads "[days] HH:MM" only; the app reads what systemd does.
+      const m = /^(?:([A-Za-z,.]+)\s+)?(?:\*-\*-\*\s+)?(\d{1,2}):(\d{2})(?::00)?$/.exec(String(args.expr).trim());
+      if (!m) throw new Error("not a calendar expression Flux can read");
+      const names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+      const ok = (d: Date) => {
+        if (!m[1]) return true;
+        const day = names[d.getDay()]!;
+        return m[1].toLowerCase().split(",").some((part) => {
+          const [a, b] = part.split("..");
+          if (!b) return part.slice(0, 3) === day;
+          const i = names.indexOf(a!.slice(0, 3)), j = names.indexOf(b.slice(0, 3)), k = d.getDay();
+          return i <= j ? k >= i && k <= j : k >= i || k <= j;
+        });
+      };
+      const out: string[] = [];
+      const d = new Date();
+      d.setHours(Number(m[2]), Number(m[3]), 0, 0);
+      for (let n = 0; out.length < 3 && n < 30; n++, d.setDate(d.getDate() + 1)) if (d.getTime() > Date.now() && ok(d)) out.push(d.toISOString());
+      return out;
+    }
     case "estimate": {
       await delay(900);
       const paths = (args.profile as Profile).sources.paths;
@@ -1173,8 +1218,15 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "restore_test": {
       needsUnlock();
       const snap = snapshots[id]?.at(-1);
-      const report = { started: new Date().toISOString(), finished: new Date().toISOString(), snapshot: snap?.id ?? "", mode: "random_files", result: "passed", picked: 10, tested: 10, bytes: 4_718_592, stopped_early: false, problems: [], problems_total: 0 };
+      // As the profile says: sized by what it must prove (the large-backup count), or so many files.
+      const t = stored[id]?.restore_test ?? {};
+      const files = 184_000;
+      const sure = t.mode === "confidence";
+      const n = sure ? sampleBound(t.damage, t.certainty) : t.mode === "random_files" || !t.mode ? (t.files ?? 10) : 2_300;
+      const worth = sure ? { files, damaged: Math.ceil(files * fraction(t.damage, 0.01)), damage: t.damage ?? "1%", certainty: t.certainty ?? "99%" } : t.mode === "random_files" || !t.mode ? { files, damaged: Math.ceil(files * (1 - 0.01 ** (1 / n))), damage: `${Math.ceil(100 * (1 - 0.01 ** (1 / n)))}%`, certainty: "99%" } : null;
+      const report = { started: new Date().toISOString(), finished: new Date().toISOString(), snapshot: snap?.id ?? "", mode: t.mode ?? "random_files", result: "passed", picked: n, tested: n, bytes: n * 471_859, stopped_early: false, problems: [], problems_total: 0, guarantee: worth };
       restoreTests[id] = [report, ...(restoreTests[id] ?? [])];
+      readinessAnswers[`${id}:tested`] = true;
       return report;
     }
     case "set_webhooks":
@@ -1270,20 +1322,38 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "recover":
       return { id: (args.kept as { profile: string }).profile === "photos" ? "photos" : "home", note: null };
     case "readiness":
-    case "set_readiness": {
+    case "set_readiness":
+    case "export_borg_key": {
       if (cmd === "set_readiness") readinessAnswers[`${id}:${args.key}`] = args.yes as boolean;
+      if (cmd === "export_borg_key") {
+        await delay(500);
+        readinessAnswers[`${id}:key_exported`] = true;
+        return `${args.dir as string}/borg-key-${id}.txt`;
+      }
       const p = profiles.find((x) => x.id === id);
       const encrypted = p?.engine === "vault" || p?.engine === "borg";
       const asked = (k: string) => readinessAnswers[`${id}:${k}`] ?? false;
+      const tested = id === "home" || readinessAnswers[`${id}:tested`];
       return [
         { key: "settings", ok: true, asked: false, title: "Its settings are kept with the backups", detail: `A copy of the folders, exclusions and rules, ${p?.engine === "vault" ? "in the Vault, encrypted" : "next to them"}: on a new computer, Recover an existing backup finds it.` },
         ...(encrypted
           ? [{ key: "password_elsewhere", ok: asked("password_elsewhere"), asked: true, title: "The password is kept somewhere other than this computer", detail: "Without it, nobody can open these backups, you included. It's in this computer's keyring, which goes with the computer: keep it in a password manager or on paper too." }]
           : []),
-        { key: "restore_test", ok: id === "home", asked: false, title: "A restore test has passed", detail: id === "home" ? "Files were last restored and checked on 2 November 2026." : "Test a restore now on the Overview: Flux restores a few files to a temporary folder and checks them." },
-        { key: "offsite", ok: false, asked: false, title: "A copy is kept somewhere else", detail: "A fire or a theft takes a computer and the drive next to it together. Add a place that's kept elsewhere in Settings › Also keep copies elsewhere." },
+        ...(p?.engine === "borg"
+          ? [{ key: "key_exported", ok: asked("key_exported"), asked: true, title: "The Borg key is exported", detail: "If the repository's key is damaged, the passphrase alone can't open it. Export the key (borg key export ssh://me@nas/srv/flux/borg borg-key.txt) and keep the file with the passphrase." }]
+          : []),
+        { key: "restore_test", ok: !!tested, asked: false, title: "A restore test has passed", detail: tested ? "Files were last read back and checked on 2 November 2026." : "Flux reads a few files back from the backups and checks every byte against what was stored." },
+        // As the backend says it: this place, or one of its other places, is kept elsewhere.
+        (stored[id]?.offsite || stored[id]?.destinations?.some((d) => d.offsite))
+          ? { key: "offsite", ok: true, asked: false, title: "A copy is kept somewhere else", detail: "A fire or a theft wouldn't take every copy." }
+          : { key: "offsite", ok: false, asked: false, title: "A copy is kept somewhere else", detail: "A fire or a theft takes a computer and the drive next to it together. Add a place that's kept elsewhere: another drive you keep away from home, or a server." },
       ];
     }
+    case "reveal_password":
+      await delay(200);
+      return "demo";
+    case "copy_unlock_file":
+      return `${args.dir as string}/stick.key`;
     case "dismiss_unusual":
       unusualDismissed = true;
       return null;

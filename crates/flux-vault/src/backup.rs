@@ -70,17 +70,44 @@ pub fn backup(
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<BackupOutcome, VaultError> {
+    backup_scanned(repo, req, None, progress, report)
+}
+
+/// The scan of a profile's sources that [`backup`] would make. `never`: paths never
+/// scanned (the repository itself), as in the [`BackupRequest`].
+pub fn scan_for_backup(
+    profile: &Profile,
+    never: &[PathBuf],
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<flux_fs::scan::ScanResult, VaultError> {
+    let pool = flux_fs::scan::thread_pool(profile)?;
+    progress.set_phase(Phase::Scanning);
+    report(Event::Phase {
+        phase: Phase::Scanning,
+    });
+    Ok(pool.install(|| flux_fs::scan::scan_profile(profile, never, progress, report))?)
+}
+
+/// [`backup`], with the scan of the sources already made (by [`scan_for_backup`], just
+/// before): Flux Sentry looks at that scan before a backup is written, and the folders
+/// aren't walked (nor, with checksums, every file read) a second time for the backup.
+pub fn backup_scanned(
+    repo: &VaultRepo,
+    req: &BackupRequest<'_>,
+    scanned: Option<flux_fs::scan::ScanResult>,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<BackupOutcome, VaultError> {
     let started = Timestamp::now();
     let profile = req.profile;
     let _lock = repo.lock(false)?;
     let pool = flux_fs::scan::thread_pool(profile)?;
 
-    progress.set_phase(Phase::Scanning);
-    report(Event::Phase {
-        phase: Phase::Scanning,
-    });
-    let scanned =
-        pool.install(|| flux_fs::scan::scan_profile(profile, &req.never, progress, report))?;
+    let scanned = match scanned {
+        Some(s) => s,
+        None => scan_for_backup(profile, &req.never, progress, report)?,
+    };
     let mut entries = scanned.entries;
     let mut errors = scanned.errors;
 
@@ -154,6 +181,11 @@ pub fn backup(
     }
     // Counts only: no entry is copied (both lists are sorted by path).
     let summary = flux_fs::diff::summarize(parent_flat.iter().map(|(e, _)| e), entries.iter());
+    // The last snapshot's list has done its work: it isn't kept through the reading of
+    // the files and the building of the new one (a second full file list, with every
+    // file's pieces, for as long as the backup runs).
+    drop(reusable);
+    drop(parent_flat);
     let mut stats = PlanStats {
         entries: entries.len() as u64,
         new: summary.added,
@@ -205,8 +237,7 @@ pub fn backup(
     progress.bytes_total.store(stats.copy_bytes, Relaxed);
     let level = profile.vault.as_ref().map_or(3, |v| v.compression_level);
     let seen = Seen::new(&index);
-    let data_packer =
-        Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs).timed(&progress.timings);
+    let data_packer = Packer::for_repo(repo).timed(&progress.timings);
     let read_bytes = AtomicU64::new(0);
     // Sources on a spinning disk: read large files two at a time (no seeking between many).
     let gate = flux_fs::disk::IoGate::for_paths(profile.sources.paths.iter().map(|p| p.as_path()));
@@ -297,8 +328,7 @@ pub fn backup(
     report(Event::Phase {
         phase: Phase::Finalizing,
     });
-    let tree_packer =
-        Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs).timed(&progress.timings);
+    let tree_packer = Packer::for_repo(repo).timed(&progress.timings);
     let root = build_trees(
         repo,
         &seen,
@@ -330,6 +360,7 @@ pub fn backup(
                 packs,
                 supersedes: Vec::new(),
             },
+            repo.parity,
         )?;
         repo.invalidate_index();
     }

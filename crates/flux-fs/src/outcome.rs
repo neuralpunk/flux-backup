@@ -60,4 +60,17 @@ pub struct CheckSummary {
     pub errors: Vec<String>,
     /// Harmless findings.
     pub warnings: Vec<String>,
+    /// Damage that was repaired from repair data (Vaults that keep it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repaired: Vec<String>,
+    /// Of `errors`, how many are damage the repair data can rebuild (it wasn't asked to).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub repairable: u64,
+    /// Stored files given repair data they lacked.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub parity_added: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }

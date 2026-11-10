@@ -26,9 +26,13 @@ flux-core.workspace = true
 flux-service.workspace = true
 flux-runner.workspace = true
 serde.workspace = true
+jiff.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Single instance over the session bus (already used by flux-runner; no extra crates).
+zbus = { version = "6", default-features = false, features = ["default-rt"] }
+futures-util = { version = "0.3", default-features = false }
 
 [lints]
 workspace = true

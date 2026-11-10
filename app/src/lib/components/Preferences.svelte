@@ -3,8 +3,10 @@
   // Changes save as they're made.
   import { api } from "../api";
   import { app, pauseUntil, type Theme } from "../state.svelte";
+  import { clock, clockTime, setClock, type Clock } from "../clock.svelte";
   import type { Preferences, Scheduler } from "../types";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Toggle from "./form/Toggle.svelte";
   import ListEditor from "./form/ListEditor.svelte";
   import WebhookList from "./WebhookList.svelte";
@@ -13,6 +15,8 @@
   let prefs = $state<Preferences | null>(null);
   let error = $state<string | null>(null);
   let autostart = $state<boolean | null>(null);
+  /** Is the app's icon shown in a system tray (`null`: can't tell)? */
+  let tray = $state<boolean | null>(null);
   let excludes = $state<string[]>([]);
   /** Advanced starts open only when something in it was changed, or cron needs attention. */
   let advancedOpen = $state(false);
@@ -30,7 +34,19 @@
       (a) => (autostart = a),
       () => (autostart = null),
     );
+    api.trayAvailable().then(
+      (t) => (tray = t),
+      () => (tray = null),
+    );
   });
+
+  async function setCloseToTray(on: boolean) {
+    try {
+      prefs = await api.setCloseToTray(on);
+    } catch (e) {
+      app.toast("bad", `Couldn't change that: ${(e as Error).message}`);
+    }
+  }
 
   async function save(notifySuccess: boolean, defaultExclude: string[] | null, oneAtATime?: boolean) {
     try {
@@ -108,6 +124,11 @@
     { value: "light", label: "Light", icon: "sun" },
     { value: "auto", label: "Like the system", icon: "monitor" },
   ];
+  const clocks: { value: Clock; label: string }[] = [
+    { value: "12", label: "12-hour" },
+    { value: "24", label: "24-hour" },
+    { value: "auto", label: "Like the system" },
+  ];
 </script>
 
 <div class="min-h-0 flex-1 overflow-y-auto px-10 pt-6 pb-12">
@@ -116,7 +137,7 @@
   <p class="mt-1 text-sm text-fg-2">For the app and every backup. Each backup has its own Settings too.</p>
 
   {#if error}
-    <div class="mt-6 card flex items-center gap-3 bg-danger/10 p-5 text-danger"><Icon name="alert" /> {error}</div>
+    <Callout tone="bad">{error}</Callout>
   {:else if !prefs}
     <div class="mt-6 h-64 card motion-safe:animate-pulse"></div>
   {:else}
@@ -185,6 +206,26 @@
               {/each}
             </div>
           </div>
+          <div class="row gap-3">
+            <span class="min-w-0 flex-1">
+              <span class="block font-medium">Clock</span>
+              <span class="block text-[12.5px] text-fg-muted">How times are shown and typed: {clockTime(20 * 60 + 30)}.</span>
+            </span>
+            <div class="segmented" role="radiogroup" aria-label="Clock">
+              {#each clocks as c (c.value)}
+                <button role="radio" aria-checked={clock.pref === c.value} onclick={() => setClock(c.value)}>{c.label}</button>
+              {/each}
+            </div>
+          </div>
+          <Toggle
+            row
+            checked={(prefs.close_to_tray ?? true) && tray !== false}
+            onchange={(on) => void setCloseToTray(on)}
+            disabled={tray !== true}
+            reason={tray === false ? "No system tray on this desktop, so closing the window quits." : "Not available here."}
+            label="Keep running in the tray when the window is closed"
+            hint="Its icon shows backups as they run; quit from the tray's menu."
+          />
           <Toggle
             row
             checked={autostart ?? false}
@@ -206,7 +247,7 @@
         <div class="flex flex-col gap-7 pt-2">
           <section class="flex flex-col">
             <div class="flex items-baseline justify-between px-0.5 pb-2">
-              <h3 class="text-[13px] font-semibold text-fg-2">What new backups leave out</h3>
+              <h3 class="text-[13px] font-semibold text-fg-2">Excluded from new backups</h3>
               {#if prefs.default_exclude_custom}
                 <button class="text-[13px] text-primary hover:underline" onclick={() => prefs && void save(prefs.notify_success, null)}>Back to Flux's list</button>
               {/if}

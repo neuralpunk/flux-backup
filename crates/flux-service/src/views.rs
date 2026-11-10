@@ -44,6 +44,11 @@ pub struct ProfileSummary {
     offsite: bool,
     /// More places the backups go (each a profile id of its own: `home+nas`).
     destinations: Vec<DestinationSummary>,
+    /// Flux Sentry: how unusual changes are watched for (off, normal, high).
+    sentry: flux_core::profile::Sensitivity,
+    /// On hold: Flux Sentry found unusual changes that aren't settled, and no backup is
+    /// made until they are.
+    held: bool,
 }
 
 /// One more destination of a profile.
@@ -107,6 +112,9 @@ fn summary(
             .collect(),
         last_run: runlog::recent_runs(paths, id, 1).into_iter().next(),
         running: running.iter().any(|j| j.profile == id.as_str()),
+        sentry: p.unusual_changes,
+        held: p.unusual_changes != flux_core::profile::Sensitivity::Off
+            && flux_runner::sentry_hold(paths, id).is_some(),
         offsite: p.offsite,
         destinations: p
             .destinations
@@ -160,6 +168,8 @@ pub fn profiles_impl(state: &Service) -> Result<Vec<ProfileSummary>> {
                 running: false,
                 offsite: false,
                 destinations: Vec::new(),
+                sentry: flux_core::profile::Sensitivity::Off,
+                held: false,
             }),
         }
     }
@@ -188,6 +198,38 @@ pub struct Overview {
     restore_test: RestoreTestView,
     /// Unusual changes found and not yet dismissed.
     unusual: Option<flux_runner::unusual::UnusualReport>,
+    /// What Flux Sentry has learned of this backup (when it's watched, and has run
+    /// often enough).
+    sentry: Option<SentryView>,
+}
+
+/// Flux Sentry's picture of a backup: how much of it usually changes, and where it would
+/// warn.
+#[derive(Debug, Clone, Serialize)]
+pub struct SentryView {
+    /// The share of the files that usually changes between backups.
+    usual: f64,
+    /// A backup changing this share of the files or more would be called unusual.
+    /// `None`: no amount of change alone would warn (only the marks of ransomware).
+    warns_at: Option<f64>,
+    /// Backups it has learned from.
+    runs: usize,
+}
+
+fn sentry_view(
+    paths: &flux_core::Paths,
+    id: &flux_core::ProfileId,
+    p: &flux_core::Profile,
+    runs: &[runlog::RunRecord],
+) -> Option<SentryView> {
+    let limits = flux_runner::sentry::limits(p.unusual_changes)?;
+    let history = flux_runner::sentry_history(paths, id, runs.to_vec());
+    let b = flux_runner::unusual::learn(&history)?;
+    Some(SentryView {
+        usual: b.usual(),
+        warns_at: b.alarm_share(&limits),
+        runs: b.runs(),
+    })
 }
 
 /// What the Overview says about restore tests.
@@ -224,11 +266,15 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         now,
     );
     health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
-    let unusual = crate::extras::open_unusual(&state.paths, &id, &runs);
+    // (Nothing is held with Flux Sentry off: an alarm from before isn't shown as one.)
+    let unusual = (p.unusual_changes != flux_core::profile::Sensitivity::Off)
+        .then(|| crate::extras::open_unusual(&state.paths, &id, &runs))
+        .flatten();
     if let Some(u) = &unusual {
         health.insert(0, crate::extras::unusual_health(u));
     }
     Ok(Overview {
+        sentry: sentry_view(&state.paths, &id, &p, &runs),
         unusual,
         restore_test: RestoreTestView {
             every: p.restore_test.every,
@@ -293,7 +339,9 @@ pub fn status_impl(state: &Service, id: String) -> Result<Status> {
         now,
     );
     health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
-    if let Some(u) = crate::extras::open_unusual(&state.paths, &id, &runs) {
+    if p.unusual_changes != flux_core::profile::Sensitivity::Off
+        && let Some(u) = crate::extras::open_unusual(&state.paths, &id, &runs)
+    {
         health.insert(0, crate::extras::unusual_health(&u));
     }
     let unverified = p.restore_test.every != flux_core::profile::TestEvery::Off
@@ -428,8 +476,21 @@ pub(crate) fn on_disk(path: &str) -> Option<bool> {
 #[derive(Debug, Serialize)]
 pub struct Listing {
     path: String,
+    /// At most [`LISTING_MAX`] of the items asked for: folders first, then by name.
     entries: Vec<DirEntry>,
+    /// Items in the folder.
+    total: usize,
+    /// Items the request asked for (those the filter lets through): `entries` is the
+    /// first of them when there are more than fit.
+    matching: usize,
+    /// Items in the folder that aren't on the computer any more.
+    missing: usize,
 }
+
+/// The most items of a folder sent to the page at once. A folder can hold a hundred
+/// thousand: sent and shown whole, that is megabytes of JSON and millions of page
+/// elements, and the window stops answering. The filter finds the rest.
+pub const LISTING_MAX: usize = 2000;
 
 fn parent_of(p: &[u8]) -> &[u8] {
     p.iter()
@@ -467,8 +528,11 @@ pub fn list_dir_impl(
     id: String,
     snapshot: String,
     path: String,
+    filter: Option<String>,
+    only_missing: bool,
 ) -> Result<Listing> {
     let key = (id.clone(), snapshot.clone());
+    *state.browsed.locked() = Some(std::time::Instant::now());
     let cached = {
         let mut c = state.entries.locked();
         // Most recently used first: move a hit to the front.
@@ -506,32 +570,59 @@ pub fn list_dir_impl(
             format!("{path} is not a folder in this snapshot"),
         ));
     };
-    let entries = children
-        .iter()
-        .map(|&i| {
-            let e = &index.entries[i as usize];
-            let path = format!("/{}", String::from_utf8_lossy(&e.path));
-            DirEntry {
-                on_disk: on_disk(&path),
-                name: String::from_utf8_lossy(
-                    &e.path[parent_of(&e.path).len() + usize::from(!want.is_empty())..],
-                )
-                .into_owned(),
-                path,
-                kind: e.kind,
-                size: e.size,
-                mtime: e.mtime,
-                mode: e.mode,
-                link: e
-                    .link
-                    .as_ref()
-                    .map(|l| String::from_utf8_lossy(l).into_owned()),
-                children: (e.kind == Kind::Dir)
-                    .then(|| index.folders.get(&e.path).map_or(0, Vec::len)),
-            }
+    let name_of = |e: &Entry| -> String {
+        String::from_utf8_lossy(&e.path[parent_of(&e.path).len() + usize::from(!want.is_empty())..])
+            .into_owned()
+    };
+    // Every item with its name and whether it's still on the computer; then the ones
+    // asked for, in order, and of those as many as the page can take.
+    let needle = filter
+        .map(|f| f.trim().to_lowercase())
+        .filter(|f| !f.is_empty());
+    let mut missing = 0;
+    let mut wanted: Vec<(&Entry, String, String, Option<bool>)> = Vec::new();
+    for &i in children {
+        let e = &index.entries[i as usize];
+        let path = format!("/{}", String::from_utf8_lossy(&e.path));
+        let there = on_disk(&path);
+        missing += usize::from(there == Some(false));
+        let name = name_of(e);
+        if (only_missing && there != Some(false))
+            || needle
+                .as_ref()
+                .is_some_and(|n| !name.to_lowercase().contains(n))
+        {
+            continue;
+        }
+        wanted.push((e, name, path, there));
+    }
+    let matching = wanted.len();
+    wanted.sort_by_cached_key(|(e, name, ..)| (e.kind != Kind::Dir, name.to_lowercase()));
+    wanted.truncate(LISTING_MAX);
+    let entries = wanted
+        .into_iter()
+        .map(|(e, name, path, there)| DirEntry {
+            on_disk: there,
+            name,
+            path,
+            kind: e.kind,
+            size: e.size,
+            mtime: e.mtime,
+            mode: e.mode,
+            link: e
+                .link
+                .as_ref()
+                .map(|l| String::from_utf8_lossy(l).into_owned()),
+            children: (e.kind == Kind::Dir).then(|| index.folders.get(&e.path).map_or(0, Vec::len)),
         })
         .collect();
-    Ok(Listing { path, entries })
+    Ok(Listing {
+        path,
+        entries,
+        total: children.len(),
+        matching,
+        missing,
+    })
 }
 
 /// Check a Vault password (or Borg passphrase) and keep it in memory. If the Vault doesn't exist yet, the
@@ -601,13 +692,6 @@ pub fn set_password_impl(state: &Service, id: String, password: String) -> Resul
             "Choose a password first.",
         ));
     }
-    if typed
-        && let PasswordSource::File { path } = &source
-        && !path.exists()
-    {
-        write_secret_file(path, &password)?;
-    }
-
     // Use exactly what was typed (not an older keyring entry): the same profile with the
     // password coming from `ask`.
     let mut with_typed = p.clone();
@@ -646,6 +730,14 @@ pub fn set_password_impl(state: &Service, id: String, password: String) -> Resul
             }
         }
         Engine::Mirror | Engine::Rsync => {}
+    }
+    // Kept only once it has opened (or created) the backups: a mistyped password never
+    // lands in the keyring or a key file.
+    if typed
+        && let PasswordSource::File { path } = &source
+        && !path.exists()
+    {
+        write_secret_file(path, &password)?;
     }
     if typed {
         if source == PasswordSource::Keyring {
@@ -757,6 +849,14 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
         return Err(ApiError::new(
             "busy",
             "a backup of this profile is already running",
+        ));
+    }
+    if p.unusual_changes != flux_core::profile::Sensitivity::Off
+        && flux_runner::sentry_hold(&state.paths, &pid).is_some()
+    {
+        return Err(ApiError::new(
+            "held",
+            "Backups are on hold: Flux Sentry found unusual changes in the last one. Settle them on the backup's Overview first (This was me, or It's dealt with).",
         ));
     }
     if let Some((why, drive)) = target_unreachable(&p) {
@@ -1413,6 +1513,19 @@ mod tests {
         let e = set_password_impl(&state, "t".into(), "wrong".into()).unwrap_err();
         assert_eq!(e.code(), "wrong_password");
         assert!(set_password_impl(&state, "t".into(), "s3cret".into()).is_ok());
+
+        // A backup that used to ask now keeps its password in a new key file: a wrong one
+        // is refused and never written; the right one is checked, then kept.
+        let other = tmp.path().join("keys/other.key");
+        p.vault.as_mut().unwrap().password_source = PasswordSource::File {
+            path: other.clone(),
+        };
+        ProfileStore::new(&paths).save(&id, &p).unwrap();
+        let e = set_password_impl(&state, "t".into(), "wrong".into()).unwrap_err();
+        assert_eq!(e.code(), "wrong_password");
+        assert!(!other.exists(), "a wrong password isn't kept");
+        set_password_impl(&state, "t".into(), "s3cret".into()).unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap().trim(), "s3cret");
     }
 
     #[test]
@@ -1431,26 +1544,71 @@ mod tests {
         assert!(o.free_bytes.is_some());
 
         let snap = snapshots_impl(&e.state, "t".into()).unwrap().remove(0);
-        let root = list_dir_impl(&e.state, "t".into(), snap.id.clone(), "/".into()).unwrap();
+        let root = list_dir_impl(
+            &e.state,
+            "t".into(),
+            snap.id.clone(),
+            "/".into(),
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(root.entries.len(), 1, "only the top-level ancestor");
         let src = e.src.display().to_string();
-        let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
+        let l = list_dir_impl(
+            &e.state,
+            "t".into(),
+            snap.id.clone(),
+            src.clone(),
+            None,
+            false,
+        )
+        .unwrap();
         let names: Vec<_> = l
             .entries
             .iter()
             .map(|x| (x.name.as_str(), x.children))
             .collect();
-        assert_eq!(names, [("b.txt", None), ("docs", Some(1))]);
+        // Folders first, then by name (the order the page shows them in).
+        assert_eq!(names, [("docs", Some(1)), ("b.txt", None)]);
+        assert_eq!((l.total, l.matching, l.missing), (2, 2, 0));
         assert!(l.entries.iter().all(|x| x.on_disk == Some(true)));
         // Deleted since the backup: marked, so it's easy to find and bring back.
         std::fs::remove_file(e.src.join("b.txt")).unwrap();
-        let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
+        let l = list_dir_impl(
+            &e.state,
+            "t".into(),
+            snap.id.clone(),
+            src.clone(),
+            None,
+            false,
+        )
+        .unwrap();
         let gone: Vec<_> = l
             .entries
             .iter()
             .map(|x| (x.name.as_str(), x.on_disk))
             .collect();
-        assert_eq!(gone, [("b.txt", Some(false)), ("docs", Some(true))]);
+        assert_eq!(gone, [("docs", Some(true)), ("b.txt", Some(false))]);
+        assert_eq!((l.total, l.matching, l.missing), (2, 2, 1));
+        // Only what's gone from the computer; only what a filter lets through.
+        let only = |filter: Option<&str>, missing: bool| -> Vec<String> {
+            let l = list_dir_impl(
+                &e.state,
+                "t".into(),
+                snap.id.clone(),
+                src.clone(),
+                filter.map(str::to_owned),
+                missing,
+            )
+            .unwrap();
+            assert_eq!(l.total, 2);
+            assert_eq!(l.matching, l.entries.len());
+            l.entries.into_iter().map(|x| x.name).collect()
+        };
+        assert_eq!(only(None, true), ["b.txt"]);
+        assert_eq!(only(Some(" DOC "), false), ["docs"]);
+        assert!(only(Some("doc"), true).is_empty());
         let found = crate::find::find_impl(&e.state, "t".into(), "b.txt".into()).unwrap();
         assert_eq!(found.hits[0].on_disk, Some(false), "search says so too");
         // Restored: the next look at the folder (and the next search) shows it back.
@@ -1469,7 +1627,15 @@ mod tests {
             std::fs::read_to_string(e.src.join("b.txt")).unwrap(),
             "beta"
         );
-        let l = list_dir_impl(&e.state, "t".into(), snap.id.clone(), src.clone()).unwrap();
+        let l = list_dir_impl(
+            &e.state,
+            "t".into(),
+            snap.id.clone(),
+            src.clone(),
+            None,
+            false,
+        )
+        .unwrap();
         assert!(l.entries.iter().all(|x| x.on_disk == Some(true)));
         let found = crate::find::find_impl(&e.state, "t".into(), "b.txt".into()).unwrap();
         assert_eq!(found.hits[0].on_disk, Some(true));
@@ -1478,7 +1644,9 @@ mod tests {
                 &e.state,
                 "t".into(),
                 snap.id.clone(),
-                format!("{src}/b.txt")
+                format!("{src}/b.txt"),
+                None,
+                false
             )
             .is_err(),
             "files aren't folders"
@@ -1626,6 +1794,8 @@ mod tests {
             "t".into(),
             snaps[0].id.clone(),
             e.src.display().to_string(),
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(l.entries.len(), 2);
@@ -1789,7 +1959,7 @@ mod tests {
         let snaps = snapshots_impl(&e.state, "t".into()).unwrap();
         assert_eq!(snaps.len(), 1);
         let dir = e.src.join("docs").display().to_string();
-        let l = list_dir_impl(&e.state, "t".into(), snaps[0].id.clone(), dir).unwrap();
+        let l = list_dir_impl(&e.state, "t".into(), snaps[0].id.clone(), dir, None, false).unwrap();
         assert_eq!(l.entries.len(), 1);
         // The recovery kit, and the tools.
         let kit = recovery_kit_impl(&e.state, "t".into()).unwrap();

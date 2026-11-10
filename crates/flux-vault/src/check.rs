@@ -1,4 +1,5 @@
-//! Verify a Vault: structure always, every stored byte on request.
+//! Verify a Vault: structure always, every stored byte on request, and (on request)
+//! repair what is damaged from its repair data ([`crate::protect`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -12,7 +13,8 @@ use flux_core::progress::{Event, Phase, Progress, Reporter};
 use crate::VaultError;
 use crate::backend::pack_path;
 use crate::crypto::{BlobId, hex_id, parse_id};
-use crate::pack::{decode_blob, read_header, split_pack};
+use crate::pack::{decode_blob, split_pack};
+use crate::protect::{self, Fix, ParityState};
 use crate::repo::VaultRepo;
 use flux_core::sync::Locked;
 
@@ -29,6 +31,22 @@ pub struct CheckReport {
     pub errors: Vec<String>,
     /// Harmless findings (e.g. unreferenced packs that prune will remove).
     pub warnings: Vec<String>,
+    /// Damage that was repaired from repair data (with [`CheckOptions::repair`]).
+    pub repaired: Vec<String>,
+    /// Of `errors`, how many are damage that the repair data can rebuild.
+    pub repairable: u64,
+    /// Files given repair data they lacked.
+    pub parity_added: u64,
+}
+
+/// What a check does beyond the structure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckOptions {
+    /// Read every stored byte and verify it.
+    pub read_data: bool,
+    /// Rebuild what is damaged from its repair data, write damaged repair data again,
+    /// and (if the Vault is written with repair data) add it where it's missing.
+    pub repair: bool,
 }
 
 impl CheckReport {
@@ -43,16 +61,104 @@ pub fn check(
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<CheckReport, VaultError> {
+    check_with(
+        repo,
+        CheckOptions {
+            read_data,
+            repair: false,
+        },
+        progress,
+        report,
+    )
+}
+
+/// Index files and snapshot records that don't open, and have repair data: rebuild them
+/// (or say that they could be). Before anything else: nothing can be checked without
+/// them. With `read_data`, the parity files of the sound ones are checked too.
+fn small_objects(repo: &VaultRepo, opts: CheckOptions, r: &mut CheckReport) {
+    let backend = repo.backend();
+    for dir in ["index", "snapshots"] {
+        let Ok(par) = backend.list(&protect::path_for(dir)) else {
+            continue;
+        };
+        if par.is_empty() {
+            continue;
+        }
+        let have: HashSet<String> = par.into_iter().map(|(n, _)| n).collect();
+        for (name, size) in backend.list(dir).unwrap_or_default() {
+            if !have.contains(&name) {
+                continue;
+            }
+            let path = format!("{dir}/{name}");
+            let sound = |b: &[u8]| protect::opens(&repo.crypto, b);
+            match backend.read(&path) {
+                Ok(bytes) if sound(&bytes) => {
+                    if !opts.read_data {
+                        continue;
+                    }
+                    let state = backend
+                        .read(&protect::path_for(&path))
+                        .map_or(ParityState::Damaged, |p| protect::parity_state(&bytes, &p));
+                    if state == ParityState::Sound {
+                        continue;
+                    }
+                    // Stale (rewritten by a Flux that keeps no repair data) or damaged.
+                    if !opts.repair {
+                        r.warnings.push(format!(
+                            "the repair data of {path} is out of date or damaged (a repair writes it again)"
+                        ));
+                    } else if protect::write_for(backend, &path, &bytes, repo.parity.max(1), false)
+                        .is_ok()
+                    {
+                        r.repaired
+                            .push(format!("{path}: its repair data was written again"));
+                    }
+                }
+                _ => match protect::repair(backend, &path, size, &sound, opts.repair) {
+                    Ok(Fix::Repaired { blocks }) => r
+                        .repaired
+                        .push(format!("{path}: damaged, repaired ({blocks} blocks)")),
+                    Ok(Fix::Repairable { .. }) => {
+                        r.repairable += 1;
+                        r.errors.push(format!(
+                            "{path} is damaged (its repair data can rebuild it)"
+                        ));
+                    }
+                    // Beyond repair: the checks below say what that costs.
+                    _ => {}
+                },
+            }
+        }
+    }
+}
+
+pub fn check_with(
+    repo: &VaultRepo,
+    opts: CheckOptions,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<CheckReport, VaultError> {
+    let read_data = opts.read_data;
     let _lock = repo.lock(false)?;
     let mut r = CheckReport::default();
     progress.set_phase(Phase::Scanning);
     report(Event::Phase {
         phase: Phase::Scanning,
     });
+    small_objects(repo, opts, &mut r);
 
     // 1. Index vs. packs on disk.
     repo.invalidate_index();
-    let index = repo.index()?;
+    let index = match repo.index() {
+        Ok(i) => i,
+        // An index file that doesn't open, and can be rebuilt: say that, not only that
+        // the check couldn't run.
+        Err(e) if r.repairable > 0 => {
+            r.errors.push(format!("the index can't be read: {e}"));
+            return Ok(r);
+        }
+        Err(e) => return Err(e),
+    };
     let on_disk: HashMap<String, u64> = repo
         .backend()
         .list("data")
@@ -65,31 +171,55 @@ pub fn check(
     }
     r.packs = by_pack.len() as u64;
     r.blobs = index.map.len() as u64;
-    let errors = Mutex::new(Vec::new());
-    by_pack.par_iter().for_each(|(pack, blobs)| {
-        let hex = hex_id(pack);
-        let Some(&size) = on_disk.get(&hex) else {
-            errors.locked().push(format!(
-                "pack {hex} is missing ({} blobs lost)",
-                blobs.len()
-            ));
-            return;
-        };
-        match read_header(repo.backend(), &repo.crypto, &hex, size) {
-            Ok(header) => {
-                let ids: HashSet<BlobId> = header.iter().map(|e| e.id).collect();
-                if let Some(b) = blobs.iter().find(|b| !ids.contains(*b)) {
-                    errors.locked().push(format!(
-                        "pack {hex} lacks blob {} listed in the index",
-                        hex_id(b)
-                    ));
-                }
-            }
-            Err(e) => errors.locked().push(format!("pack {hex}: {e}")),
-        }
-    });
-    r.errors.extend(errors.into_inner().expect("errors"));
     let indexed: HashSet<String> = by_pack.keys().map(|p| hex_id(p)).collect();
+    // Repairing: read (and repair) the packs first, so that what follows checks the
+    // Vault as repaired.
+    if read_data && opts.repair {
+        read_packs(repo, opts, &on_disk, &indexed, progress, report, &mut r)?;
+        progress.set_phase(Phase::Scanning);
+    }
+    let errors = Mutex::new(Vec::new());
+    // The headers a few hundred packs at a time, each batch in a handful of reads: one
+    // by one this is two reads a pack, an hour and more for a big Vault on a server.
+    let listed: Vec<(&BlobId, &Vec<BlobId>)> = by_pack.iter().collect();
+    for group in listed.chunks(256) {
+        let mut present: Vec<(String, u64)> = Vec::with_capacity(group.len());
+        let mut theirs: Vec<&Vec<BlobId>> = Vec::with_capacity(group.len());
+        for (pack, blobs) in group {
+            let hex = hex_id(*pack);
+            match on_disk.get(&hex) {
+                Some(&size) => {
+                    present.push((hex, size));
+                    theirs.push(blobs);
+                }
+                None => errors.locked().push(format!(
+                    "pack {hex} is missing ({} blobs lost)",
+                    blobs.len()
+                )),
+            }
+        }
+        let headers = crate::pack::read_headers(repo.backend(), &repo.crypto, &present);
+        present
+            .par_iter()
+            .zip(headers)
+            .zip(theirs)
+            .for_each(|(((hex, _), header), blobs)| match header {
+                Ok(header) => {
+                    let ids: HashSet<BlobId> = header.iter().map(|e| e.id).collect();
+                    if let Some(b) = blobs.iter().find(|b| !ids.contains(*b)) {
+                        errors.locked().push(format!(
+                            "pack {hex} lacks blob {} listed in the index",
+                            hex_id(b)
+                        ));
+                    }
+                }
+                Err(e) => errors.locked().push(format!("pack {hex}: {e}")),
+            });
+        if progress.is_cancelled() {
+            break;
+        }
+    }
+    r.errors.extend(errors.into_inner().expect("errors"));
     for name in on_disk.keys().filter(|n| !indexed.contains(*n)) {
         r.warnings.push(format!(
             "pack {name} is not referenced by the index (an interrupted backup; prune removes it)"
@@ -161,53 +291,149 @@ pub fn check(
         ));
     }
 
-    // 3. Optionally read and verify every pack.
-    if read_data {
-        progress.set_phase(Phase::Transferring);
-        report(Event::Phase {
-            phase: Phase::Transferring,
-        });
-        let packs: Vec<(&String, &u64)> = on_disk
-            .iter()
-            .filter(|(n, _)| indexed.contains(*n))
-            .collect();
-        progress
-            .bytes_total
-            .store(packs.iter().map(|(_, s)| **s).sum(), Relaxed);
-        progress.entries_total.store(packs.len() as u64, Relaxed);
-        let errors = Mutex::new(Vec::new());
-        packs.par_iter().for_each(|(name, size)| {
-            if progress.is_cancelled() {
-                return;
-            }
-            let path = pack_path(name);
-            let result = (|| -> Result<(), String> {
-                let bytes = repo.backend().read(&path).map_err(|e| e.to_string())?;
-                if hex_id(blake3::hash(&bytes).as_bytes()) != **name {
-                    return Err("contents do not match the pack id".into());
-                }
-                for e in split_pack(&repo.crypto, name, &bytes).map_err(|e| e.to_string())? {
-                    let sealed = &bytes[e.offset as usize..e.offset as usize + e.length as usize];
-                    decode_blob(&repo.crypto, sealed, &e).map_err(|e| e.to_string())?;
-                }
-                Ok(())
-            })();
-            if let Err(e) = result {
-                errors.locked().push(format!("pack {name}: {e}"));
-            }
-            progress.bytes_done.fetch_add(**size, Relaxed);
-            progress.entries_done.fetch_add(1, Relaxed);
-        });
-        r.errors.extend(errors.into_inner().expect("errors"));
-        r.packs_read = packs.len() as u64;
-        r.bytes_read = packs.iter().map(|(_, s)| **s).sum();
-        if progress.is_cancelled() {
-            return Err(VaultError::Cancelled);
-        }
+    // 3. Optionally read and verify every pack (when repairing, this came first).
+    if read_data && !opts.repair {
+        read_packs(repo, opts, &on_disk, &indexed, progress, report, &mut r)?;
+    }
+    if opts.repair {
+        r.parity_added += protect::tidy(repo)?.added;
     }
     r.errors.sort();
+    r.repaired.sort();
     progress.set_phase(Phase::Done);
     Ok(r)
+}
+
+/// Read every pack the index names and verify it: its bytes are its name, and every blob
+/// in it decodes. A pack that fails and has repair data is rebuilt from it (`opts.repair`)
+/// or reported as repairable; the repair data of the sound ones is checked as well, and
+/// (repairing, in a Vault written with repair data) added where it's missing.
+fn read_packs(
+    repo: &VaultRepo,
+    opts: CheckOptions,
+    on_disk: &HashMap<String, u64>,
+    indexed: &HashSet<String>,
+    progress: &Progress,
+    report: Reporter<'_>,
+    r: &mut CheckReport,
+) -> Result<(), VaultError> {
+    progress.set_phase(Phase::Transferring);
+    report(Event::Phase {
+        phase: Phase::Transferring,
+    });
+    let backend = repo.backend();
+    let with_parity: HashSet<String> = backend
+        .list(&protect::path_for("data"))
+        .map_err(|e| VaultError::io(protect::DIR, e))?
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let packs: Vec<(&String, &u64)> = on_disk
+        .iter()
+        .filter(|(n, _)| indexed.contains(*n))
+        .collect();
+    progress
+        .bytes_total
+        .store(packs.iter().map(|(_, s)| **s).sum(), Relaxed);
+    progress.entries_total.store(packs.len() as u64, Relaxed);
+    #[derive(Default)]
+    struct Found {
+        errors: Vec<String>,
+        warnings: Vec<String>,
+        repaired: Vec<String>,
+        repairable: u64,
+        added: u64,
+    }
+    let found = Mutex::new(Found::default());
+    packs.par_iter().for_each(|(name, size)| {
+        if progress.is_cancelled() {
+            return;
+        }
+        let path = pack_path(name);
+        let verify = |bytes: &[u8]| -> Result<(), String> {
+            if !protect::pack_is_sound(name, bytes) {
+                return Err("contents do not match the pack id".into());
+            }
+            for e in split_pack(&repo.crypto, name, bytes).map_err(|e| e.to_string())? {
+                let sealed = &bytes[e.offset as usize..e.offset as usize + e.length as usize];
+                decode_blob(&repo.crypto, sealed, &e).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+        let result = backend
+            .read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| verify(&bytes).map(|()| bytes));
+        match result {
+            Ok(bytes) if with_parity.contains(*name) => {
+                let state = backend
+                    .read(&protect::path_for(&path))
+                    .map_or(ParityState::Damaged, |p| protect::parity_state(&bytes, &p));
+                if state != ParityState::Sound {
+                    if !opts.repair {
+                        found.locked().warnings.push(format!(
+                            "the repair data of pack {name} is damaged (a repair writes it again)"
+                        ));
+                    } else {
+                        match protect::write_for(backend, &path, &bytes, repo.parity.max(1), false)
+                        {
+                            Ok(()) => found.locked().repaired.push(format!(
+                                "pack {name}: its repair data was damaged, and was written again"
+                            )),
+                            Err(e) => found.locked().errors.push(format!(
+                                "pack {name}: its repair data is damaged and couldn't be written again: {e}"
+                            )),
+                        }
+                    }
+                }
+            }
+            Ok(bytes) => {
+                if opts.repair && repo.parity > 0 {
+                    match protect::write_for(backend, &path, &bytes, repo.parity, false) {
+                        Ok(()) => found.locked().added += 1,
+                        Err(e) => found
+                            .locked()
+                            .warnings
+                            .push(format!("pack {name}: no repair data could be written: {e}")),
+                    }
+                }
+            }
+            Err(why) => {
+                let sound = |b: &[u8]| verify(b).is_ok();
+                let fix = protect::repair(backend, &path, **size, &sound, opts.repair)
+                    .unwrap_or_else(|e| Fix::Beyond(e.to_string()));
+                let mut f = found.locked();
+                match fix {
+                    Fix::Repaired { blocks } => f
+                        .repaired
+                        .push(format!("pack {name}: {why}: repaired ({blocks} blocks)")),
+                    Fix::Repairable { .. } => {
+                        f.repairable += 1;
+                        f.errors
+                            .push(format!("pack {name}: {why} (its repair data can rebuild it)"));
+                    }
+                    Fix::NoParity => f.errors.push(format!("pack {name}: {why}")),
+                    Fix::Beyond(beyond) => f
+                        .errors
+                        .push(format!("pack {name}: {why}; it can't be repaired: {beyond}")),
+                }
+            }
+        }
+        progress.bytes_done.fetch_add(**size, Relaxed);
+        progress.entries_done.fetch_add(1, Relaxed);
+    });
+    let found = found.into_inner().expect("found");
+    r.errors.extend(found.errors);
+    r.warnings.extend(found.warnings);
+    r.repaired.extend(found.repaired);
+    r.repairable += found.repairable;
+    r.parity_added += found.added;
+    r.packs_read = packs.len() as u64;
+    r.bytes_read = packs.iter().map(|(_, s)| **s).sum();
+    if progress.is_cancelled() {
+        return Err(VaultError::Cancelled);
+    }
+    Ok(())
 }
 
 /// Holes in order, not overlapping, not empty, and inside the file.

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { api } from "../api";
-  import { bytes, dateTime, shortDateTime } from "../format";
+  import { bytes, count, dateTime, shortDateTime } from "../format";
   import { ApiError, type DirEntry, type Listing, type SnapshotMeta } from "../types";
   import Icon from "./Icon.svelte";
   import RestoreDialog from "./RestoreDialog.svelte";
@@ -60,9 +60,14 @@
       listing = null;
       error = null;
     }
-    return api.listDir(profile, snapshot.id, p).then(
+    // The folder is filtered and put in order where the snapshot is read, and comes at
+    // most 2,000 items at a time: a folder of a hundred thousand, sent and shown whole,
+    // stops the window answering.
+    const [f, m] = untrack(() => [filter.trim(), onlyMissing] as const);
+    return api.listDir(profile, snapshot.id, p, f || null, m).then(
       (l) => {
-        if (p !== path) return;
+        // An answer for a folder, or a filter, that has been left since.
+        if (p !== path || f !== filter.trim() || m !== onlyMissing) return;
         error = null;
         listing = l;
         for (const e of l.entries) onDisk.set(e.path, e.on_disk ?? null);
@@ -70,8 +75,11 @@
           selected = new Set([highlight]);
           const h = highlight;
           requestAnimationFrame(() => document.querySelector(`[data-path="${CSS.escape(h)}"]`)?.scrollIntoView({ block: "center" }));
-        }
-        highlight = null;
+          highlight = null;
+        } else if (highlight && l.matching > l.entries.length && !f) {
+          // The item to show is past what a big folder sends: ask for it by name.
+          filter = highlight.slice(highlight.lastIndexOf("/") + 1);
+        } else highlight = null;
       },
       (e) => {
         if (p !== path || how === "auto") return;
@@ -89,9 +97,31 @@
 
   // The selection stays while moving between folders, so files from several folders
   // can be restored together.
+  let shownPath: string | null = null;
   $effect(() => {
-    filter = "";
-    void load(path);
+    const p = path;
+    untrack(() => {
+      // Into another folder: its own filter, from nothing. (The item a search asked to
+      // be shown is filtered for, when its folder is too big to come whole.)
+      if (shownPath !== null && shownPath !== p) filter = "";
+      shownPath = p;
+      void load(p);
+    });
+  });
+  // The filter and "only deleted" ask the snapshot again, once typing pauses.
+  let asked: string | null = null;
+  $effect(() => {
+    const key = `${filter.trim()}\n${onlyMissing}`;
+    if (asked === null) {
+      asked = key; // the first listing is the folder effect's
+      return;
+    }
+    if (key === asked) return;
+    const t = setTimeout(() => {
+      asked = key;
+      void load(untrack(() => path), "auto");
+    }, 200);
+    return () => clearTimeout(t);
   });
 
   // "Deleted" is checked against the computer each time a folder is listed, so after a
@@ -131,13 +161,10 @@
     return [{ name: "/", path: "/" }, ...parts.map((name, i) => ({ name, path: "/" + parts.slice(0, i + 1).join("/") }))];
   });
 
-  const entries = $derived.by(() => {
-    if (!listing) return [];
-    const f = filter.trim().toLowerCase();
-    return listing.entries
-      .filter((e) => (!f || e.name.toLowerCase().includes(f)) && (!onlyMissing || e.on_disk === false))
-      .sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.localeCompare(b.name));
-  });
+  /** What's shown: already filtered and in order (folders first, then by name). */
+  const entries = $derived(listing?.entries ?? []);
+  /** How many more there are than a listing brings. */
+  const more = $derived(listing ? listing.matching - listing.entries.length : 0);
 
   /** Folders: go in. Files: open a read-only copy in their usual program. */
   function open(e: DirEntry) {
@@ -164,13 +191,25 @@
     selected = s;
   }
 
-  /** Items in this folder that aren't on disk any more. */
-  const missing = $derived(listing?.entries.filter((e) => e.on_disk === false) ?? []);
+  /** How many items of this folder aren't on disk any more. */
+  const missing = $derived(listing?.missing ?? 0);
   $effect(() => {
-    if (onlyMissing && listing && missing.length === 0) onlyMissing = false;
+    if (onlyMissing && listing && missing === 0) onlyMissing = false;
   });
-  /** Selected items in other folders. */
-  const elsewhere = $derived([...selected].filter((p) => !listing?.entries.some((e) => e.path === p)).length);
+  /** Bring back what was deleted from this folder (all of it, not only what's shown). */
+  async function restoreMissing() {
+    try {
+      const l = await api.listDir(profile, snapshot.id, path, null, true);
+      for (const e of l.entries) onDisk.set(e.path, e.on_disk ?? null);
+      if (l.matching > l.entries.length) app.toast("info", `Restoring the first ${count(l.entries.length)} of ${count(l.matching)} deleted items; do it again for the rest.`);
+      if (l.entries.length) restore(l.entries.map((e) => e.path));
+    } catch (e) {
+      app.toast("bad", (e as Error).message);
+    }
+  }
+  /** Selected items in other folders (or past what this folder shows). */
+  const here = $derived(new Set(entries.map((e) => e.path)));
+  const elsewhere = $derived([...selected].filter((p) => !here.has(p)).length);
 
   const allSelected = $derived(entries.length > 0 && entries.every((e) => selected.has(e.path)));
   /** Select or unselect everything shown in this folder (the rest stays as it is). */
@@ -222,14 +261,14 @@
         </button>
       {/each}
     </nav>
-    {#if missing.length}
+    {#if missing}
       <button
         class="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[13px] transition-colors {onlyMissing ? 'bg-warning/15 font-medium text-warning' : 'bg-surface-3 text-fg-2 hover:bg-track hover:text-fg'}"
         aria-pressed={onlyMissing}
         title="Show only what was deleted or moved since this snapshot"
         onclick={() => (onlyMissing = !onlyMissing)}
       >
-        <Icon name="filter" size={13} /> Only deleted ({missing.length})
+        <Icon name="filter" size={13} /> Only deleted ({count(missing)})
       </button>
     {/if}
     <button
@@ -302,6 +341,13 @@
               </td>
             </tr>
           {/each}
+          {#if more > 0}
+            <tr>
+              <td colspan="5" class="px-4 py-3 text-center text-[13px] text-fg-muted">
+                The first {count(entries.length)} of {count(listing.matching)} items. Type part of a name in the filter to find the others.
+              </td>
+            </tr>
+          {/if}
         </tbody>
       </table>
     {/if}
@@ -319,9 +365,9 @@
     {:else}
       <span class="mr-auto hidden text-[13px] text-fg-muted @min-[520px]:inline">Tick files and folders to restore just those.</span>
       <button class="btn" onclick={() => restore([path])} title="Restore everything in this folder; files that are already identical are skipped">Restore this whole folder</button>
-      {#if missing.length}
-        <button class="btn btn-primary" onclick={() => restore(missing.map((e) => e.path))} title="Bring back only what was deleted from this folder">
-          <Icon name="restore" size={14} /> Restore {missing.length} deleted {missing.length === 1 ? "item" : "items"}
+      {#if missing}
+        <button class="btn btn-primary" onclick={() => void restoreMissing()} title="Bring back only what was deleted from this folder">
+          <Icon name="restore" size={14} /> Restore {count(missing)} deleted {missing === 1 ? "item" : "items"}
         </button>
       {/if}
     {/if}

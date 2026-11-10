@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "flux-compat"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "flux-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "humantime",
  "ignore",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fs"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1237,11 +1237,13 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flux-core",
  "flux-runner",
  "flux-service",
+ "futures-util",
+ "jiff",
  "serde",
  "serde_json",
  "tauri",
@@ -1249,11 +1251,12 @@ dependencies = [
  "tauri-plugin-dialog",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]
 name = "flux-helper"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1266,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mirror"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1288,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mount"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flux-core",
  "flux-fs",
@@ -1302,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "flux-runner"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1313,6 +1316,7 @@ dependencies = [
  "flux-mirror",
  "flux-transport",
  "flux-vault",
+ "getrandom 0.4.3",
  "hex",
  "jiff",
  "notify-rust",
@@ -1332,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "flux-service"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flux-compat",
  "flux-core",
@@ -1353,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "flux-transport"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1368,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -1396,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault-recover"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",

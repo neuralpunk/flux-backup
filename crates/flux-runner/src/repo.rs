@@ -224,12 +224,24 @@ pub fn create_unlock_file(path: &Path) -> Result<UnlockSecret, RepoError> {
     Ok(flux_vault::crypto::unlock_secret(&bytes))
 }
 
+/// Before a Vault is opened to be checked and repaired: put right its `config` and key
+/// slots from their repair data, if they are damaged (it can't be opened without them).
+/// Returns what was repaired. Does nothing for other engines, or when nothing is wrong.
+pub fn repair_vault_basics(paths: &Paths, profile: &Profile) -> Vec<String> {
+    if profile.engine != flux_core::Engine::Vault {
+        return Vec::new();
+    }
+    let pool = sftp_pool(paths, profile, true);
+    flux_vault::protect::repair_unopened(vault_backend(profile, pool).as_ref()).unwrap_or_default()
+}
+
 /// Apply the profile's Vault settings that matter while writing: the password hashing for
 /// new passwords, and padding.
 fn configure(repo: &mut VaultRepo, profile: &Profile) {
     if let Some(v) = &profile.vault {
         repo.kdf = flux_vault::crypto::KdfParams::of(v.hashing);
         repo.pad_packs = v.hide_sizes && v.encryption;
+        repo.parity = v.parity.min(flux_vault::parity::MAX_PERCENT);
     }
 }
 
@@ -445,6 +457,45 @@ impl AnyRepo {
         }
     }
 
+    /// The entry at `path` (no leading slash) of a snapshot, if it has one. A Vault's is
+    /// found by walking down its folders (a handful of reads); the others' by reading
+    /// their list until it comes.
+    pub fn entry_at(&self, snap: &SnapshotMeta, path: &[u8]) -> Result<Option<Entry>, RepoError> {
+        if let AnyRepo::Vault { repo, .. } = self {
+            return Ok(flux_vault::entry_at(repo, &snap.id, path)?);
+        }
+        for e in self.entries(snap)? {
+            let e = e?;
+            if e.path == path {
+                return Ok(Some(e));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`AnyRepo::entries`] for Flux Sentry's look before a backup. A Vault's list is
+    /// taken from the file list the last backup left in this computer's cache when that
+    /// is this snapshot's (it is, for the newest snapshot of a backup made here): the
+    /// Vault itself gives it one folder at a time.
+    pub fn entries_for_look(
+        &self,
+        paths: &Paths,
+        snap: &SnapshotMeta,
+    ) -> Result<Entries<'_>, RepoError> {
+        if let AnyRepo::Vault { repo, owner } = self
+            && let Ok(record) = repo.read_record(&snap.id)
+            && let Some(flat) = flux_vault::backup::cached_file_list(
+                &paths.cache_dir.join("vault"),
+                repo,
+                owner,
+                &record.tree,
+            )
+        {
+            return Ok(Box::new(flat.into_iter().map(|(e, _)| Ok(e))));
+        }
+        self.entries(snap)
+    }
+
     /// The snapshot's entries, sorted by path.
     pub fn entries(&self, snap: &SnapshotMeta) -> Result<Entries<'_>, RepoError> {
         match self {
@@ -488,7 +539,8 @@ impl AnyRepo {
             }
             AnyRepo::Vault { repo, .. } => {
                 let _lock = repo.lock(false)?;
-                let source = flux_vault::VaultSource::new(repo, &req.snapshot.id)?;
+                let source =
+                    flux_vault::VaultSource::for_paths(repo, &req.snapshot.id, &req.paths)?;
                 flux_fs::restore::restore(&source, req, progress, report).map_err(map)
             }
             AnyRepo::Rsync(r) => {
@@ -688,17 +740,38 @@ impl AnyRepo {
         progress: &Progress,
         report: Reporter<'_>,
     ) -> Result<CheckSummary, RepoError> {
+        self.check_with(read_data, false, progress, report)
+    }
+
+    /// Does this backup keep repair data (a Vault with `parity` set)?
+    pub fn keeps_repair_data(&self) -> bool {
+        matches!(self, AnyRepo::Vault { repo, .. } if repo.parity > 0)
+    }
+
+    /// [`AnyRepo::check`], and with `repair` (Vaults): what is damaged is rebuilt from its
+    /// repair data, and repair data is added where it's missing.
+    pub fn check_with(
+        &self,
+        read_data: bool,
+        repair: bool,
+        progress: &Progress,
+        report: Reporter<'_>,
+    ) -> Result<CheckSummary, RepoError> {
         match self {
             AnyRepo::Mirror(r) => Ok(flux_mirror::check::check(r, read_data, progress)?),
             AnyRepo::MirrorRemote(r) => Ok(flux_mirror::remote::check(r, read_data, progress)?),
             AnyRepo::Vault { repo, .. } => {
-                let c = flux_vault::check::check(repo, read_data, progress, report)?;
+                let opts = flux_vault::check::CheckOptions { read_data, repair };
+                let c = flux_vault::check::check_with(repo, opts, progress, report)?;
                 Ok(CheckSummary {
                     snapshots: c.snapshots,
                     checked: c.blobs,
                     bytes_read: c.bytes_read,
                     errors: c.errors,
                     warnings: c.warnings,
+                    repaired: c.repaired,
+                    repairable: c.repairable,
+                    parity_added: c.parity_added,
                 })
             }
             AnyRepo::Rsync(r) => Ok(flux_compat::rsync::check(r, read_data, progress)?),
@@ -834,6 +907,12 @@ pub struct Storage {
     pub shared_with: usize,
     /// How it was measured, in words.
     pub basis: String,
+    /// Vaults with repair data: the space it takes (part of `stored_bytes`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_bytes: Option<u64>,
+    /// Stored files (packs), and how many of them have repair data.
+    pub packs: u64,
+    pub packs_with_repair: u64,
 }
 
 impl AnyRepo {
@@ -885,6 +964,15 @@ impl AnyRepo {
                     .list("data")
                     .ok()
                     .map(|l| l.iter().map(|(_, size)| size).sum());
+                // Repair data takes space too, and says how much of the Vault it covers.
+                if let Ok(cover) = flux_vault::protect::coverage(repo.backend())
+                    && cover.parity_bytes > 0
+                {
+                    st.stored_bytes = st.stored_bytes.map(|b| b + cover.parity_bytes);
+                    st.repair_bytes = Some(cover.parity_bytes);
+                    st.packs = cover.packs;
+                    st.packs_with_repair = cover.protected;
+                }
                 st.dedup_saved = Some(st.logical_bytes.saturating_sub(raw));
                 st.compression_saved = Some(raw.saturating_sub(stored_data));
                 st.shared_with = others;

@@ -92,6 +92,24 @@ pub fn replicate(
     let mut there = snapshot_names(replica)?;
     let mut out = ReplicaOutcome::default();
     let partial = replica.join("snapshots").join(REPLICA_PARTIAL);
+    // A copy that lost its last-written files (a drive pulled out before they reached
+    // it, by a Flux that didn't wait for them) is not "already there": it is copied
+    // again, and nothing is linked to it.
+    let mut damaged = Vec::new();
+    for name in there.iter().filter(|n| have.contains(n)) {
+        let (src, dst) = (
+            source.join("snapshots").join(name),
+            replica.join("snapshots").join(name),
+        );
+        if !looks_whole(&src, &dst) {
+            report(Event::Info {
+                message: format!("the copy of snapshot {name} is incomplete; copying it again"),
+            });
+            remove_force(&dst).map_err(|e| MirrorError::io(&dst, e))?;
+            damaged.push(name.clone());
+        }
+    }
+    there.retain(|n| !damaged.contains(n));
     let missing: Vec<String> = have
         .iter()
         .filter(|n| !there.contains(n))
@@ -131,8 +149,15 @@ pub fn replicate(
                 MirrorError::io(&src, e)
             }
         })?;
+        // Everything on the drive before the copy becomes a snapshot there: a rename can
+        // outlive a power cut or a pulled cable that the files' contents don't.
+        let dir = fs::File::open(&partial).map_err(|e| MirrorError::io(&partial, e))?;
+        rustix::fs::syncfs(&dir).map_err(|e| MirrorError::io(&partial, e.into()))?;
         let dst = replica.join("snapshots").join(name);
         fs::rename(&partial, &dst).map_err(|e| MirrorError::io(&dst, e))?;
+        if let Ok(d) = fs::File::open(replica.join("snapshots")) {
+            let _ = d.sync_all();
+        }
         report(Event::Info {
             message: format!(
                 "copied snapshot {name} ({} files copied, {} linked)",
@@ -183,6 +208,25 @@ pub fn replicate(
     }
     drop(lock);
     Ok(out)
+}
+
+/// Whether the copy `dst` of snapshot `src` has the files a snapshot folder holds beside
+/// its data (`meta.json`, the manifest…), none of them cut to nothing. They are the last
+/// written, so they are what an unfinished write loses first.
+fn looks_whole(src: &Path, dst: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(src) else {
+        return true; // can't tell: leave it
+    };
+    rd.flatten().all(|d| {
+        let Ok(m) = d.metadata() else {
+            return true;
+        };
+        if !m.is_file() {
+            return true;
+        }
+        fs::symlink_metadata(dst.join(d.file_name()))
+            .is_ok_and(|c| c.is_file() && (c.len() > 0 || m.len() == 0))
+    })
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), MirrorError> {
@@ -308,5 +352,53 @@ mod tests {
             fs::read_to_string(rep.join("snapshots/2026-11-02/data/a")).unwrap(),
             "same"
         );
+    }
+
+    /// A copy whose `meta.json` never reached the drive (the cable pulled just after an
+    /// older Flux's replication) is skipped as unreadable when the replica is opened. It
+    /// must not count as "already there" for ever: it is copied again.
+    #[test]
+    fn an_incomplete_copy_is_copied_again() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, rep) = (t.path().join("src"), t.path().join("rep"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join(REPO_MARKER),
+            "format = 1\nengine = \"mirror\"\nprofile = \"home\"\nhost = \"h\"\nuser = \"u\"\ncreated = \"2026-11-09T00:00:00Z\"\n",
+        )
+        .unwrap();
+        snap(&src, "2026-11-01", &[("a", "alpha")], None);
+        snap(&src, "2026-11-02", &[("a", "beta")], None);
+        let p = Progress::new();
+        let none = XattrPolicy {
+            acl: false,
+            other: false,
+        };
+        let run = || {
+            replicate(
+                &src,
+                &rep,
+                "home+usb",
+                none,
+                &p,
+                &flux_core::progress::silent,
+            )
+            .unwrap()
+        };
+        assert_eq!(run().copied, ["2026-11-01", "2026-11-02"]);
+        let meta = rep.join("snapshots/2026-11-01/meta.json");
+
+        // Cut to nothing, then gone altogether.
+        fs::write(&meta, "").unwrap();
+        assert_eq!(run().copied, ["2026-11-01"]);
+        assert_eq!(fs::read_to_string(&meta).unwrap(), "{}");
+        fs::remove_file(&meta).unwrap();
+        assert_eq!(run().copied, ["2026-11-01"]);
+        assert_eq!(fs::read_to_string(&meta).unwrap(), "{}");
+        assert_eq!(
+            fs::read_to_string(rep.join("snapshots/2026-11-02/data/a")).unwrap(),
+            "beta"
+        );
+        assert!(run().copied.is_empty(), "whole copies are left alone");
     }
 }

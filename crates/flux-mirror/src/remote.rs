@@ -183,15 +183,25 @@ impl RemoteMirror {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(remote_err(e)),
         };
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|(name, attrs)| !name.starts_with('.') && attrs.is_dir())
+            .map(|(name, _)| name)
+            .collect();
+        // Every snapshot's meta.json in a few batched reads: one after another they are
+        // four round trips each, most of a minute for a year of daily snapshots, every
+        // time the snapshots are listed (several times in a backup).
+        let reqs: Vec<flux_transport::sftp::ReadReq> = names
+            .iter()
+            .map(|name| flux_transport::sftp::ReadReq::whole(&format!("{dir}/{name}/meta.json")))
+            .collect();
+        let metas = self
+            .pool
+            .with(|s| Ok(s.read_many(&reqs)))
+            .map_err(remote_err)?;
         let mut out = Vec::new();
-        for (name, attrs) in names {
-            if name.starts_with('.') || !attrs.is_dir() {
-                continue;
-            }
-            match self
-                .pool
-                .with(|s| s.read_file(&format!("{dir}/{name}/meta.json")))
-            {
+        for (name, raw) in names.iter().zip(metas) {
+            match raw {
                 Ok(raw) => match serde_json::from_slice::<SnapshotMeta>(&raw) {
                     Ok(m) => out.push(m),
                     Err(e) => tracing::warn!("skipping snapshot {name}: {e}"),
@@ -320,6 +330,39 @@ pub fn backup(
     progress: &Progress,
     report: Reporter<'_>,
 ) -> Result<BackupOutcome, MirrorError> {
+    backup_scanned(pool, req, None, progress, report)
+}
+
+/// The scan of a profile's sources that [`backup`] would make.
+pub fn scan_for_backup(
+    profile: &Profile,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<flux_fs::scan::ScanResult, MirrorError> {
+    progress.set_phase(Phase::Scanning);
+    report(Event::Phase {
+        phase: Phase::Scanning,
+    });
+    flux_fs::scan::thread_pool(profile)
+        .map_err(|e| MirrorError::Corrupt(e.to_string()))?
+        .install(|| flux_fs::scan::scan_profile(profile, &[], progress, report))
+        .map_err(|e| match e {
+            flux_fs::scan::ProfileScanError::NoSources => MirrorError::NoSources,
+            flux_fs::scan::ProfileScanError::Cancelled => MirrorError::Cancelled,
+            flux_fs::scan::ProfileScanError::Filter(f) => MirrorError::Filter(f),
+            other => MirrorError::Corrupt(other.to_string()),
+        })
+}
+
+/// [`backup`], with the scan of the sources already made (by [`scan_for_backup`], just
+/// before; see [`crate::backup_scanned`]).
+pub fn backup_scanned(
+    pool: Arc<SftpPool>,
+    req: &RemoteBackup<'_>,
+    scanned: Option<flux_fs::scan::ScanResult>,
+    progress: &Progress,
+    report: Reporter<'_>,
+) -> Result<BackupOutcome, MirrorError> {
     let started = Timestamp::now();
     let profile = req.profile;
     let flux_core::Target::Ssh {
@@ -361,20 +404,10 @@ pub fn backup(
     let _lock = repo.as_ref().map(RemoteMirror::lock).transpose()?;
 
     // Scan and plan locally, exactly as for local targets.
-    progress.set_phase(Phase::Scanning);
-    report(Event::Phase {
-        phase: Phase::Scanning,
-    });
-    let pool_threads =
-        flux_fs::scan::thread_pool(profile).map_err(|e| MirrorError::Corrupt(e.to_string()))?;
-    let scanned = pool_threads
-        .install(|| flux_fs::scan::scan_profile(profile, &[], progress, report))
-        .map_err(|e| match e {
-            flux_fs::scan::ProfileScanError::NoSources => MirrorError::NoSources,
-            flux_fs::scan::ProfileScanError::Cancelled => MirrorError::Cancelled,
-            flux_fs::scan::ProfileScanError::Filter(f) => MirrorError::Filter(f),
-            other => MirrorError::Corrupt(other.to_string()),
-        })?;
+    let scanned = match scanned {
+        Some(s) => s,
+        None => scan_for_backup(profile, progress, report)?,
+    };
     progress.set_phase(Phase::Planning);
     report(Event::Phase {
         phase: Phase::Planning,
@@ -776,8 +809,13 @@ fn make_room(
     needed: u64,
     report: Reporter<'_>,
 ) -> Result<Vec<String>, MirrorError> {
-    let infos: Vec<_> = repo.snapshots()?.iter().map(crate::prune::info).collect();
     let mut removed = Vec::new();
+    // Retention switched off: nothing is ever removed, room or no room (as on a local
+    // drive).
+    if !profile.retention.enabled {
+        return Ok(removed);
+    }
+    let infos: Vec<_> = repo.snapshots()?.iter().map(crate::prune::info).collect();
     for id in
         flux_core::retention::space_candidates(&infos, &profile.retention, &Default::default())
     {
@@ -798,6 +836,8 @@ fn make_room(
 pub struct RemoteSource<'a> {
     repo: &'a RemoteMirror,
     id: String,
+    /// The small files of this restore, fetched in batches.
+    small: std::sync::OnceLock<flux_transport::SmallFiles>,
 }
 
 impl<'a> RemoteSource<'a> {
@@ -805,11 +845,21 @@ impl<'a> RemoteSource<'a> {
         Self {
             repo,
             id: id.to_owned(),
+            small: std::sync::OnceLock::new(),
         }
     }
 }
 
 impl flux_fs::restore::RestoreSource for RemoteSource<'_> {
+    fn will_restore(&self, files: &[&Entry]) {
+        let _ = self.small.set(flux_transport::SmallFiles::new(
+            self.repo.pool.clone(),
+            files
+                .iter()
+                .map(|e| (self.repo.data_path(&self.id, e), e.size)),
+        ));
+    }
+
     fn entries(&self) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Entry>> + '_>> {
         let r = self.repo.entries(&self.id).map_err(std::io::Error::other)?;
         Ok(Box::new(r.map(|e| e.map_err(std::io::Error::other))))
@@ -824,6 +874,13 @@ impl flux_fs::restore::RestoreSource for RemoteSource<'_> {
     ) -> std::io::Result<u64> {
         let mut out = out;
         let remote = self.repo.data_path(&self.id, e);
+        // A small file comes with its neighbours, in a batch.
+        if let Some(data) = self.small.get().and_then(|s| s.get(&remote)) {
+            let data = data?;
+            out.write_all(&data)?;
+            progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
+            return Ok(data.len() as u64);
+        }
         let n = self.repo.pool.with(|s| {
             s.read_range_bytes(&remote, 0, u64::MAX, |chunk| {
                 if progress.is_cancelled() {
@@ -837,7 +894,7 @@ impl flux_fs::restore::RestoreSource for RemoteSource<'_> {
                 Ok(())
             })
         })?;
-        out.sync_all()?;
+        // (Made durable by the restore, once at its end: not here, file by file.)
         Ok(n)
     }
 }

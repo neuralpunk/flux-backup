@@ -75,12 +75,71 @@ pub struct VaultRepo {
     /// Key slot that opened the repository (encrypted repos).
     pub slot: Option<String>,
     index: Mutex<Option<Arc<Index>>>,
+    /// Packs fetched whole from a server (see [`VaultRepo::read_blob`]).
+    packs: PackCache,
     /// Key derivation cost for new slots.
     pub kdf: KdfParams,
     /// The unlock file's secret this repository was opened with (new slots need it too).
     unlock: Option<UnlockSecret>,
     /// Pad new packs to hide their exact sizes (see [`crate::pack::padme`]).
     pub pad_packs: bool,
+    /// Write repair data ([`crate::protect`]) with what's stored from now on: this share
+    /// of each file, in percent. 0: none.
+    pub parity: u8,
+}
+
+/// A pack held in memory, or being fetched (others wanting it wait for the one fetch).
+type HeldPack = Arc<std::sync::OnceLock<Result<Arc<Vec<u8>>, String>>>;
+
+/// The packs of a Vault on a server that were fetched whole, most recently wanted last.
+#[derive(Default)]
+struct PackCache {
+    state: Mutex<PackCacheState>,
+}
+
+#[derive(Default)]
+struct PackCacheState {
+    /// Packs a blob was read from, alone, lately: the next blob wanted from one of
+    /// them brings the whole pack.
+    seen: std::collections::VecDeque<BlobId>,
+    held: std::collections::VecDeque<(BlobId, HeldPack)>,
+}
+
+/// Packs kept in memory (about 16 MiB each).
+const PACKS_HELD: usize = 8;
+/// Packs remembered as read from once.
+const PACKS_SEEN: usize = 4096;
+
+impl PackCache {
+    /// The place for `pack`'s contents, if it should be fetched whole (it was read from
+    /// before): to be filled by the caller, or already filled. `None`: this is the
+    /// first blob wanted from it; read that alone.
+    fn wanted(&self, pack: &BlobId) -> Option<HeldPack> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = st.held.iter().position(|(p, _)| p == pack) {
+            let hit = st.held.remove(i).expect("found");
+            st.held.push_back(hit.clone());
+            return Some(hit.1);
+        }
+        if !st.seen.contains(pack) {
+            if st.seen.len() >= PACKS_SEEN {
+                st.seen.pop_front();
+            }
+            st.seen.push_back(*pack);
+            return None;
+        }
+        if st.held.len() >= PACKS_HELD {
+            st.held.pop_front();
+        }
+        let cell = HeldPack::default();
+        st.held.push_back((*pack, cell.clone()));
+        Some(cell)
+    }
+
+    fn forget(&self, pack: &BlobId) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.held.retain(|(p, _)| p != pack);
+    }
 }
 
 impl std::fmt::Debug for VaultRepo {
@@ -157,6 +216,11 @@ impl VaultRepo {
         backend
             .write("config", &json)
             .map_err(|e| VaultError::io("config", e))?;
+        // Its repair data, if it has any, is for the config as it was.
+        if let Ok(par) = backend.read(&crate::protect::path_for("config")) {
+            let percent = crate::parity::head(&par).map_or(5, |h| h.percent);
+            crate::protect::write_for(backend, "config", &json, percent, false)?;
+        }
         Ok(Upgrade { from, to: FORMAT })
     }
 
@@ -248,9 +312,11 @@ impl VaultRepo {
             crypto,
             slot: slot_id,
             index: Mutex::new(None),
+            packs: PackCache::default(),
             kdf,
             unlock,
             pad_packs: false,
+            parity: 0,
         })
     }
 
@@ -302,10 +368,12 @@ impl VaultRepo {
             config,
             crypto,
             index: Mutex::new(None),
+            packs: PackCache::default(),
             kdf: KdfParams::DEFAULT,
             unlock: unlock.filter(|_| config_encrypted && slot.as_ref().is_some_and(|s| s.1)),
             slot: slot.map(|s| s.0),
             pad_packs: false,
+            parity: 0,
         })
     }
 
@@ -454,11 +522,26 @@ impl VaultRepo {
             .backend
             .list("snapshots")
             .map_err(|e| VaultError::io("snapshots", e))?;
+        // Only records: a stray file someone left in the folder isn't a snapshot.
+        let names: Vec<String> = names
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect();
+        // All of them in a few batched reads (on a server, one at a time is a minute of
+        // waiting for a few thousand snapshots, each time they are listed).
+        let reads: Vec<crate::backend::ReadAt> = names
+            .iter()
+            .map(|n| (format!("snapshots/{n}"), 0, None))
+            .collect();
+        let raws = self.backend.read_many(&reads);
         let read: Vec<(String, Result<SnapshotRecord, VaultError>)> = names
-            .par_iter()
-            // Only records: a stray file someone left in the folder isn't a snapshot.
-            .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(|(n, _)| (n.clone(), self.read_record(n)))
+            .into_par_iter()
+            .zip(raws)
+            .map(|(n, raw)| {
+                let r = self.record_from(&n, raw);
+                (n, r)
+            })
             .collect();
         let mut v = Vec::new();
         let mut unreadable = Vec::new();
@@ -491,8 +574,17 @@ impl VaultRepo {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(VaultError::SnapshotNotFound(id.into()));
         }
+        self.record_from(id, self.backend.read(&format!("snapshots/{id}")))
+    }
+
+    /// The record `id` from what reading its file gave.
+    fn record_from(
+        &self,
+        id: &str,
+        raw: std::io::Result<Vec<u8>>,
+    ) -> Result<SnapshotRecord, VaultError> {
         let path = format!("snapshots/{id}");
-        let raw = match self.backend.read(&path) {
+        let raw = match raw {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(VaultError::SnapshotNotFound(id.into()));
@@ -508,9 +600,14 @@ impl VaultRepo {
     pub fn write_record(&self, r: &SnapshotRecord) -> Result<(), VaultError> {
         let path = format!("snapshots/{}", r.meta.id);
         let json = serde_json::to_vec(r).map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        let sealed = self.crypto.seal(&json)?;
         self.backend
-            .write(&path, &self.crypto.seal(&json)?)
-            .map_err(|e| VaultError::io(&path, e))
+            .write(&path, &sealed)
+            .map_err(|e| VaultError::io(&path, e))?;
+        if self.parity > 0 {
+            crate::protect::write_for(self.backend.as_ref(), &path, &sealed, self.parity, false)?;
+        }
+        Ok(())
     }
 
     // ---- the settings of the profiles using it ----
@@ -583,7 +680,9 @@ impl VaultRepo {
         let path = format!("snapshots/{id}");
         self.backend
             .remove(&path)
-            .map_err(|e| VaultError::io(&path, e))
+            .map_err(|e| VaultError::io(&path, e))?;
+        crate::protect::remove_for(self.backend.as_ref(), &path);
+        Ok(())
     }
 
     /// Whether `id` is the full id of a record that is there but damaged (it can't be
@@ -619,13 +718,56 @@ impl VaultRepo {
 
     // ---- trees ----
 
+    /// Read and decode one blob.
+    ///
+    /// From a local drive, just that blob's bytes. On a server every read is a round
+    /// trip (three, with opening and closing the pack), and restores, mounts and tree
+    /// walks want blob after blob from the same packs: thousands of small files sit in
+    /// one pack, a big file's pieces follow one another, and folders' trees fill packs
+    /// of their own. So the second blob wanted from a pack brings the whole pack, once,
+    /// and the next ones come from memory. (The first is fetched alone: getting one
+    /// file back shouldn't download 16 MiB for it.) A few packs are kept.
+    pub fn read_blob(&self, loc: &crate::pack::Loc) -> Result<Vec<u8>, VaultError> {
+        if !self.backend.remote() {
+            return read_blob(self.backend(), &self.crypto, loc);
+        }
+        let Some(cell) = self.packs.wanted(&loc.pack) else {
+            return read_blob(self.backend(), &self.crypto, loc);
+        };
+        let path = crate::backend::pack_path(&hex_id(&loc.pack));
+        let pack = cell
+            .get_or_init(|| {
+                self.backend
+                    .read(&path)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            })
+            .clone();
+        let pack = match pack {
+            Ok(p) => p,
+            // The whole pack couldn't be had (now): the blob alone, as ever.
+            Err(_) => {
+                self.packs.forget(&loc.pack);
+                return read_blob(self.backend(), &self.crypto, loc);
+            }
+        };
+        let (from, len) = (loc.entry.offset as usize, loc.entry.length as usize);
+        let sealed = pack.get(from..from + len).ok_or_else(|| {
+            VaultError::Corrupt(format!(
+                "pack {} is shorter than its index says",
+                hex_id(&loc.pack)
+            ))
+        })?;
+        crate::pack::decode_blob(&self.crypto, sealed, &loc.entry)
+    }
+
     /// A tree blob, in tree format `format` (its snapshot record's `tree_format`).
     pub fn load_tree(&self, id: &BlobId, format: u32) -> Result<Tree, VaultError> {
         let index = self.index()?;
         let loc = index
             .get(id)
             .ok_or_else(|| VaultError::Corrupt(format!("tree {} is missing", hex_id(id))))?;
-        let raw = read_blob(self.backend(), &self.crypto, loc)?;
+        let raw = self.read_blob(loc)?;
         Tree::decode(&raw, format)
             .map_err(|e| VaultError::Corrupt(format!("tree {}: {e}", hex_id(id))))
     }
@@ -638,6 +780,25 @@ impl VaultRepo {
 
     /// Every entry of a snapshot with its content, sorted by path.
     pub fn flatten(&self, record: &SnapshotRecord) -> Result<Vec<(Entry, Content)>, VaultError> {
+        self.flatten_under(record, &[])
+    }
+
+    /// The entries of a snapshot at or below one of `paths` (as entries name them, no
+    /// leading slash), and the folders on the way to them, sorted by path. None given:
+    /// every entry. Only the trees on the way and below are read: getting one file back
+    /// doesn't read every folder of the snapshot.
+    pub fn flatten_under(
+        &self,
+        record: &SnapshotRecord,
+        paths: &[Vec<u8>],
+    ) -> Result<Vec<(Entry, Content)>, VaultError> {
+        let within = |path: &[u8], of: &[u8]| {
+            of.is_empty() || (path.starts_with(of) && path.get(of.len()).is_none_or(|b| *b == b'/'))
+        };
+        // Wanted, or a folder on the way to something wanted.
+        let wanted = |path: &[u8]| {
+            paths.is_empty() || paths.iter().any(|w| within(path, w) || within(w, path))
+        };
         let root =
             parse_id(&record.tree).ok_or_else(|| VaultError::Corrupt("bad root tree id".into()))?;
         let mut out = Vec::new();
@@ -649,6 +810,9 @@ impl VaultRepo {
                     path.push(b'/');
                 }
                 path.extend_from_slice(&node.name);
+                if !wanted(&path) {
+                    continue;
+                }
                 if let Some(sub) = node.subtree {
                     stack.push((path.clone(), sub));
                 }
@@ -726,9 +890,13 @@ impl VaultRepo {
         let sid = hex::encode(random::<8>()?);
         let json =
             serde_json::to_vec_pretty(&slot).map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        let path = format!("keys/{sid}");
         self.backend
-            .write(&format!("keys/{sid}"), &json)
+            .write(&path, &json)
             .map_err(|e| VaultError::io("keys", e))?;
+        if self.parity > 0 {
+            crate::protect::write_for(self.backend.as_ref(), &path, &json, self.parity, false)?;
+        }
         Ok(sid)
     }
 
@@ -765,6 +933,7 @@ impl VaultRepo {
         self.backend
             .remove(&format!("keys/{old}"))
             .map_err(|e| VaultError::io("keys", e))?;
+        crate::protect::remove_for(self.backend.as_ref(), &format!("keys/{old}"));
         Ok(sid)
     }
 
@@ -779,7 +948,10 @@ impl VaultRepo {
         }
         self.backend
             .remove(&format!("keys/{slot}"))
-            .map_err(|e| VaultError::io("keys", e))
+            .map_err(|e| VaultError::io("keys", e))?;
+        // And its repair data: a removed password must not be rebuildable.
+        crate::protect::remove_for(self.backend.as_ref(), &format!("keys/{slot}"));
+        Ok(())
     }
 }
 

@@ -34,8 +34,14 @@ Also inside a Vault: `profiles/<id>`, the settings of each backup using it (encr
 like everything else; see below). An encrypted Vault refuses unencrypted objects
 (tag byte `0`): only an unencrypted Vault has them.
 
+Since 1.1, also `parity/`: optional repair data (Reed–Solomon parity) for the files of
+the Vault, each parity file with a version of its own (`FLUXPAR1`). It adds to the Vault
+without changing its format: a Flux that doesn't know it reads and writes the Vault as
+before, and ignores it. See *Repair data* in VAULT_FORMAT.md.
+
 `flux-vault-recover` (a separate program, kept next to Vaults on drives) reads formats 1
-and 2 with an implementation of its own, which the tests compare with Flux's.
+and 2 with an implementation of its own, which the tests compare with Flux's. It doesn't
+use repair data: repair a damaged Vault with `flux check --repair`.
 
 ## Mirror
 

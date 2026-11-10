@@ -142,6 +142,27 @@
         {#if app.creatingTemplate === null}
           <div class="mx-auto w-full max-w-[760px] overflow-y-auto px-10 pb-10">
             <TemplatePicker system={app.creatingSystem} onpick={(t) => (app.creatingTemplate = t)} />
+            {#if !app.creatingSystem && app.system.available}
+              <!-- System backups start here (not in the sidebar): rare, and they need an administrator. -->
+              <button
+                class="row row-link mt-6 gap-3"
+                disabled={app.unlockingSystem}
+                onclick={() => {
+                  if (app.system.unlocked) app.newProfile(true);
+                  else {
+                    app.systemThen = "new";
+                    app.dialog = { kind: "system-unlock" };
+                  }
+                }}
+              >
+                <span class="glyph"><Icon name="shield" size={13} /></span>
+                <span class="min-w-0 flex-1">
+                  <span class="block font-medium">Back up the whole computer</span>
+                  <span class="block text-[12.5px] text-fg-muted">{app.unlockingSystem ? "Waiting for the administrator password…" : "A system backup: settings in /etc, other users' files and folders only the administrator can read. Asks for an administrator password."}</span>
+                </span>
+                <Icon name="chevronRight" size={15} class="shrink-0 text-fg-muted" />
+              </button>
+            {/if}
             <div class="mt-6 flex justify-end"><button class="btn btn-ghost" onclick={() => (app.creating = false)}>Cancel</button></div>
           </div>
         {:else}

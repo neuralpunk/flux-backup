@@ -178,9 +178,117 @@ impl<'de> Deserialize<'de> for HumanDuration {
     }
 }
 
+/// A share written as a percentage: `1%`, `0.5%`, `99.9%` (the sign is optional, and a
+/// plain number is read the same way). Kept as millionths, so it compares exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Percent(u32);
+
+impl Percent {
+    /// From millionths of the whole (`10_000` is 1%). More than the whole is the whole.
+    pub const fn from_millionths(m: u32) -> Self {
+        Percent(if m > 1_000_000 { 1_000_000 } else { m })
+    }
+    pub const fn millionths(self) -> u32 {
+        self.0
+    }
+    /// As a fraction of one: 0.01 for 1%.
+    pub fn fraction(self) -> f64 {
+        f64::from(self.0) / 1e6
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid percentage {0:?} (write it like 1% or 99.9%)")]
+pub struct ParsePercentError(String);
+
+impl FromStr for Percent {
+    type Err = ParsePercentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || ParsePercentError(s.to_owned());
+        let t = s.trim();
+        let t = t.strip_suffix('%').unwrap_or(t).trim();
+        // Digits, with at most four after the point: read exactly, no rounding surprises.
+        let (whole, frac) = t.split_once('.').unwrap_or((t, ""));
+        let digits = |x: &str| x.bytes().all(|b| b.is_ascii_digit());
+        if whole.is_empty() || !digits(whole) || !digits(frac) || frac.len() > 4 || whole.len() > 3
+        {
+            return Err(err());
+        }
+        let w: u32 = whole.parse().map_err(|_| err())?;
+        let f: u32 = format!("{frac:0<4}").parse().map_err(|_| err())?;
+        let m = w * 10_000 + f;
+        if m > 1_000_000 {
+            return Err(err());
+        }
+        Ok(Percent(m))
+    }
+}
+
+impl fmt::Display for Percent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (w, frac) = (self.0 / 10_000, self.0 % 10_000);
+        if frac == 0 {
+            write!(f, "{w}%")
+        } else {
+            let digits = format!("{frac:04}");
+            write!(f, "{w}.{}%", digits.trim_end_matches('0'))
+        }
+    }
+}
+
+impl Serialize for Percent {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Percent {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Int(u64),
+            Float(f64),
+            Str(String),
+        }
+        let text = match Raw::deserialize(d)? {
+            Raw::Int(n) => n.to_string(),
+            Raw::Float(x) => format!("{x}"),
+            Raw::Str(s) => s,
+        };
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentages() {
+        let p = |s: &str| s.parse::<Percent>().unwrap();
+        assert_eq!(p("1%").millionths(), 10_000);
+        assert_eq!(p(" 0.5 % ").millionths(), 5_000);
+        assert_eq!(p("99.9").millionths(), 999_000);
+        assert_eq!(p("0.01%").millionths(), 100);
+        assert_eq!(p("100%").millionths(), 1_000_000);
+        for bad in ["", "%", "101%", "1.23456%", "-1%", "1e2", "one"] {
+            assert!(bad.parse::<Percent>().is_err(), "{bad}");
+        }
+        for s in ["1%", "0.5%", "99.9%", "99.99%", "0.01%", "100%", "0%"] {
+            assert_eq!(p(s).to_string(), s);
+        }
+        // In a profile: a string, or a bare number.
+        #[derive(Deserialize)]
+        struct T {
+            a: Percent,
+            b: Percent,
+            c: Percent,
+        }
+        let t: T = toml::from_str("a = \"1%\"\nb = 2\nc = 99.9").unwrap();
+        assert_eq!((t.a, t.b, t.c), (p("1%"), p("2%"), p("99.9%")));
+    }
 
     #[test]
     fn parses_sizes() {

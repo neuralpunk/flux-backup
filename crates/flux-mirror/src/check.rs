@@ -3,6 +3,7 @@
 //! compared with its hash when one was recorded).
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -26,6 +27,9 @@ pub fn check(
     let errors = Mutex::new(Vec::new());
     let checked = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
+    // Files read so far: (device, inode, the hash expected of it).
+    type Read = (u64, u64, Option<[u8; 32]>);
+    let read: Mutex<std::collections::HashSet<Read>> = Mutex::default();
     for s in &snaps {
         let entries = match ManifestReader::read_all(&repo.manifest_path(&s.id)) {
             Ok(e) => e,
@@ -48,15 +52,23 @@ pub fn check(
                     (Ok(m), Kind::File) if !m.is_file() || m.len() != e.size => {
                         Some(format!("size {} instead of {}", m.len(), e.size))
                     }
-                    (Ok(_), Kind::File) if read_data => match flux_fs::fsops::hash_file(&p) {
-                        Ok(h) => {
-                            bytes.fetch_add(e.size, Relaxed);
-                            e.hash
-                                .filter(|want| *want != h)
-                                .map(|_| "content differs from its recorded hash".to_owned())
+                    // Read once: an unchanged file is the same file (a hard link) in
+                    // every snapshot that has it, and one read checks it for them all.
+                    // Once per snapshot, a check reads the backup as many times over as
+                    // it has snapshots.
+                    (Ok(m), Kind::File)
+                        if read_data && read.locked().insert((m.dev(), m.ino(), e.hash)) =>
+                    {
+                        match flux_fs::fsops::hash_file(&p) {
+                            Ok(h) => {
+                                bytes.fetch_add(e.size, Relaxed);
+                                e.hash
+                                    .filter(|want| *want != h)
+                                    .map(|_| "content differs from its recorded hash".to_owned())
+                            }
+                            Err(err) => Some(format!("unreadable ({err})")),
                         }
-                        Err(err) => Some(format!("unreadable ({err})")),
-                    },
+                    }
                     (Ok(m), Kind::Symlink) if !m.file_type().is_symlink() => {
                         Some("not a symlink".into())
                     }
@@ -91,5 +103,6 @@ pub fn check(
         bytes_read: bytes.into_inner(),
         errors,
         warnings,
+        ..Default::default()
     })
 }

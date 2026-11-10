@@ -6,6 +6,7 @@
   import { app } from "../state.svelte";
   import type { ExportFormat, ProfileExport } from "../types";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Modal from "./Modal.svelte";
 
   let { id, name, onclose }: { id: string; name: string; onclose: () => void } = $props();
@@ -58,7 +59,7 @@
 
 <Modal title="Export “{name}”" {onclose} width="max-w-5xl">
   {#if error}
-    <div class="flex items-center gap-3 rounded-card bg-danger/10 p-4 text-sm text-danger"><Icon name="alert" /> {error}</div>
+    <Callout tone="bad">{error}</Callout>
   {:else}
     <div class="flex flex-col gap-4">
       <p class="text-sm text-fg-2">
@@ -83,12 +84,11 @@
         <div class="flex min-w-0 flex-col gap-3">
           {#if result}
             {#if result.notes.length}
-              <div class="rounded-card bg-warning/10 px-4 py-3 text-[13px]">
-                <div class="flex items-center gap-2 font-medium text-warning"><Icon name="alert" size={14} /> Not everything carries over</div>
-                <ul class="mt-1.5 list-disc space-y-0.5 pl-5 text-fg-2">
+              <Callout title="Not everything carries over">
+                <ul class="mt-1 list-disc space-y-0.5 pl-5">
                   {#each result.notes as n (n)}<li>{n}</li>{/each}
                 </ul>
-              </div>
+              </Callout>
             {/if}
             <span class="label font-mono">{result.filename}</span>
             <pre class="max-h-[max(12rem,calc(100dvh-30rem))] overflow-auto rounded-card bg-surface-3 px-4 py-3 font-mono text-[12px] leading-relaxed text-fg-2">{result.contents}</pre>

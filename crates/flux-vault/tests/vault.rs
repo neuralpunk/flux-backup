@@ -1122,3 +1122,154 @@ fn replicas_copy_the_vault() {
     .to_string();
     assert!(err.contains("another Vault is already at"), "{err}");
 }
+
+/// A Vault "on a server": the local backend, saying every read is a round trip, and
+/// counting them.
+struct Far {
+    inner: LocalBackend,
+    whole: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ranges: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl flux_vault::backend::Backend for Far {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn read(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if path.starts_with("data/") {
+            self.whole
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.inner.read(path)
+    }
+    fn read_range(&self, path: &str, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+        self.ranges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.read_range(path, offset, len)
+    }
+    fn remote(&self) -> bool {
+        true
+    }
+    fn write(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.inner.write(path, data)
+    }
+    fn list(&self, dir: &str) -> std::io::Result<Vec<(String, u64)>> {
+        self.inner.list(dir)
+    }
+    fn remove(&self, path: &str) -> std::io::Result<()> {
+        self.inner.remove(path)
+    }
+    fn exists(&self, path: &str) -> std::io::Result<bool> {
+        self.inner.exists(path)
+    }
+    fn lock(&self, exclusive: bool) -> std::io::Result<Option<flux_vault::backend::LockGuard>> {
+        self.inner.lock(exclusive)
+    }
+    fn lock_holders(&self) -> std::io::Result<Vec<flux_transport::lock::LockInfo>> {
+        self.inner.lock_holders()
+    }
+    fn clear_locks(&self, force: bool) -> std::io::Result<Vec<flux_transport::lock::LockInfo>> {
+        self.inner.clear_locks(force)
+    }
+}
+
+/// Restoring from a Vault on a server: a thousand small files in many folders must not
+/// cost a round trip (three, in truth) for each file and each folder. Their packs are
+/// fetched whole, a few of them, and everything else comes from memory.
+#[test]
+fn a_restore_from_a_server_fetches_packs_not_blobs() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let e = env();
+    for d in 0..50 {
+        for f in 0..20 {
+            write(
+                &e.src.join(format!("d{d:02}/f{f:02}.txt")),
+                format!("file {f} of folder {d}, and some words to tell them apart").as_bytes(),
+            );
+        }
+    }
+    write(&e.src.join("big.bin"), &noise(6 << 20, 3));
+    let near = e.init(Some(PW));
+    let snap = e.snap(&near);
+    drop(near);
+
+    let (whole, ranges) = (
+        std::sync::Arc::new(AtomicU64::new(0)),
+        std::sync::Arc::new(AtomicU64::new(0)),
+    );
+    let far = VaultRepo::open(
+        Box::new(Far {
+            inner: LocalBackend::new(&e.root),
+            whole: whole.clone(),
+            ranges: ranges.clone(),
+        }),
+        Some(PW),
+    )
+    .unwrap();
+    let packs = far.backend().list("data").unwrap().len() as u64;
+    let to = e._tmp.path().join("restored");
+    let out = e.restore_to(&far, &snap, &to);
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    let back = to.join("src");
+    assert_eq!(
+        fs::read_to_string(back.join("d49/f19.txt")).unwrap(),
+        "file 19 of folder 49, and some words to tell them apart"
+    );
+    assert!(fs::read(back.join("big.bin")).unwrap() == noise(6 << 20, 3));
+    // One file back: the folders on the way to it are read, not all 51 (nor a pack
+    // fetched whole for it).
+    let far = VaultRepo::open(
+        Box::new(Far {
+            inner: LocalBackend::new(&e.root),
+            whole: whole.clone(),
+            ranges: ranges.clone(),
+        }),
+        Some(PW),
+    )
+    .unwrap();
+    let (w0, r0) = (whole.load(Relaxed), ranges.load(Relaxed));
+    let one = e.src.join("d07/f03.txt");
+    let source = VaultSource::for_paths(&far, &snap.id, std::slice::from_ref(&one)).unwrap();
+    let to1 = e._tmp.path().join("one");
+    let out = restore(
+        &source,
+        &RestoreRequest {
+            snapshot: &snap,
+            paths: vec![one],
+            to: Some(to1.clone()),
+            keep_existing: true,
+            dry_run: false,
+            xattrs: XattrPolicy {
+                acl: false,
+                other: false,
+            },
+            links: flux_fs::safe::LinkPolicy::for_process(),
+            exact: None,
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(
+        fs::read_to_string(to1.join("f03.txt")).unwrap(),
+        "file 3 of folder 7, and some words to tell them apart"
+    );
+    let reads = whole.load(Relaxed) - w0 + ranges.load(Relaxed) - r0;
+    let depth = e.src.components().count() as u64;
+    assert!(
+        reads <= depth + 6,
+        "{reads} reads for one file, {depth} folders deep"
+    );
+    let (whole, ranges) = (
+        std::sync::Arc::new(AtomicU64::new(w0)),
+        std::sync::Arc::new(AtomicU64::new(r0)),
+    );
+    // 1000 files, 51 folders and a 6 MiB file: far over a thousand blobs.
+    let (w, r) = (whole.load(Relaxed), ranges.load(Relaxed));
+    assert!(w <= packs, "{w} whole packs fetched, of {packs}");
+    assert!(
+        r <= 2 * packs + 8,
+        "{r} single blobs fetched, {w} whole packs (of {packs})"
+    );
+}

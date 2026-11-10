@@ -254,6 +254,120 @@ impl SftpPool {
     }
 }
 
+/// Files up to this size are fetched in batches by [`SmallFiles`].
+pub const SMALL_FILE: u64 = 256 << 10;
+/// Files fetched together.
+const SMALL_BATCH: usize = 32;
+/// Fetched files held until they are asked for (others are fetched again if they are).
+const SMALL_HELD: usize = 1024;
+
+/// The small files of a restore from a server, fetched a batch at a time as they are
+/// asked for: asking for one brings it and the ones after it in two round trips, where
+/// each alone costs three or four. A restore of a million small files waits hours for
+/// the server otherwise, whatever the line's speed.
+pub struct SmallFiles {
+    pool: std::sync::Arc<SftpPool>,
+    /// (path on the server, size), sorted by path.
+    files: Vec<(Vec<u8>, u64)>,
+    state: Mutex<SmallState>,
+    arrived: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct SmallState {
+    got: std::collections::HashMap<usize, std::io::Result<Vec<u8>>>,
+    /// The order they came in (the oldest go first when too many are held).
+    order: std::collections::VecDeque<usize>,
+    /// Being fetched now, by some thread.
+    fetching: std::collections::HashSet<usize>,
+}
+
+impl SmallFiles {
+    /// `files`: path on the server and size of each file that will be asked for. Those
+    /// over [`SMALL_FILE`], and empty ones, are left out (ask for them the plain way).
+    pub fn new(
+        pool: std::sync::Arc<SftpPool>,
+        files: impl IntoIterator<Item = (Vec<u8>, u64)>,
+    ) -> Self {
+        let mut files: Vec<(Vec<u8>, u64)> = files
+            .into_iter()
+            .filter(|(_, size)| (1..=SMALL_FILE).contains(size))
+            .collect();
+        files.sort();
+        files.dedup_by(|a, b| a.0 == b.0);
+        Self {
+            pool,
+            files,
+            state: Mutex::new(SmallState::default()),
+            arrived: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The contents of `path`, if it is one of the small files: fetched with the ones
+    /// after it, or waiting here from an earlier fetch. `None`: not one of them.
+    pub fn get(&self, path: &[u8]) -> Option<std::io::Result<Vec<u8>>> {
+        let idx = self
+            .files
+            .binary_search_by(|(p, _)| p.as_slice().cmp(path))
+            .ok()?;
+        let mut st = self.state.locked();
+        loop {
+            if let Some(r) = st.got.remove(&idx) {
+                return Some(r);
+            }
+            if st.fetching.contains(&idx) {
+                st = self
+                    .arrived
+                    .wait(st)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                continue;
+            }
+            // This one and the next ones nobody has or is fetching.
+            let batch: Vec<usize> = (idx..self.files.len())
+                .filter(|i| !st.got.contains_key(i) && !st.fetching.contains(i))
+                .take(SMALL_BATCH)
+                .collect();
+            st.fetching.extend(batch.iter().copied());
+            drop(st);
+            let reqs: Vec<crate::sftp::ReadReq> = batch
+                .iter()
+                .map(|&i| crate::sftp::ReadReq {
+                    path: self.files[i].0.clone(),
+                    offset: 0,
+                    len: Some(self.files[i].1),
+                })
+                .collect();
+            let fetched = self.pool.with(|s| Ok(s.read_many(&reqs)));
+            st = self.state.locked();
+            match fetched {
+                Ok(results) => {
+                    for (&i, r) in batch.iter().zip(results) {
+                        st.fetching.remove(&i);
+                        st.got.insert(i, r);
+                        st.order.push_back(i);
+                    }
+                }
+                Err(e) => {
+                    for &i in &batch {
+                        st.fetching.remove(&i);
+                    }
+                    st.got
+                        .insert(idx, Err(std::io::Error::new(e.kind(), e.to_string())));
+                    st.order.push_back(idx);
+                }
+            }
+            while st.order.len() > SMALL_HELD {
+                if let Some(old) = st.order.pop_front()
+                    && old != idx
+                {
+                    st.got.remove(&old);
+                }
+            }
+            self.arrived.notify_all();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

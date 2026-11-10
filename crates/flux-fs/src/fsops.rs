@@ -320,6 +320,20 @@ impl Copier {
         self.copy_from(File::open(src)?, output, progress)
     }
 
+    /// Like [`Copier::copy_to`], from file `rel` of a snapshot's stored tree at `root`,
+    /// for a restore. A stored tree someone else can write to is not trusted: `rel` is
+    /// opened below `root` without following any link (see [`open_below`]), so a link
+    /// planted there can't make a restore copy a file from elsewhere.
+    pub fn copy_below(
+        &self,
+        root: &Path,
+        rel: &Path,
+        output: &File,
+        progress: &Progress,
+    ) -> io::Result<u64> {
+        self.copy_from(open_below(root, rel)?, output, progress)
+    }
+
     /// Like [`Copier::copy_to`], from a file that is already open (a backup opens its
     /// sources with a [`SourceOpener`]).
     pub fn copy_from(
@@ -611,6 +625,74 @@ impl SourceOpener {
     }
 }
 
+/// Open regular file `rel` below folder `root` for reading, following no link on the
+/// way from `root` (`root` itself may be reached through links: it is the caller's own
+/// choice). Never a pipe or a device, and never waited on.
+pub fn open_below(root: &Path, rel: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let dir = rustix::fs::open(
+        root,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    open_below_dir(dir, rel)
+}
+
+/// [`open_below`] for a folder that is already open: whatever is done to its path
+/// meanwhile (renamed away, another put in its place), this reads from the folder that
+/// was opened.
+pub fn open_below_dir(dir: std::os::fd::OwnedFd, rel: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags};
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+    let fd = match rustix::fs::openat2(
+        &dir,
+        rel,
+        flags | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::BENEATH,
+    ) {
+        // A kernel (or sandbox) without openat2: one folder at a time, each opened
+        // without following.
+        Err(Errno::NOSYS | Errno::INVAL | Errno::PERM) => {
+            let mut at = dir;
+            let mut parts = rel.components().peekable();
+            loop {
+                let Some(std::path::Component::Normal(c)) = parts.next() else {
+                    return Err(io::Error::other("not a plain path below the snapshot"));
+                };
+                if parts.peek().is_none() {
+                    break rustix::fs::openat(&at, c, flags | OFlags::NOFOLLOW, Mode::empty());
+                }
+                at = rustix::fs::openat(
+                    &at,
+                    c,
+                    OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(below_err)?;
+            }
+        }
+        r => r,
+    }
+    .map_err(below_err)?;
+    let file = File::from(fd);
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(
+            "is not a regular file in the backup's stored files; not restored",
+        ));
+    }
+    Ok(file)
+}
+
+fn below_err(e: Errno) -> io::Error {
+    match e {
+        Errno::LOOP | Errno::XDEV | Errno::NOTDIR => io::Error::other(
+            "is a link, or lies behind one, in the backup's stored files (damaged or forged); not restored",
+        ),
+        e => e.into(),
+    }
+}
+
 /// Create a special file (FIFO or device node).
 pub fn make_special(dst: &Path, e: &Entry) -> io::Result<()> {
     use rustix::fs::{FileType, Mode};
@@ -831,5 +913,34 @@ mod tests {
             data_segments(&File::open(&dense).unwrap(), 100_000).unwrap(),
             None
         );
+    }
+
+    /// A snapshot's stored file is opened below its folder without following links: one
+    /// planted there (in the file's place, or a folder on the way) is refused.
+    #[test]
+    fn open_below_follows_no_link() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        fs::create_dir_all(data.join("home/me")).unwrap();
+        fs::write(data.join("home/me/a.txt"), "stored").unwrap();
+        let secret = t.path().join("secret");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("shadow"), "root only").unwrap();
+        std::os::unix::fs::symlink(secret.join("shadow"), data.join("home/me/link.txt")).unwrap();
+        std::os::unix::fs::symlink(&secret, data.join("home/dir")).unwrap();
+
+        let mut text = String::new();
+        open_below(&data, Path::new("home/me/a.txt"))
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "stored");
+        for planted in ["home/me/link.txt", "home/dir/shadow", "../secret/shadow"] {
+            assert!(open_below(&data, Path::new(planted)).is_err(), "{planted}");
+        }
+        // The folder itself may be reached through a link (`latest`).
+        let latest = t.path().join("latest");
+        std::os::unix::fs::symlink(&data, &latest).unwrap();
+        assert!(open_below(&latest, Path::new("home/me/a.txt")).is_ok());
     }
 }

@@ -105,6 +105,9 @@ pub struct Export {
 }
 
 pub fn export(id: &ProfileId, p: &Profile, format: Format) -> Export {
+    // The Flux format is data (TOML, every string quoted) and keeps the profile as it is.
+    let safe = crate::script_safe(p);
+    let p = if format == Format::Flux { p } else { &safe };
     match format {
         Format::Flux => flux(id, p),
         Format::Borgmatic => borgmatic(id, p),
@@ -603,6 +606,10 @@ fn restic(id: &ProfileId, p: &Profile) -> Export {
     let hooks = |list: &[String]| -> String { list.iter().map(|c| format!("{c}\n")).collect() };
     let pre = hooks(&p.hooks.pre_backup);
     let post = hooks(&p.hooks.post_backup);
+    let excludes_text = excludes
+        .iter()
+        .map(|x| format!("{x}\n"))
+        .collect::<String>();
     let script = format!(
         r#"#!/bin/sh
 {header}#
@@ -610,7 +617,7 @@ fn restic(id: &ProfileId, p: &Profile) -> Export {
 #   sh {file} --dry-run   only show what would be backed up
 {notes_text}set -eu
 
-export RESTIC_REPOSITORY={repo}
+export RESTIC_REPOSITORY={repo_q}
 {pw}
 DRY=
 if [ "${{1:-}}" = "--dry-run" ]; then DRY=1; fi
@@ -621,8 +628,8 @@ restic cat config >/dev/null 2>&1 || {{ [ -n "$DRY" ] || restic init; }}
 # Exclusions (restic's exclude-file syntax; the last matching pattern wins).
 EXCLUDES=$(mktemp)
 trap 'rm -f "$EXCLUDES"' EXIT
-cat > "$EXCLUDES" <<'FLUX_EXCLUDES'
-{excludes}FLUX_EXCLUDES
+cat > "$EXCLUDES" <<'{tag}'
+{excludes}{tag}
 
 {pre}restic backup {flags} ${{DRY:+--dry-run}} \
     {sources}
@@ -630,10 +637,9 @@ cat > "$EXCLUDES" <<'FLUX_EXCLUDES'
 {post}{forget}"#,
         header = header(id, p, "#", "restic equivalent"),
         file = format!("{id}-restic-backup.sh"),
-        excludes = excludes
-            .iter()
-            .map(|x| format!("{x}\n"))
-            .collect::<String>(),
+        excludes = excludes_text,
+        tag = crate::heredoc_tag("FLUX_EXCLUDES", &excludes_text),
+        repo_q = shell_quote(&repo),
         flags = flags.join(" "),
         forget = if r.enabled && !keep.is_empty() {
             format!(
@@ -788,6 +794,79 @@ mod tests {
         p.sources.exclude_if_present = vec![".nobackup".into()];
         p.hooks.pre_backup = vec!["echo 'start'".into()];
         (ProfileId::new("home").unwrap(), p)
+    }
+
+    /// The lines of `script` that the shell runs: everything outside here-documents and
+    /// comments.
+    fn commands(script: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut until: Option<String> = None;
+        for line in script.lines() {
+            if let Some(tag) = &until {
+                if line == tag {
+                    until = None;
+                }
+                continue;
+            }
+            if let Some((_, tag)) = line.split_once("<<'") {
+                until = Some(tag.trim_end_matches('\'').to_owned());
+            }
+            if !line.trim_start().starts_with('#') {
+                out.push(line);
+            }
+        }
+        out
+    }
+
+    /// Settings read from a drive (or imported) may have line breaks in the name and the
+    /// exclusions, and an exclusion that is the script's own here-document marker. None
+    /// of it may become a command in a script made from them.
+    #[test]
+    fn hostile_names_and_patterns_never_become_commands() {
+        let (id, mut p) = profile();
+        p.hooks.pre_backup.clear();
+        p.name = "Home\ntouch /tmp/pwned-name".into();
+        p.sources.exclude = vec![
+            "a\nFLUX_RULES\ntouch /tmp/pwned-rules".into(),
+            "FLUX_EXCLUDES".into(),
+            "touch /tmp/pwned-excludes".into(),
+            "b\nFLUX_PATTERNS\ntouch /tmp/pwned-patterns".into(),
+        ];
+        p.target = Target::Local {
+            path: "/run/media/me/My Passport".into(),
+            fs_uuid: None,
+        };
+        // borgmatic's settings are YAML, not a script: there, each must stay inside one
+        // quoted list item (no line of its own, where it would be a key).
+        let yaml = export(&id, &p, Format::Borgmatic).contents;
+        for line in yaml.lines().filter(|l| l.contains("pwned")) {
+            let item = line.trim_start();
+            assert!(
+                item.starts_with('#') || (item.starts_with("- \"") && item.ends_with('"')),
+                "{line}"
+            );
+        }
+        for format in [Format::Restic, Format::Rsync] {
+            let e = export(&id, &p, format);
+            let run = commands(&e.contents);
+            assert!(
+                !run.iter().any(|l| l.contains("pwned")),
+                "{format:?}: {:#?}",
+                run.iter()
+                    .filter(|l| l.contains("pwned"))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut b = p.clone();
+        b.engine = Engine::Borg;
+        let k = kit::borg_kit(&id, &b, "1.4", None);
+        assert!(!commands(&k.script).iter().any(|l| l.contains("pwned")));
+        // A folder with a space in its name is one word to the shell.
+        let restic = export(&id, &p, Format::Restic).contents;
+        assert!(
+            restic.contains("export RESTIC_REPOSITORY='/run/media/me/My Passport/restic-home'"),
+            "{restic}"
+        );
     }
 
     #[test]

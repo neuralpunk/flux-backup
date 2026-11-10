@@ -6,6 +6,7 @@
   import { bytes, count, dateTime } from "../format";
   import type { ProgressSnapshot, RestoreOutcome, RestorePreview, SnapshotMeta } from "../types";
   import Icon from "./Icon.svelte";
+  import Callout from "./Callout.svelte";
   import Modal from "./Modal.svelte";
 
   let {
@@ -13,6 +14,9 @@
     snapshot,
     paths,
     missing = false,
+    startAt,
+    note,
+    onrestored,
     onclose,
   }: {
     profile: string;
@@ -20,12 +24,18 @@
     paths: string[];
     /** Everything picked is gone from disk: putting it back can't touch anything. */
     missing?: boolean;
+    /** Which choice is made to begin with (default: another folder, or the original place for something gone). */
+    startAt?: "original" | "elsewhere";
+    /** Said above the choices (why this restore was offered). */
+    note?: string;
+    /** A restore finished without errors; `where`: back to the original place, or into another folder. */
+    onrestored?: (r: RestoreOutcome, where: "original" | "elsewhere") => void;
     onclose: () => void;
   } = $props();
 
   // Bringing back something deleted: its own place is the natural (and safe) choice.
   // Otherwise another folder is safest.
-  let where = $state<"original" | "elsewhere">(untrack(() => (missing ? "original" : "elsewhere")));
+  let where = $state<"original" | "elsewhere">(untrack(() => startAt ?? (missing ? "original" : "elsewhere")));
   let folder = $state<string | null>(null);
   let overwrite = $state(false);
   /** Also remove what's in the folders now but not in the snapshot. */
@@ -70,7 +80,13 @@
   /** The snapshot holds folders here but not one file: say so before restoring. */
   const onlyFolders = $derived(preview != null && preview.new === 0 && preview.differ === 0 && preview.identical === 0 && preview.new_folders > 0);
   const sizeLimit = $derived(app.profiles.find((p) => p.id === profile)?.size_limit ?? null);
-  const replaces = $derived(where === "original" && overwrite && (preview?.differ ?? 0) > 0);
+  // Whether current versions are kept aside is the backup's setting (*Keep my files when
+  // restoring over them*) as well as the box here: the preview says what will be done.
+  /** Files that differ are replaced, not kept aside. */
+  const replacing = $derived(where === "original" && (overwrite || preview?.keep_existing === false));
+  /** The backup itself is set not to keep current versions (the box here isn't what replaces them). */
+  const neverKeeps = $derived(where === "original" && !overwrite && preview?.keep_existing === false);
+  const replaces = $derived(replacing && (preview?.differ ?? 0) > 0);
   /** Something on disk is deleted, not kept: replaced, or removed with nothing kept. */
   const destructive = $derived(replaces || (removes > 0 && preview?.keep_existing === false));
   const removeWord = (n: number) => `${count(n)} ${n === 1 ? "item" : "items"}`;
@@ -93,7 +109,10 @@
     try {
       const r = await api.restore(profile, snapshot.id, paths, where === "elsewhere" ? folder : null, where === "original" && overwrite, where === "original" && exact);
       result = r;
-      if (r.errors.length === 0) app.toast("ok", `Restored ${count(r.restored)} items.`);
+      if (r.errors.length === 0) {
+        app.toast("ok", `Restored ${count(r.restored)} items.`);
+        onrestored?.(r, where);
+      }
       else if (!shown) app.toast("bad", `Restored ${count(r.restored)} items, but ${count(r.errors.length)} couldn't be restored: ${r.errors[0]!.path} (${r.errors[0]!.message}).`);
     } catch (e) {
       error = (e as Error).message;
@@ -140,6 +159,7 @@
     </div>
   {:else}
     <div class="space-y-5">
+      {#if note}<Callout tone="info" compact>{note}</Callout>{/if}
       <div>
         <div class="label mb-2">Restoring</div>
         <ul class="max-h-28 overflow-y-auto rounded-lg bg-surface-3 p-3 font-mono text-xs text-fg-2">
@@ -168,7 +188,13 @@
             <span class="block font-medium">Back to where it was</span>
             <span class="block text-sm text-fg-muted">
               Files that are already identical are skipped.
-              {overwrite ? "Different files are replaced." : "Different files are kept, renamed to “name.flux-…”."}
+              {#if neverKeeps}
+                <span class="font-medium text-danger">Different files are replaced:</span> this backup is set not to keep your current versions (<em>Keep my files when restoring over them</em> is off in its settings).
+              {:else if overwrite}
+                Different files are replaced.
+              {:else}
+                Different files are kept, renamed to “name.flux-…”.
+              {/if}
             </span>
             {#if where === "original"}
               <label class="mt-2 flex items-center gap-2 text-sm">
@@ -254,18 +280,12 @@
       {/if}
 
       {#if onlyFolders}
-        <div class="flex gap-3 rounded-card bg-warning/10 px-4 py-3 text-sm" role="alert">
-          <Icon name="alert" size={15} class="mt-0.5 shrink-0 text-warning" />
-          <span>
-            <span class="font-medium">This snapshot has no files here, only empty folders.</span>
-            <span class="text-fg-2">
-              {#if sizeLimit}Files larger than {sizeLabel(sizeLimit)} were left out by this backup's size limit.{:else}The files may have been left out by this backup's rules, or deleted before it ran. An older snapshot may still have them.{/if}
-            </span>
-          </span>
-        </div>
+        <Callout title="This snapshot has no files here, only empty folders.">
+          {#if sizeLimit}Files larger than {sizeLabel(sizeLimit)} were left out by this backup's size limit.{:else}The files may have been left out by this backup's rules, or deleted before it ran. An older snapshot may still have them.{/if}
+        </Callout>
       {/if}
 
-      {#if error}<div class="rounded-lg bg-danger/10 p-3 text-sm text-danger">{error}</div>{/if}
+      {#if error}<Callout tone="bad">{error}</Callout>{/if}
 
       {#if busy && progress && progress.bytes_total > 0}
         <div class="space-y-1.5">
@@ -278,7 +298,7 @@
 
       <div class="flex justify-end gap-2">
         <button class="btn" onclick={onclose} disabled={busy}>Cancel</button>
-        <button class="btn {destructive ? 'btn-danger-filled' : 'btn-primary'}" onclick={run} disabled={busy || (where === "elsewhere" && !folder) || nothingToDo || (exact && where === "original" && !preview)}>
+        <button class="btn {destructive ? 'btn-danger-filled' : 'btn-primary'}" onclick={run} disabled={busy || (where === "elsewhere" && !folder) || nothingToDo || (where === "original" && !preview && (exact || !previewError))}>
           <Icon name={busy ? "refresh" : "restore"} size={15} class={busy ? "animate-spin" : ""} />
           {busy
             ? "Restoring…"

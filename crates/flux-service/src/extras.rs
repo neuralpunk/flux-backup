@@ -51,9 +51,7 @@ pub fn copy_out(state: &Service, id: &str, snapshot: &str, path: &str) -> Result
     let snap = repo.find(&snapshot)?;
     let want = path.trim_start_matches('/').as_bytes().to_vec();
     let entry = repo
-        .entries(&snap)?
-        .filter_map(std::result::Result::ok)
-        .find(|e| e.path == want)
+        .entry_at(&snap, &want)?
         .ok_or_else(|| ApiError::new("error", format!("{path} is not in this snapshot")))?;
     if entry.kind != Kind::File {
         return Err(ApiError::new(
@@ -459,16 +457,14 @@ fn days(d: Duration) -> String {
     }
 }
 
-/// The latest unusual changes not yet dismissed ("This was me"), from the history.
+/// The latest unusual changes not yet settled ("This was me", or dealt with), from the
+/// history. While there are some, the backup is on hold.
 pub fn open_unusual(
     paths: &flux_core::Paths,
     id: &ProfileId,
     runs: &[RunRecord],
 ) -> Option<flux_runner::unusual::UnusualReport> {
-    let run = runs.iter().find(|r| r.unusual.is_some())?;
-    (!flux_runner::unusual_dismissed(paths, id, run))
-        .then(|| run.unusual.clone())
-        .flatten()
+    flux_runner::open_unusual(paths, id, runs)
 }
 
 /// Unusual changes in words.
@@ -476,13 +472,20 @@ pub fn unusual_health(u: &flux_runner::unusual::UnusualReport) -> Health {
     Health {
         kind: "unusual",
         level: "danger",
-        text: format!(
-            "Unusual changes in snapshot {}: {}.",
-            u.snapshot,
-            u.signals.join("; ")
-        ),
+        text: if u.stopped {
+            format!(
+                "Backups are on hold: Flux Sentry stopped the last backup before it was written. Unusual changes in the files: {}.",
+                u.signals.join("; ")
+            )
+        } else {
+            format!(
+                "Backups are on hold: Flux Sentry found unusual changes in snapshot {}: {}.",
+                u.snapshot,
+                u.signals.join("; ")
+            )
+        },
         hint: Some(
-            "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”."
+            "If you didn't make them, don't delete anything: the snapshot before them is kept, and no backup is made until you've restored what you need and said it's dealt with. If you did, choose “This was me”."
                 .into(),
         ),
     }
@@ -894,6 +897,7 @@ mod tests {
             sources_missing: Vec::new(),
             destinations: Vec::new(),
             unusual: None,
+            sentry_seen: None,
             performance: None,
         }
     }

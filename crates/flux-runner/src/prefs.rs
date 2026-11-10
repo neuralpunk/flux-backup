@@ -33,6 +33,12 @@ pub struct Settings {
     /// Webhooks told about every backup (each backup can add its own).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhooks: Vec<flux_core::webhook::Webhook>,
+    /// The app quits when its window is closed, instead of staying in the system tray.
+    #[serde(skip_serializing_if = "is_default")]
+    pub quit_on_close: bool,
+    /// The app has said once that it stays in the tray when its window is closed.
+    #[serde(skip_serializing_if = "is_default")]
+    pub told_about_tray: bool,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -146,6 +152,8 @@ mod tests {
                 headers: Vec::new(),
                 enabled: true,
             }],
+            quit_on_close: true,
+            told_about_tray: true,
         };
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths), s);

@@ -76,23 +76,40 @@ pub fn missing_sources_in(profile: &Profile, mounts: &Mounts) -> Vec<MissingSour
 /// Why `path`, under a removable-drive root, has no drive there; `None` if it looks fine
 /// (or isn't under such a root).
 fn drive_absent(path: &Path, mounts: &Mounts) -> Option<String> {
-    let root = REMOVABLE_ROOTS
-        .iter()
-        .map(Path::new)
-        .find(|r| path.starts_with(r))?;
     if let Mounts::Fake(_) = mounts {
+        REMOVABLE_ROOTS.iter().find(|r| path.starts_with(r))?;
         return (!mounts.on_extra_drive(path)).then(|| "no drive is mounted there".into());
     }
+    let roots: Vec<&Path> = REMOVABLE_ROOTS.iter().map(Path::new).collect();
+    drive_absent_under(path, &roots, &|p| sys::mount_of(p).map(|m| m.mount_point))
+}
+
+/// [`drive_absent`] with these removable-drive roots and this way of finding the mount
+/// point a path is on.
+///
+/// A folder under such a root that is on no drive of its own is only taken for an
+/// unplugged drive's mount point when it is *empty* (or gone): that is what an unplugged
+/// drive leaves. A folder with files in it is a folder someone keeps there (`/mnt/data`
+/// on a server, a drive mounted at `/mnt` itself) and is backed up like any other.
+fn drive_absent_under(
+    path: &Path,
+    roots: &[&Path],
+    mount_of: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Option<String> {
+    roots.iter().find(|r| path.starts_with(r))?;
     let Ok(canon) = std::fs::canonicalize(path) else {
         return Some("it doesn't exist: the drive it's on isn't mounted".into());
     };
-    match sys::mount_of(&canon) {
-        Some(m) if !m.mount_point.starts_with(root) || m.mount_point == root => Some(
-            "it's an empty folder on the system disk: the drive that belongs there isn't mounted"
-                .into(),
-        ),
-        _ => None,
+    // A link to somewhere else (`/media/pics -> ~/Pictures`) is wherever it leads.
+    let root = roots.iter().find(|r| canon.starts_with(r))?;
+    let on_own_drive = mount_of(&canon).is_none_or(|m| m.starts_with(root) && m.as_path() != *root);
+    if on_own_drive {
+        return None;
     }
+    let empty = std::fs::read_dir(&canon).is_ok_and(|mut d| d.next().is_none());
+    empty.then(|| {
+        "it's an empty folder on the system disk: the drive that belongs there isn't mounted".into()
+    })
 }
 
 /// The volume to record for a source on a drive of its own, if it is on one now.
@@ -201,6 +218,44 @@ mod tests {
         let m = missing_sources_in(&p, &fake(&[("AAAA", Path::new("/mnt/photos"))]));
         assert_eq!(m.len(), 1, "{m:?}");
         assert_eq!(m[0].path, PathBuf::from("/run/media/me/Stick"));
+    }
+
+    /// Under a removable-drive root but on the system disk: an empty folder is an
+    /// unplugged drive's mount point; a folder with files in it is just a folder, and is
+    /// backed up (it used to be skipped as "not connected", every time).
+    #[test]
+    fn a_folder_with_files_under_a_drive_root_is_not_a_missing_drive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let roots = [root.as_path()];
+        let on_system_disk = |_: &Path| Some(PathBuf::from("/"));
+        let absent = |p: &Path| drive_absent_under(p, &roots, &on_system_disk);
+
+        let data = root.join("data");
+        std::fs::create_dir(&data).unwrap();
+        assert!(absent(&data).unwrap().contains("empty folder"));
+        std::fs::write(data.join("report.txt"), "x").unwrap();
+        assert_eq!(absent(&data), None);
+        assert!(
+            absent(&root.join("gone"))
+                .unwrap()
+                .contains("doesn't exist")
+        );
+
+        // A drive mounted at the root itself: its folders are there when it is.
+        let at_root = |_: &Path| Some(root.clone());
+        assert_eq!(drive_absent_under(&data, &roots, &at_root), None);
+        // On a drive of its own below the root: fine, empty or not.
+        let empty = root.join("stick");
+        std::fs::create_dir(&empty).unwrap();
+        let own = |_: &Path| Some(root.join("stick"));
+        assert_eq!(drive_absent_under(&empty, &roots, &own), None);
+
+        // A link under the root to a folder elsewhere is that folder.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = root.join("pics");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+        assert_eq!(absent(&link), None);
     }
 
     #[test]

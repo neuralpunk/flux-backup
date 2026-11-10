@@ -428,6 +428,9 @@ fn duration(n: u64, unit: u64) -> HumanDuration {
         .unwrap_or_else(|_| HumanDuration::from_secs(n * unit_secs(unit)))
 }
 
+/// "One snapshot a year, for every year", as a number of years.
+const KEEP_EVERY_YEAR: u32 = 99;
+
 fn retention(p: &mut Profile, k: &Keys<'_>) {
     let r = &mut p.retention;
     let smart = k.bool("snapshots.smart_remove", false);
@@ -452,7 +455,10 @@ fn retention(p: &mut Profile, k: &Keys<'_>) {
         .then(|| k.num("snapshots.min_free_inodes.value", 2).min(100) as u8);
     if smart {
         // Keep everything from the last N days, one a day for N days, one a week for N
-        // weeks, one a month for N months: Flux's buckets mean the same.
+        // weeks, one a month for N months: Flux's buckets mean the same. Back In Time
+        // also keeps one snapshot a year for every year, with no setting for it: without
+        // a yearly rule here, everything older than the monthly ones would go, which
+        // Back In Time never did. (An age limit, where set, still ends it, as there.)
         r.enabled = true;
         r.keep_last = 1;
         r.keep_within = Some(duration(k.num("snapshots.smart_remove.keep_all", 2), 20));
@@ -460,7 +466,7 @@ fn retention(p: &mut Profile, k: &Keys<'_>) {
         r.keep_daily = k.num("snapshots.smart_remove.keep_one_per_day", 7) as u32;
         r.keep_weekly = k.num("snapshots.smart_remove.keep_one_per_week", 4) as u32;
         r.keep_monthly = k.num("snapshots.smart_remove.keep_one_per_month", 24) as u32;
-        r.keep_yearly = 0;
+        r.keep_yearly = KEEP_EVERY_YEAR;
         r.max_age = max_age;
     } else if let Some(age) = max_age {
         // Only "remove snapshots older than": keep everything younger.
@@ -703,7 +709,8 @@ profiles.version=1
         assert_eq!(r.keep_within, Some(HumanDuration::from_secs(2 * DAY)));
         assert_eq!(
             (r.keep_daily, r.keep_weekly, r.keep_monthly, r.keep_yearly),
-            (14, 8, 12, 0)
+            (14, 8, 12, 99),
+            "Back In Time keeps one a year for every year"
         );
         assert_eq!(r.max_age.unwrap().to_string(), "2years");
         assert_eq!(r.min_free_space, Some(ByteSize(50 << 30)));
