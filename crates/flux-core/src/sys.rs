@@ -122,8 +122,87 @@ pub fn is_mount_point(path: &Path) -> bool {
     mounts().iter().any(|m| m.mount_point == path)
 }
 
+/// Where drives are mounted: the real system, or (tests) a fixed table of drives, each
+/// "mounted" at a folder. `FLUX_FAKE_MOUNTS` names a file of `UUID PATH` lines for tests
+/// that run `flux` as a separate process, so they can plug and unplug drives by editing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mounts {
+    Real,
+    Fake(Vec<(String, PathBuf)>),
+}
+
+impl Mounts {
+    /// The real system, unless `FLUX_FAKE_MOUNTS` is set.
+    pub fn current() -> Self {
+        let Some(file) = std::env::var_os("FLUX_FAKE_MOUNTS") else {
+            return Mounts::Real;
+        };
+        let text = fs::read_to_string(file).unwrap_or_default();
+        Mounts::Fake(
+            text.lines()
+                .filter_map(|l| {
+                    let (uuid, path) = l.trim().split_once(' ')?;
+                    Some((uuid.to_owned(), PathBuf::from(path.trim())))
+                })
+                .collect(),
+        )
+    }
+
+    fn fake_mount_of(fakes: &[(String, PathBuf)], path: &Path) -> Option<(String, PathBuf)> {
+        fakes
+            .iter()
+            .filter(|(_, mp)| path.starts_with(mp))
+            .max_by_key(|(_, mp)| mp.as_os_str().len())
+            .cloned()
+    }
+
+    /// The UUID of the filesystem `path` is on, if it has one.
+    pub fn fs_uuid_of(&self, path: &Path) -> Option<String> {
+        if let Mounts::Fake(f) = self {
+            return Self::fake_mount_of(f, path).map(|(u, _)| u);
+        }
+        let dev = fs::canonicalize(mount_of(path)?.source).ok()?;
+        fs::read_dir("/dev/disk/by-uuid")
+            .ok()?
+            .flatten()
+            .find(|e| fs::canonicalize(e.path()).is_ok_and(|d| d == dev))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+    }
+
+    /// `path` lies on a drive of its own: a filesystem mounted under one of the usual places
+    /// for removable or extra drives (`/run/media`, `/media`, `/mnt`), not the system disk.
+    pub fn on_extra_drive(&self, path: &Path) -> bool {
+        if let Mounts::Fake(f) = self {
+            return Self::fake_mount_of(f, path).is_some();
+        }
+        let Some(m) = mount_of(path) else {
+            return false;
+        };
+        ["/run/media", "/media", "/mnt"]
+            .iter()
+            .any(|r| m.mount_point.starts_with(r) && m.mount_point != Path::new(r))
+    }
+
+    /// Is the filesystem with this UUID mounted such that `path` lies on it?
+    pub fn path_is_on(&self, path: &Path, uuid: &str) -> bool {
+        match self {
+            Mounts::Fake(f) => Self::fake_mount_of(f, path).is_some_and(|(u, _)| u == uuid),
+            Mounts::Real => real_path_is_on_fs_uuid(path, uuid),
+        }
+    }
+}
+
+/// The UUID of the filesystem `path` is on, if it has one.
+pub fn fs_uuid_of(path: &Path) -> Option<String> {
+    Mounts::current().fs_uuid_of(path)
+}
+
 /// Is the filesystem with this UUID mounted such that `path` lies on it?
 pub fn path_is_on_fs_uuid(path: &Path, uuid: &str) -> bool {
+    Mounts::current().path_is_on(path, uuid)
+}
+
+fn real_path_is_on_fs_uuid(path: &Path, uuid: &str) -> bool {
     let Ok(dev) = fs::canonicalize(Path::new("/dev/disk/by-uuid").join(uuid)) else {
         return false;
     };
@@ -135,6 +214,9 @@ pub fn path_is_on_fs_uuid(path: &Path, uuid: &str) -> bool {
 
 /// Where the filesystem with this UUID is mounted right now, if anywhere.
 pub fn mount_point_for_uuid(uuid: &str) -> Option<PathBuf> {
+    if let Mounts::Fake(fakes) = Mounts::current() {
+        return fakes.into_iter().find(|(u, _)| u == uuid).map(|(_, p)| p);
+    }
     let dev = fs::canonicalize(Path::new("/dev/disk/by-uuid").join(uuid)).ok()?;
     mounts()
         .into_iter()

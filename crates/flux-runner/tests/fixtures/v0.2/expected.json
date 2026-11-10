@@ -1,0 +1,30 @@
+{
+ "engines": [
+  "mirror",
+  "vault",
+  "rsync",
+  "borg"
+ ],
+ "first": {
+  "data.bin": "2d21c2c468cb7a03206f2cf624d79ac7b8dbde4300359dd1432d2ab45728cd58",
+  "docs/a.txt": "b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+  "docs/deep/ünï cödé.txt": "ebc45fabefbabdd06424b3c476b11e93fec784069ff10844e7383d59f491f8cb",
+  "docs/empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "link": "link:docs/a.txt",
+  "sparse.img": "4361659294d5e8d5b6a7eb3ef468146613594b64ee0a3cb61f4ae58b62f67c9c"
+ },
+ "flux": "flux 0.2.0",
+ "host": "fixture-host",
+ "latest": {
+  "data.bin": "2d21c2c468cb7a03206f2cf624d79ac7b8dbde4300359dd1432d2ab45728cd58",
+  "docs/a.txt": "01996dce79aa4e6c2ddbaa1219fecb061b1b5b93830366f50f0a9fa206f2896b",
+  "docs/b.txt": "d687c136dbd61316b0f7bb9335b46827d94b600b1f55906c0f235c86c749268d",
+  "docs/deep/ünï cödé.txt": "ebc45fabefbabdd06424b3c476b11e93fec784069ff10844e7383d59f491f8cb",
+  "docs/empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "link": "link:docs/a.txt",
+  "sparse.img": "4361659294d5e8d5b6a7eb3ef468146613594b64ee0a3cb61f4ae58b62f67c9c"
+ },
+ "password": "fixture",
+ "source": "/srv/src",
+ "user": "root"
+}

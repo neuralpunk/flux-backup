@@ -5,7 +5,7 @@
 #
 #   PREFIX=/usr DESTDIR=/tmp/pkg packaging/install.sh
 #
-# Installs: flux, flux-backup (if built), flux-helper in libexec, the polkit policy, man
+# Installs: flux, flux-backup (if built), flux-helper and flux-vault-recover in libexec, the polkit policy, man
 # pages, shell completions, the .desktop file, AppStream metadata and icons.
 set -eu
 
@@ -20,6 +20,7 @@ d=$DESTDIR$PREFIX
 
 install -Dm755 "$dist/flux" "$d/bin/flux"
 install -Dm755 "$dist/flux-helper" "$d/libexec/flux-backup/flux-helper"
+install -Dm755 "$dist/flux-vault-recover" "$d/libexec/flux-backup/flux-vault-recover"
 for m in "$dist"/man/*.1.gz; do
     install -Dm644 "$m" "$d/share/man/man1/$(basename "$m")"
 done

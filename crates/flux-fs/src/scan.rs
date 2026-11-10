@@ -13,8 +13,9 @@ use flux_core::profile::SymlinkMode;
 use flux_core::progress::{Event, Progress, Reporter};
 
 use crate::entry::{Entry, Kind};
-use crate::fsops::{XattrPolicy, hash_file, read_xattrs};
+use crate::fsops::{XattrPolicy, read_xattrs};
 use crate::snapshot::FileError;
+use flux_core::sync::Locked;
 
 pub struct ScanConfig<'a> {
     pub sources: &'a [PathBuf],
@@ -100,6 +101,8 @@ struct Ctx<'a> {
     /// (dev, ino) of walked directories; only tracked when links may be followed, to stop
     /// a link to an ancestor from looping forever.
     visited: Mutex<HashSet<(u64, u64)>>,
+    /// How files are opened to be read (for their checksums).
+    opener: crate::fsops::SourceOpener,
 }
 
 impl Ctx<'_> {
@@ -109,19 +112,19 @@ impl Ctx<'_> {
             let mut c = ScanCounts::default();
             entries.iter().for_each(|e| c.add(e));
             entries.clear();
-            let mut total = self.counts.lock().unwrap();
+            let mut total = self.counts.locked();
             total.files += c.files;
             total.folders += c.folders;
             total.bytes += c.bytes;
         } else {
-            self.out.lock().unwrap().append(entries);
+            self.out.locked().append(entries);
         }
     }
 
     /// Record a directory as walked. Returns false if it was already walked.
     fn visit(&self, m: &fs::Metadata) -> bool {
         self.cfg.symlinks == SymlinkMode::Preserve
-            || self.visited.lock().unwrap().insert((m.dev(), m.ino()))
+            || self.visited.locked().insert((m.dev(), m.ino()))
     }
 
     fn warn(&self, path: &Path, err: impl std::fmt::Display) {
@@ -134,7 +137,7 @@ impl Ctx<'_> {
             message: fe.message.clone(),
         });
         self.cfg.progress.warnings.fetch_add(1, Relaxed);
-        self.errors.lock().unwrap().push(fe);
+        self.errors.locked().push(fe);
     }
 }
 
@@ -145,6 +148,10 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
         counts: Mutex::new(ScanCounts::default()),
         errors: Mutex::new(Vec::new()),
         visited: Mutex::new(HashSet::new()),
+        opener: crate::fsops::SourceOpener::new(
+            &normalize_sources(cfg.sources),
+            cfg.symlinks != SymlinkMode::Preserve,
+        ),
     };
     let sources = normalize_sources(cfg.sources);
     let mut missing = Vec::new();
@@ -206,11 +213,11 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
         }
     });
 
-    let mut entries = ctx.out.into_inner().unwrap();
+    let mut entries = ctx.out.into_value();
     entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     entries.dedup_by(|a, b| a.path == b.path);
     let counts = if cfg.count_only {
-        ctx.counts.into_inner().unwrap()
+        ctx.counts.into_value()
     } else {
         let mut c = ScanCounts::default();
         entries.iter().for_each(|e| c.add(e));
@@ -219,7 +226,7 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
     ScanResult {
         entries,
         counts,
-        errors: ctx.errors.into_inner().unwrap(),
+        errors: ctx.errors.into_value(),
         missing_sources: missing,
     }
 }
@@ -346,7 +353,7 @@ fn make_entry(ctx: &Ctx<'_>, path: &Path, m: &fs::Metadata) -> Option<Entry> {
         })
     };
     let hash = if cfg.hash && kind == Kind::File {
-        match hash_file(path) {
+        match ctx.opener.open(path).and_then(crate::fsops::hash_open) {
             Ok(h) => Some(h),
             Err(e) => {
                 ctx.warn(path, e);
@@ -473,6 +480,52 @@ fn scan_profile_with(
     Ok(scanned)
 }
 
+/// Merge into `entries` (a scan, sorted by path) the entries of `previous` (the last
+/// snapshot's, in any order) that lie in one of `kept` (sources whose drive isn't
+/// connected), and their parent folders the scan lacks. The new snapshot then holds those
+/// sources as they were, rather than as deleted. Scanned entries win over kept ones.
+/// Returns how many entries were kept.
+pub fn carry_over<I>(entries: &mut Vec<Entry>, previous: I, kept: &[PathBuf]) -> usize
+where
+    I: IntoIterator<Item = Entry>,
+{
+    use std::os::unix::ffi::OsStrExt;
+    if kept.is_empty() {
+        return 0;
+    }
+    let prefixes: Vec<Vec<u8>> = kept
+        .iter()
+        .map(|p| {
+            p.as_os_str()
+                .as_bytes()
+                .trim_ascii_start()
+                .strip_prefix(b"/")
+                .unwrap_or(p.as_os_str().as_bytes())
+                .to_vec()
+        })
+        .collect();
+    let inside = |path: &[u8]| {
+        prefixes.iter().any(|p| {
+            path == p.as_slice()
+                || (path.starts_with(p) && path.get(p.len()) == Some(&b'/'))
+                // a parent folder of a kept source
+                || (p.starts_with(path) && p.get(path.len()) == Some(&b'/'))
+        })
+    };
+    let before = entries.len();
+    let have: std::collections::HashSet<Vec<u8>> = entries.iter().map(|e| e.path.clone()).collect();
+    entries.extend(
+        previous
+            .into_iter()
+            .filter(|e| inside(&e.path) && !have.contains(&e.path)),
+    );
+    let added = entries.len() - before;
+    if added > 0 {
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -500,6 +553,69 @@ mod tests {
         assert_eq!((full.counts.files, full.counts.bytes), (3, 8));
     }
     use super::*;
+
+    fn entry(path: &str, size: u64) -> Entry {
+        Entry {
+            path: path.as_bytes().to_vec(),
+            kind: if size == 0 {
+                crate::entry::Kind::Dir
+            } else {
+                crate::entry::Kind::File
+            },
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            size,
+            mtime: 1,
+            mtime_nsec: 0,
+            dev: 1,
+            ino: size,
+            nlink: 1,
+            rdev: 0,
+            link: None,
+            hash: None,
+            xattrs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn carry_over_keeps_missing_sources() {
+        // Scanned now: the home folder. The photos drive isn't there.
+        let mut now = vec![
+            entry("home", 0),
+            entry("home/me", 0),
+            entry("home/me/new.txt", 7),
+        ];
+        let previous = vec![
+            entry("home", 0),
+            entry("home/me", 0),
+            entry("home/me/old.txt", 3), // deleted since: stays deleted
+            entry("mnt", 0),
+            entry("mnt/photos", 0),
+            entry("mnt/photos/a.jpg", 10),
+            entry("mnt/photos/2024/b.jpg", 11),
+            entry("mnt/photosynth.txt", 4), // a neighbour, not inside the source
+        ];
+        let kept = carry_over(&mut now, previous, &[PathBuf::from("/mnt/photos")]);
+        let paths: Vec<&str> = now
+            .iter()
+            .map(|e| std::str::from_utf8(&e.path).unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "home",
+                "home/me",
+                "home/me/new.txt",
+                "mnt",
+                "mnt/photos",
+                "mnt/photos/2024/b.jpg",
+                "mnt/photos/a.jpg",
+            ]
+        );
+        assert_eq!(kept, 4);
+        assert_eq!(carry_over(&mut now, Vec::new(), &[]), 0);
+    }
 
     #[test]
     fn normalizes_sources() {

@@ -59,6 +59,10 @@
       <caption>See when the backup drive fills up</caption>
       <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/space-dark.png</image>
     </screenshot>
+    <screenshot>
+      <caption>Recovering an existing backup on a new computer</caption>
+      <image>https://raw.githubusercontent.com/neuralpunk/flux-backup/main/docs/screenshots/recover-dark.png</image>
+    </screenshot>
   </screenshots>
   <categories>
     <category>Utility</category>
@@ -82,6 +86,23 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.0" date="2026-11-09">
+      <description>
+        <p>The 1.0 release: backups you can recover anywhere, in formats that are written down and frozen.</p>
+        <ul>
+          <li>Recover an existing backup on a new computer, from the welcome screen: Flux finds it on a drive or server and sets it up again with its settings</li>
+          <li>A small program kept next to encrypted backups reads them without Flux, on any Linux</li>
+          <li>Export files from a snapshot as a .tar.zst or .zip archive, with checksums</li>
+          <li>Several places for one backup, including copies kept somewhere else</li>
+          <li>Restore tests on a schedule, and a warning when a backup shows ransomware-like changes</li>
+          <li>Notifications to a phone, a chat or a monitoring service through webhooks</li>
+          <li>Templates for new backups, a rule tester that says why a file is or isn't backed up, and a calendar of snapshots</li>
+          <li>Stronger password settings for encrypted backups, an optional unlock file, and sparse files kept sparse</li>
+          <li>Network rules: Wi-Fi networks and upload limits by time of day</li>
+          <li>Backups made by every earlier version are read and carried on</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-09">
       <description>
         <p>Easier, finer-grained restores, clearer setup, a way in from Back In Time, cron as a scheduler, and a new look in GNOME's own colours.</p>

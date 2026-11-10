@@ -129,15 +129,19 @@ where
     loop {
         let ord = match (old.peek(), new.peek()) {
             (None, None) => break,
-            (Some(Err(_)), _) => return Err(old.next().unwrap().unwrap_err()),
-            (_, Some(Err(_))) => return Err(new.next().unwrap().unwrap_err()),
+            (Some(Err(_)), _) => {
+                return Err(old.next().expect("peeked").expect_err("peeked an error"));
+            }
+            (_, Some(Err(_))) => {
+                return Err(new.next().expect("peeked").expect_err("peeked an error"));
+            }
             (Some(Ok(_)), None) => Ordering::Less,
             (None, Some(Ok(_))) => Ordering::Greater,
             (Some(Ok(a)), Some(Ok(b))) => a.path.cmp(&b.path),
         };
         let change = match ord {
             Ordering::Less => {
-                let o = old.next().unwrap()?;
+                let o = old.next().expect("peeked")?;
                 Some(Change {
                     change: ChangeKind::Removed,
                     kind: o.kind,
@@ -148,7 +152,7 @@ where
                 })
             }
             Ordering::Greater => {
-                let n = new.next().unwrap()?;
+                let n = new.next().expect("peeked")?;
                 Some(Change {
                     change: ChangeKind::Added,
                     kind: n.kind,
@@ -159,8 +163,8 @@ where
                 })
             }
             Ordering::Equal => {
-                let o = old.next().unwrap()?;
-                let n = new.next().unwrap()?;
+                let o = old.next().expect("peeked")?;
+                let n = new.next().expect("peeked")?;
                 if o.kind != n.kind {
                     Some(Change {
                         change: ChangeKind::TypeChanged,
@@ -220,7 +224,7 @@ pub fn summarize<'a>(
                 Ordering::Less => count(ChangeKind::Removed, old.next(), None, vec![]),
                 Ordering::Greater => count(ChangeKind::Added, None, new.next(), vec![]),
                 Ordering::Equal => {
-                    let (o, n) = (old.next().unwrap(), new.next().unwrap());
+                    let (o, n) = (old.next().expect("peeked"), new.next().expect("peeked"));
                     if o.kind != n.kind {
                         count(ChangeKind::TypeChanged, Some(o), Some(n), vec![]);
                     } else {

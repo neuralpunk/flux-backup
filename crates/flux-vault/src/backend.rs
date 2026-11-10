@@ -4,6 +4,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use flux_core::sync::Locked;
+use flux_transport::lock::{self as locks, LocalStore, LockInfo, LockStore};
 
 /// A held repository lock; released on drop.
 pub struct LockGuard {
@@ -43,6 +47,10 @@ pub trait Backend: Send + Sync {
     fn remove(&self, path: &str) -> io::Result<()>;
     fn exists(&self, path: &str) -> io::Result<bool>;
     fn lock(&self, exclusive: bool) -> io::Result<Option<LockGuard>>;
+    /// Who holds the repository's lock files (for "in use by …" messages).
+    fn lock_holders(&self) -> io::Result<Vec<LockInfo>>;
+    /// Remove stale lock files, or (`force`) every lock file. Returns those removed.
+    fn clear_locks(&self, force: bool) -> io::Result<Vec<LockInfo>>;
 }
 
 /// A repository in a local (or locally mounted) directory.
@@ -173,6 +181,9 @@ impl Backend for LocalBackend {
         self.path(path).try_exists()
     }
 
+    /// `flock` on `lock` (what Flux before 1.0 used, and what releases itself if the
+    /// process dies), plus a lock file in `locks/`, the same files a client reaching this
+    /// repository over SFTP writes and respects.
     fn lock(&self, exclusive: bool) -> io::Result<Option<LockGuard>> {
         fs::create_dir_all(&self.root)?;
         let f = OpenOptions::new()
@@ -187,12 +198,28 @@ impl Backend for LocalBackend {
             rustix::fs::FlockOperation::NonBlockingLockShared
         };
         match rustix::fs::flock(&f, op) {
-            Ok(()) => Ok(Some(LockGuard {
-                _inner: Box::new(f),
-            })),
-            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(e) => Err(e.into()),
+            Ok(()) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
+            Err(e) => return Err(e.into()),
         }
+        let store: Arc<dyn LockStore> = Arc::new(LocalStore);
+        Ok(locks::acquire_in(store, &self.locks_dir(), exclusive)?
+            .ok()
+            .map(|file| LockGuard::new((f, file))))
+    }
+
+    fn lock_holders(&self) -> io::Result<Vec<LockInfo>> {
+        locks::holders(&LocalStore, &self.locks_dir())
+    }
+
+    fn clear_locks(&self, force: bool) -> io::Result<Vec<LockInfo>> {
+        locks::clear(&LocalStore, &self.locks_dir(), force)
+    }
+}
+
+impl LocalBackend {
+    fn locks_dir(&self) -> String {
+        self.path("locks").display().to_string()
     }
 }
 
@@ -203,19 +230,29 @@ pub struct SftpBackend {
     limiter: Option<Limiter>,
 }
 
-/// Simple bandwidth limiter for uploads: sleeps to keep the average rate under the limit.
+/// The upload limit now, in bytes per second (`None`: unlimited). Asked as a backup runs,
+/// so a limit by time of day changes mid-backup.
+pub type RateNow = Box<dyn Fn() -> Option<u64> + Send + Sync>;
+
+/// Bandwidth limiter for uploads: sleeps to keep the average rate under the limit. When
+/// the limit changes, the average starts again from that moment.
 struct Limiter {
-    bytes_per_sec: u64,
-    state: std::sync::Mutex<(std::time::Instant, u64)>,
+    rate: RateNow,
+    /// (since, bytes since then, the rate they were measured against)
+    state: std::sync::Mutex<(std::time::Instant, u64, Option<u64>)>,
 }
 
 impl Limiter {
     fn wait(&self, bytes: u64) {
+        let rate = (self.rate)().filter(|r| *r > 0);
         let delay = {
-            let mut st = self.state.lock().expect("limiter lock");
+            let mut st = self.state.locked();
+            if st.2 != rate {
+                *st = (std::time::Instant::now(), 0, rate);
+            }
+            let Some(r) = rate else { return };
             st.1 += bytes;
-            let should_take =
-                std::time::Duration::from_secs_f64(st.1 as f64 / self.bytes_per_sec as f64);
+            let should_take = std::time::Duration::from_secs_f64(st.1 as f64 / r as f64);
             should_take.saturating_sub(st.0.elapsed())
         };
         if !delay.is_zero() {
@@ -233,14 +270,23 @@ impl SftpBackend {
         bandwidth_limit: Option<u64>,
     ) -> Self {
         let limiter = bandwidth_limit.filter(|b| *b > 0).map(|b| Limiter {
-            bytes_per_sec: b,
-            state: std::sync::Mutex::new((std::time::Instant::now(), 0)),
+            rate: Box::new(move || Some(b)),
+            state: std::sync::Mutex::new((std::time::Instant::now(), 0, Some(b))),
         });
         Self {
             pool,
             root: root.trim_end_matches('/').to_owned(),
             limiter,
         }
+    }
+
+    /// Limit uploads by `rate`, asked as the backup runs (a limit by time of day).
+    pub fn with_rate(mut self, rate: RateNow) -> Self {
+        self.limiter = Some(Limiter {
+            rate,
+            state: std::sync::Mutex::new((std::time::Instant::now(), 0, None)),
+        });
+        self
     }
 
     fn path(&self, rel: &str) -> String {
@@ -349,6 +395,14 @@ impl Backend for SftpBackend {
                 .map(LockGuard::new),
         )
     }
+
+    fn lock_holders(&self) -> io::Result<Vec<LockInfo>> {
+        locks::holders(self.pool.as_ref(), &self.path("locks"))
+    }
+
+    fn clear_locks(&self, force: bool) -> io::Result<Vec<LockInfo>> {
+        locks::clear(self.pool.as_ref(), &self.path("locks"), force)
+    }
 }
 
 /// Path of a pack inside the repository.
@@ -384,6 +438,35 @@ mod tests {
         drop((shared1, shared2));
         let ex = b.lock(true).unwrap().unwrap();
         assert!(b.lock(false).unwrap().is_none());
+        assert_eq!(b.lock_holders().unwrap().len(), 1, "the lock file names it");
         drop(ex);
+        assert!(
+            b.lock_holders().unwrap().is_empty(),
+            "released with the lock"
+        );
+    }
+
+    /// A job reaching the same Vault over SFTP (another computer, here the local SFTP
+    /// stand-in) holds a lock file: the local backend respects it, and says who it is.
+    #[test]
+    fn local_backend_respects_sftp_locks() {
+        let t = tempfile::tempdir().unwrap();
+        let Some(target) = flux_transport::testing::local_target(t.path()) else {
+            return;
+        };
+        let local = LocalBackend::new(t.path().join("vault"));
+        let pool = Arc::new(flux_transport::SftpPool::new(target, 2));
+        let remote = SftpBackend::new(pool, t.path().join("vault").display().to_string(), None);
+        let r = remote.lock(true).unwrap().unwrap();
+        assert!(local.lock(false).unwrap().is_none());
+        assert_eq!(local.lock_holders().unwrap().len(), 1);
+        drop(r);
+        let l = local.lock(false).unwrap().unwrap();
+        assert!(
+            remote.lock(true).unwrap().is_none(),
+            "and the other way round"
+        );
+        assert!(remote.lock(false).unwrap().is_some());
+        drop(l);
     }
 }

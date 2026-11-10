@@ -15,6 +15,7 @@ use std::sync::Arc;
 use flux_fs::entry::{Entry, Kind};
 use flux_fs::snapshot::SnapshotMeta;
 use flux_vault::crypto::BlobId;
+use flux_vault::format::{Content, Span};
 
 use crate::repo::{AnyRepo, RepoError};
 
@@ -29,8 +30,8 @@ pub struct SnapshotView {
     pub meta: SnapshotMeta,
     pub entries: Vec<Entry>,
     repo: Arc<AnyRepo>,
-    /// Vault: each entry's content chunks.
-    blobs: Vec<Vec<BlobId>>,
+    /// Vault: each entry's content (chunks and holes).
+    blobs: Vec<Content>,
 }
 
 impl SnapshotView {
@@ -81,9 +82,10 @@ impl SnapshotView {
             },
             AnyRepo::Vault { repo: v, .. } => {
                 let index = v.index().map_err(io::Error::other)?;
-                let mut chunks = Vec::with_capacity(self.blobs[i].len());
+                let content = &self.blobs[i];
+                let mut chunks = Vec::with_capacity(content.blobs.len());
                 let mut start = 0u64;
-                for id in &self.blobs[i] {
+                for id in &content.blobs {
                     let loc = index.get(id).ok_or_else(|| {
                         io::Error::other(format!(
                             "data blob {} is missing",
@@ -96,6 +98,11 @@ impl SnapshotView {
                 Ok(Box::new(VaultFile {
                     repo: self.repo.clone(),
                     chunks,
+                    content: Content {
+                        blobs: Vec::new(),
+                        holes: content.holes.clone(),
+                    },
+                    size: e.size,
                     last: None,
                 }))
             }
@@ -142,8 +149,11 @@ impl FileReader for RemoteFile {
 
 struct VaultFile {
     repo: Arc<AnyRepo>,
-    /// (chunk, offset in the file, plaintext length)
+    /// (chunk, offset in the file's data, plaintext length)
     chunks: Vec<(BlobId, u64, u64)>,
+    /// The file's holes (no blobs: those are `chunks`), and its length.
+    content: Content,
+    size: u64,
     /// The last chunk decoded.
     last: Option<(usize, Vec<u8>)>,
 }
@@ -166,8 +176,9 @@ impl VaultFile {
     }
 }
 
-impl FileReader for VaultFile {
-    fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+impl VaultFile {
+    /// Up to `len` bytes of the file's data stream (the file without its holes).
+    fn read_data(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);
         // First chunk that ends after `offset`.
         let mut i = self
@@ -183,6 +194,36 @@ impl FileReader for VaultFile {
             out.extend_from_slice(&data[from..from + take]);
             pos += take as u64;
             i += 1;
+        }
+        Ok(out)
+    }
+}
+
+impl FileReader for VaultFile {
+    fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let end = self.size.min(offset.saturating_add(len as u64));
+        let mut out = Vec::with_capacity(end.saturating_sub(offset) as usize);
+        let mut pos = offset;
+        while pos < end {
+            match self.content.span_at(pos, self.size) {
+                Span::Hole { end: h } => {
+                    let to = h.min(end);
+                    out.resize(out.len() + (to - pos) as usize, 0);
+                    pos = to;
+                }
+                Span::Data {
+                    data_offset,
+                    end: d,
+                } => {
+                    let want = (d.min(end) - pos) as usize;
+                    let data = self.read_data(data_offset, want)?;
+                    if data.is_empty() {
+                        break; // less data stored than the file's length says
+                    }
+                    pos += data.len() as u64;
+                    out.extend_from_slice(&data);
+                }
+            }
         }
         Ok(out)
     }

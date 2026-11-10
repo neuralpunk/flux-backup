@@ -82,11 +82,14 @@ pub fn after_backup(
             Ok(repo) => {
                 if free {
                     info("weekly upkeep: deleting data no snapshot uses".into());
-                    match repo.prune(&p.retention, false, report) {
-                        Ok(s) => {
+                    // Only what forgotten snapshots left behind. Which snapshots go is the
+                    // backup's decision alone: it knows when to keep them all (after a
+                    // run with problems) and keeps the one before an unusual run.
+                    match repo.free_unused(report) {
+                        Ok(freed) => {
                             info(format!(
                                 "weekly upkeep: freed {}",
-                                ByteSize(s.bytes_freed.unwrap_or(0)).display_approx()
+                                ByteSize(freed.unwrap_or(0)).display_approx()
                             ));
                             done.freed = Some(now);
                         }

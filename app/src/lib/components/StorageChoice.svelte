@@ -38,7 +38,7 @@
           title: "Encrypted",
           text: "Encrypted, compressed and deduplicated (Vault).",
           good: ["Nobody can read it without the password", "Smallest: data is stored once"],
-          mind: "Needs Flux (or flux mount) to read it.",
+          mind: "Needs Flux, or the small recovery tool kept on the drive, to read it.",
         },
       ],
     },

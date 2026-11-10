@@ -6,6 +6,7 @@ members = [
     "crates/flux-mirror",
     "crates/flux-transport",
     "crates/flux-vault",
+    "crates/flux-vault-recover",
     "crates/flux-compat",
     "crates/flux-runner",
     "crates/flux-service",
@@ -21,6 +22,7 @@ default-members = [
     "crates/flux-mirror",
     "crates/flux-transport",
     "crates/flux-vault",
+    "crates/flux-vault-recover",
     "crates/flux-compat",
     "crates/flux-runner",
     "crates/flux-service",
@@ -30,9 +32,9 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/neuralpunk/flux-backup"
 authors = ["The Flux Backup contributors"]

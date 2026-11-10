@@ -25,8 +25,12 @@ pub enum ManifestError {
         #[source]
         source: io::Error,
     },
-    #[error("{0}: not a Flux manifest or unsupported version")]
+    #[error("{0}: not a Flux manifest")]
     BadHeader(PathBuf),
+    #[error(
+        "{0} was written by a newer Flux (manifest version {1}, this one reads up to 1); update Flux Backup"
+    )]
+    Newer(PathBuf, u32),
     #[error("{path}: corrupt manifest record: {message}")]
     Corrupt { path: PathBuf, message: String },
 }
@@ -111,8 +115,12 @@ impl ManifestReader {
         input
             .read_exact(&mut header)
             .map_err(|_| ManifestError::BadHeader(path.to_owned()))?;
-        if &header[..8] != MAGIC || u32::from_le_bytes(header[8..].try_into().unwrap()) != VERSION {
+        if &header[..8] != MAGIC {
             return Err(ManifestError::BadHeader(path.to_owned()));
+        }
+        let version = u32::from_le_bytes(header[8..].try_into().expect("4 bytes"));
+        if version > VERSION {
+            return Err(ManifestError::Newer(path.to_owned(), version));
         }
         Ok(Self {
             path: path.to_owned(),

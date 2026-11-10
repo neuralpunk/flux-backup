@@ -27,6 +27,7 @@ use crate::fsops::{
 };
 use crate::safe::{DestTree, LinkPolicy};
 use crate::snapshot::{FileError, SnapshotMeta};
+use flux_core::sync::Locked;
 
 /// Where a snapshot's entries and file contents come from. Each engine implements this.
 pub trait RestoreSource: Sync {
@@ -41,6 +42,13 @@ pub trait RestoreSource: Sync {
         copier: &Copier,
         progress: &Progress,
     ) -> io::Result<u64>;
+    /// Whether folder `e` is in the snapshot only as the way to something below it: its
+    /// own permissions, owner and times were never backed up (Borg doesn't store the
+    /// folders above the ones it's given). Such a folder is created when missing; one
+    /// that is there is left exactly as it is.
+    fn path_only(&self, _e: &Entry) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +103,10 @@ pub struct RestoreOutcome {
     /// Exact restores: items that weren't in the snapshot and were removed (or moved
     /// aside, then also listed in `moved_aside`).
     pub removed: u64,
+    /// Exact restores: why some or all folders were left as they are (see
+    /// [`exact_folders`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_notes: Vec<String>,
 }
 
 pub fn restore(
@@ -109,7 +121,7 @@ pub fn restore(
         source,
     };
 
-    let (items, unsafe_paths) = select(source.entries().map_err(io_err)?, req)?;
+    let (items, unsafe_paths, above) = select(source.entries().map_err(io_err)?, req)?;
 
     let total_bytes: u64 = items
         .iter()
@@ -154,7 +166,7 @@ pub fn restore(
             message: fe.message.clone(),
         });
         progress.warnings.fetch_add(1, Relaxed);
-        errors.lock().unwrap().push(fe);
+        errors.locked().push(fe);
     };
 
     // When root restores into a folder that someone else owns, that person must not end up
@@ -183,9 +195,16 @@ pub fn restore(
     };
 
     // Directories first (path order puts parents first).
-    for (_, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
-        if let Err(err) = ctx.make_dir(dest) {
-            warn(dest, &err);
+    // Folders that are only the way to what's restored, and were there already: nothing
+    // about them is known, so nothing about them is changed.
+    let mut untouched: HashSet<&Path> = HashSet::new();
+    for (e, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+        match ctx.make_dir(dest) {
+            Ok(false) if source.path_only(e) => {
+                untouched.insert(dest.as_path());
+            }
+            Ok(_) => {}
+            Err(err) => warn(dest, &err),
         }
         restored.fetch_add(1, Relaxed);
         progress.entries_done.fetch_add(1, Relaxed);
@@ -308,19 +327,26 @@ pub fn restore(
     let mut removed = 0u64;
     if let Some(filter) = req.exact {
         let wanted: HashSet<&Path> = items.iter().map(|(_, d)| d.as_path()).collect();
-        let aside: HashSet<PathBuf> = moved.lock().unwrap().iter().cloned().collect();
-        for (e, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+        let aside: HashSet<PathBuf> = moved.locked().iter().cloned().collect();
+        let scope = exact_folders(&items, &above, req.snapshot);
+        for note in &scope.notes {
+            report(Event::Info {
+                message: format!("exact restore: {note}"),
+            });
+        }
+        out.exact_notes = scope.notes;
+        for (e, dest) in scope.folders {
             let r = tree.dir(dest, false).and_then(|dir| {
                 let found = list_fd(dir.as_fd())?;
                 let parent_dev = rustix::fs::fstat(&*dir)?.st_dev;
                 for f in extras(
                     found,
                     parent_dev,
-                    dest,
-                    &e.abs_path(),
+                    (dest, &e.abs_path()),
                     filter,
                     &wanted,
                     &aside,
+                    &scope.unread,
                 ) {
                     let path = dest.join(&f.name);
                     let kind = if f.is_dir {
@@ -342,7 +368,11 @@ pub fn restore(
     }
 
     // Directory metadata last, deepest first, through descriptors of the directories.
-    for (e, dest) in items.iter().rev().filter(|(e, _)| e.kind == Kind::Dir) {
+    for (e, dest) in items
+        .iter()
+        .rev()
+        .filter(|(e, d)| e.kind == Kind::Dir && !untouched.contains(d.as_path()))
+    {
         let r = tree.parent(dest, false).and_then(|(dir, name)| {
             let fd = rustix::fs::openat(
                 &*dir,
@@ -366,8 +396,8 @@ pub fn restore(
     out.bytes = bytes.into_inner();
     out.setid_dropped = setid_dropped.into_inner();
     out.errors = unsafe_paths;
-    out.errors.extend(errors.into_inner().unwrap());
-    out.moved_aside = moved.into_inner().unwrap();
+    out.errors.extend(errors.into_value());
+    out.moved_aside = moved.into_value();
     out.removed = removed;
     Ok(out)
 }
@@ -414,15 +444,16 @@ fn list_fd(dir: BorrowedFd<'_>) -> io::Result<Vec<Found>> {
 
 /// Which of `found` (in destination folder `dest`, the snapshot's `original`) an exact
 /// restore removes: what the snapshot doesn't have, unless the backup would never have
-/// taken it (`filter`), it's on another filesystem, or it's a copy a restore moved aside.
+/// taken it (`filter`), it's on another filesystem, the backup couldn't read it
+/// (`unread`), or it's a copy a restore moved aside.
 fn extras(
     found: Vec<Found>,
     parent_dev: u64,
-    dest: &Path,
-    original: &Path,
+    (dest, original): (&Path, &Path),
     filter: &Filter,
     wanted: &HashSet<&Path>,
     aside: &HashSet<PathBuf>,
+    unread: &[PathBuf],
 ) -> Vec<Found> {
     // A cache folder (or one with an exclude_if_present marker): its contents were never
     // backed up.
@@ -435,12 +466,15 @@ fn extras(
         .into_iter()
         .filter(|f| {
             let at = dest.join(&f.name);
+            let was = original.join(&f.name);
             !wanted.contains(at.as_path())
+                // What the backup couldn't read isn't in the snapshot, but it isn't extra.
+                && !unread.iter().any(|u| was.starts_with(u))
                 && !aside.contains(&at)
                 // Copies an earlier restore kept (`name.flux-<snapshot>`): the person's own.
                 && !f.name.as_bytes().windows(6).any(|w| w == b".flux-")
                 && f.dev == parent_dev
-                && !filter.is_excluded(&original.join(&f.name), f.is_dir)
+                && !filter.is_excluded(&was, f.is_dir)
                 && (f.is_dir || !filter.is_too_large(f.size))
         })
         .collect()
@@ -448,7 +482,11 @@ fn extras(
 
 /// The entries a request covers, with their destinations, in path order; and the paths a
 /// sound snapshot never contains (`..`, absolute…), which are never read or written.
-type Selected = (Vec<(Entry, PathBuf)>, Vec<FileError>);
+type Selected = (Vec<(Entry, PathBuf)>, Vec<FileError>, Above);
+
+/// The device of each folder above a requested path (an exact restore needs them to tell
+/// a mount point the backup didn't go into).
+type Above = HashMap<Vec<u8>, u64>;
 
 fn select(
     entries: impl Iterator<Item = io::Result<Entry>>,
@@ -473,6 +511,7 @@ fn select(
     let mut found = vec![false; wanted.len()];
     // Paths a sound snapshot never contains (`..`, absolute…): never read or written.
     let mut unsafe_paths: Vec<FileError> = Vec::new();
+    let mut above = Above::new();
     for e in entries {
         let e = e.map_err(io_err)?;
         if !is_clean_path(&e.path) {
@@ -481,6 +520,14 @@ fn select(
                 message: "unsafe path in the snapshot (damaged or forged); skipped".into(),
             });
             continue;
+        }
+        if req.exact.is_some()
+            && e.kind == Kind::Dir
+            && wanted
+                .iter()
+                .any(|w| w.len() > e.path.len() && is_within(w, &e.path))
+        {
+            above.insert(e.path.clone(), e.dev);
         }
         // A request may name a folder and something inside it: every path that covers the
         // entry is found, and the outermost one decides where it goes.
@@ -504,7 +551,107 @@ fn select(
             req.snapshot.id.clone(),
         ));
     }
-    Ok((items, unsafe_paths))
+    Ok((items, unsafe_paths, above))
+}
+
+/// The folders among `items` an exact restore may remove extras from, the paths in them
+/// it must leave alone, and why it holds back where it does.
+///
+/// Only what the backup really covered is authoritative:
+/// - folders at or below one of the snapshot's sources (the folders above a source are
+///   in the snapshot only to carry their metadata; what else they hold was never backed
+///   up);
+/// - not a mount point the backup didn't go into (another filesystem than its parent,
+///   and nothing of it in the snapshot);
+/// - not what the backup failed to read (the snapshot's errors). When the snapshot lists
+///   only some of its errors, or doesn't say what it covered, nothing is removed at all.
+struct ExactScope<'a> {
+    folders: Vec<&'a (Entry, PathBuf)>,
+    /// Original paths the backup couldn't read: they and what's below them stay.
+    unread: Vec<PathBuf>,
+    notes: Vec<String>,
+}
+
+fn exact_folders<'a>(
+    items: &'a [(Entry, PathBuf)],
+    above: &Above,
+    snap: &SnapshotMeta,
+) -> ExactScope<'a> {
+    let mut scope = ExactScope {
+        folders: Vec::new(),
+        unread: snap.errors.iter().map(|e| PathBuf::from(&e.path)).collect(),
+        notes: Vec::new(),
+    };
+    if !items.iter().any(|(e, _)| e.kind == Kind::Dir) {
+        return scope;
+    }
+    if snap.sources.is_empty() {
+        scope.notes.push(
+            "nothing was removed: this snapshot doesn't record which folders it covered".into(),
+        );
+        return scope;
+    }
+    if snap.errors_total > snap.errors.len() as u64 {
+        scope.notes.push(format!(
+            "nothing was removed: the backup couldn't read {} items and the snapshot lists only {} of them",
+            snap.errors_total,
+            snap.errors.len()
+        ));
+        return scope;
+    }
+    let sources: Vec<Vec<u8>> = snap
+        .sources
+        .iter()
+        .map(|p| {
+            let b = p.as_os_str().as_bytes();
+            let b = b.strip_prefix(b"/").unwrap_or(b);
+            b.strip_suffix(b"/").unwrap_or(b).to_vec()
+        })
+        .collect();
+    fn parent(p: &[u8]) -> Option<&[u8]> {
+        p.iter().rposition(|&b| b == b'/').map(|i| &p[..i])
+    }
+    let mut dev: HashMap<&[u8], u64> = above.iter().map(|(p, d)| (p.as_slice(), *d)).collect();
+    let mut has_children: HashSet<&[u8]> = HashSet::new();
+    for (e, _) in items {
+        if e.kind == Kind::Dir {
+            dev.insert(&e.path, e.dev);
+        }
+        if let Some(p) = parent(&e.path) {
+            has_children.insert(p);
+        }
+    }
+    let (mut outside, mut mounts) = (0u64, 0u64);
+    for item in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+        let e = &item.0;
+        let Some(source) = sources.iter().find(|s| is_within(&e.path, s)) else {
+            outside += 1;
+            continue;
+        };
+        let other_fs = e.path.len() > source.len()
+            && parent(&e.path)
+                .and_then(|p| dev.get(p))
+                .is_some_and(|d| *d != e.dev);
+        if other_fs && !has_children.contains(e.path.as_slice()) {
+            mounts += 1;
+            continue;
+        }
+        scope.folders.push(item);
+    }
+    if outside > 0 {
+        scope.notes.push(format!(
+            "{outside} folder{} above what this backup covers: only what the backup holds was restored there, nothing was removed",
+            if outside == 1 { " is" } else { "s are" }
+        ));
+    }
+    if mounts > 0 {
+        scope.notes.push(format!(
+            "{mounts} folder{} another filesystem the backup didn't go into: left as {}",
+            if mounts == 1 { " is" } else { "s are" },
+            if mounts == 1 { "it is" } else { "they are" }
+        ));
+    }
+    scope
 }
 
 /// At most this many paths of each kind in a [`RestorePreview`].
@@ -534,6 +681,9 @@ pub struct RestorePreview {
     /// `keep_existing`), and the first [`PREVIEW_PATHS`] of them.
     pub remove: u64,
     pub remove_paths: Vec<PathBuf>,
+    /// Exact restores: why some or all folders would be left as they are.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exact_notes: Vec<String>,
 }
 
 /// What [`restore`] would do with `req`: compares the snapshot's entries with what is at
@@ -544,7 +694,7 @@ pub fn preview(
     req: &RestoreRequest<'_>,
 ) -> Result<RestorePreview, RestoreError> {
     use std::os::unix::fs::MetadataExt;
-    let (items, unsafe_paths) = select(entries, req)?;
+    let (items, unsafe_paths, above) = select(entries, req)?;
     let mut out = RestorePreview {
         keep_existing: req.keep_existing,
         unsafe_paths: unsafe_paths.len() as u64,
@@ -552,7 +702,9 @@ pub fn preview(
     };
     if let Some(filter) = req.exact {
         let wanted: HashSet<&Path> = items.iter().map(|(_, d)| d.as_path()).collect();
-        for (e, dest) in items.iter().filter(|(e, _)| e.kind == Kind::Dir) {
+        let scope = exact_folders(&items, &above, req.snapshot);
+        out.exact_notes = scope.notes;
+        for (e, dest) in scope.folders {
             // Only folders that are there now (and are folders) can hold anything extra.
             let Ok(m) = fs::symlink_metadata(dest) else {
                 continue;
@@ -576,11 +728,11 @@ pub fn preview(
             for f in extras(
                 found,
                 m.dev(),
-                dest,
-                &e.abs_path(),
+                (dest, &e.abs_path()),
                 filter,
                 &wanted,
                 &HashSet::new(),
+                &scope.unread,
             ) {
                 out.remove += 1;
                 if out.remove_paths.len() < PREVIEW_PATHS {
@@ -638,10 +790,14 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// Make sure `dest` is a directory, setting aside whatever else is there.
-    fn make_dir(&self, dest: &Path) -> io::Result<()> {
+    /// Make sure `dest` is a folder. Whether it had to be made (it wasn't there, or
+    /// something else was in its place).
+    fn make_dir(&self, dest: &Path) -> io::Result<bool> {
         let (dir, name) = self.tree.parent(dest, true)?;
         match rustix::fs::statat(&*dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => return Ok(()),
+            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => {
+                return Ok(false);
+            }
             Ok(st) => self.set_aside(
                 dir.as_fd(),
                 &name,
@@ -652,7 +808,8 @@ impl Ctx<'_> {
             Err(e) => return Err(e.into()),
         }
         match rustix::fs::mkdirat(&*dir, &name, Mode::from_raw_mode(0o700)) {
-            Ok(()) | Err(Errno::EXIST) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(Errno::EXIST) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -691,7 +848,7 @@ impl Ctx<'_> {
             n += 1;
         }
         rustix::fs::renameat(dir, name, dir, &aside)?;
-        self.moved.lock().unwrap().push(dest.with_file_name(&aside));
+        self.moved.locked().push(dest.with_file_name(&aside));
         Ok(())
     }
 }
@@ -727,6 +884,9 @@ mod tests {
             errors: Vec::new(),
             errors_total: 0,
             flux_version: "0".into(),
+            sources_missing: Vec::new(),
+            note: None,
+            tags: Vec::new(),
         }
     }
 
@@ -797,6 +957,165 @@ mod tests {
         assert!(!t.path().join("a/b/escaped.txt").exists());
         assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
         assert!(out.errors[0].message.contains("unsafe path"));
+    }
+
+    /// Entries with their destination under `to` (as a restore of `/` into `to` gives).
+    fn items_under(entries: Vec<Entry>) -> Vec<(Entry, PathBuf)> {
+        entries
+            .into_iter()
+            .map(|e| {
+                let d = e.abs_path();
+                (e, d)
+            })
+            .collect()
+    }
+
+    fn dir(path: &str, dev: u64) -> Entry {
+        let mut e = entry(path, Kind::Dir);
+        e.dev = dev;
+        e
+    }
+
+    /// Only folders the backup covered are made exact: not the folders above a source,
+    /// not a mount point it didn't go into, and nothing when the snapshot doesn't say.
+    #[test]
+    fn exact_only_where_the_backup_covered() {
+        let mut snap = test_snapshot();
+        snap.sources = vec!["/home/me/Documents".into(), "/home/me/Pictures/".into()];
+        let items = items_under(vec![
+            dir("home", 1),
+            dir("home/me", 1),
+            dir("home/me/Documents", 1),
+            entry("home/me/Documents/a.txt", Kind::File),
+            dir("home/me/Documents/mnt", 2), // another filesystem, nothing of it kept
+            dir("home/me/Documents/nas", 3), // another filesystem the backup went into
+            entry("home/me/Documents/nas/b.txt", Kind::File),
+            dir("home/me/Pictures", 1),
+        ]);
+        let scope = exact_folders(&items, &Above::new(), &snap);
+        let got: Vec<_> = scope
+            .folders
+            .iter()
+            .map(|(e, _)| String::from_utf8_lossy(&e.path).into_owned())
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "home/me/Documents",
+                "home/me/Documents/nas",
+                "home/me/Pictures"
+            ]
+        );
+        assert_eq!(scope.notes.len(), 2, "{:?}", scope.notes);
+
+        // The mount point itself is what's restored: its parent's device comes from above.
+        let only = items_under(vec![dir("home/me/Documents/mnt", 2)]);
+        let above: Above = [(b"home/me/Documents".to_vec(), 1)].into();
+        assert!(exact_folders(&only, &above, &snap).folders.is_empty());
+        // A source that is itself a mount point is covered.
+        let src = items_under(vec![dir("home/me/Pictures", 7)]);
+        let above: Above = [(b"home/me".to_vec(), 1)].into();
+        assert_eq!(exact_folders(&src, &above, &snap).folders.len(), 1);
+
+        // More errors than the snapshot lists, or no sources recorded: nothing at all.
+        snap.errors_total = 3;
+        let scope = exact_folders(&items, &Above::new(), &snap);
+        assert!(scope.folders.is_empty() && scope.notes.len() == 1);
+        snap.errors_total = 0;
+        snap.sources.clear();
+        let scope = exact_folders(&items, &Above::new(), &snap);
+        assert!(scope.folders.is_empty() && scope.notes.len() == 1);
+    }
+
+    /// An exact restore of the folder above a source leaves what else is in it, and what
+    /// the backup couldn't read, alone; a real extra inside the source goes.
+    #[test]
+    fn exact_restore_leaves_what_was_never_covered() {
+        struct Dirs(Vec<Entry>);
+        impl RestoreSource for Dirs {
+            fn entries(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<Entry>> + '_>> {
+                Ok(Box::new(self.0.iter().cloned().map(Ok)))
+            }
+            fn write_file(
+                &self,
+                _e: &Entry,
+                _out: &File,
+                _copier: &Copier,
+                _progress: &Progress,
+            ) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let at = |rel: &str| t.path().join(rel);
+        for d in ["user/Documents", "user/.ssh", "user/Photos"] {
+            std::fs::create_dir_all(at(d)).unwrap();
+        }
+        std::fs::write(at("user/notes.txt"), "mine").unwrap();
+        std::fs::write(at("user/Documents/extra.txt"), "x").unwrap();
+        std::fs::write(at("user/Documents/unreadable.db"), "u").unwrap();
+        let rel = |p: &str| {
+            at(p)
+                .strip_prefix("/")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let d = |p: &str| {
+            let m = std::fs::metadata(at(p)).unwrap();
+            let mut e = entry(&rel(p), Kind::Dir);
+            (e.mode, e.uid, e.gid, e.dev) = (m.mode() & 0o7777, m.uid(), m.gid(), m.dev());
+            e
+        };
+        let source = Dirs(vec![d("user"), d("user/Documents")]);
+        let mut snap = test_snapshot();
+        snap.sources = vec![at("user/Documents")];
+        snap.errors = vec![FileError {
+            path: at("user/Documents/unreadable.db").display().to_string(),
+            message: "Permission denied".into(),
+        }];
+        snap.errors_total = 1;
+        let mut profile = flux_core::Profile::new(
+            "t",
+            flux_core::profile::Target::Local {
+                path: at("target"),
+                fs_uuid: None,
+            },
+            vec![at("user/Documents")],
+        );
+        profile.sources.exclude.clear();
+        let filter = Filter::new(&profile.sources, None).unwrap();
+        let req = |dry_run| RestoreRequest {
+            snapshot: &snap,
+            paths: vec![at("user")],
+            to: None,
+            keep_existing: false,
+            dry_run,
+            xattrs: XattrPolicy {
+                acl: false,
+                other: false,
+            },
+            links: LinkPolicy::FollowAll,
+            exact: Some(&filter),
+        };
+        let p = preview(source.0.iter().cloned().map(Ok), &req(true)).unwrap();
+        assert_eq!(p.remove_paths, vec![at("user/Documents/extra.txt")]);
+        assert_eq!(p.exact_notes.len(), 1, "{:?}", p.exact_notes);
+
+        let out = restore(&source, &req(false), &Progress::default(), &|_| {}).unwrap();
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.removed, 1);
+        assert!(!at("user/Documents/extra.txt").exists());
+        for kept in [
+            "user/.ssh",
+            "user/Photos",
+            "user/notes.txt",
+            "user/Documents/unreadable.db",
+        ] {
+            assert!(at(kept).exists(), "{kept} was never in the backup");
+        }
     }
 
     #[test]

@@ -7,6 +7,9 @@
   import Activity from "./lib/components/Activity.svelte";
   import AllBackups from "./lib/components/AllBackups.svelte";
   import Overview from "./lib/components/Overview.svelte";
+  import TemplatePicker from "./lib/components/TemplatePicker.svelte";
+  import SaveTemplateDialog from "./lib/components/SaveTemplateDialog.svelte";
+  import RecoverDialog from "./lib/components/RecoverDialog.svelte";
   import PauseDialog from "./lib/components/PauseDialog.svelte";
   import Preferences from "./lib/components/Preferences.svelte";
   import ProfileEditor from "./lib/components/ProfileEditor.svelte";
@@ -20,6 +23,7 @@
   import MenuHost from "./lib/components/MenuHost.svelte";
   import DeleteProfileDialog from "./lib/components/DeleteProfileDialog.svelte";
   import RecoveryKitDialog from "./lib/components/RecoveryKitDialog.svelte";
+  import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SystemUnlockDialog from "./lib/components/SystemUnlockDialog.svelte";
   import ExportDialog from "./lib/components/ExportDialog.svelte";
   import Logo from "./lib/ui/Logo.svelte";
@@ -45,6 +49,7 @@
       if (q.get("open") === "system") app.dialog = { kind: "system-unlock" };
       if (q.get("open") === "export" && app.selectedId) app.dialog = { kind: "export", id: app.selectedId };
       if (q.get("open") === "pause") app.dialog = { kind: "pause" };
+      if (q.get("open") === "recover") app.dialog = { kind: "recover" };
       if (q.get("view") === "preferences") app.openPreferences();
     });
   });
@@ -52,7 +57,17 @@
   // A view that hit a locked Vault asks for the password, then retries.
   const onLocked = (retry: () => void) => app.selected && (app.unlock = { id: app.selected.id, retry });
   const dialogProfile = $derived(app.profiles.find((p) => p.id === app.dialog?.id) ?? null);
-  const unlockProfile = $derived(app.profiles.find((p) => p.id === app.unlock?.id) ?? null);
+  const unlockProfile = $derived(app.unlock ? app.profileOrDestination(app.unlock.id) : null);
+  let shownFor = "";
+  $effect(() => {
+    // Another backup opened: its main destination's snapshots again.
+    if (app.selectedId !== shownFor) {
+      shownFor = app.selectedId ?? "";
+      app.snapshotsOf = null;
+    }
+  });
+  const snapDest = $derived(app.snapshotsOf);
+  const snapId = $derived(app.selected && snapDest && app.selected.destinations?.some((d) => d.id === snapDest) ? snapDest : (app.selected?.id ?? ""));
 
   const job = $derived(app.selectedId ? app.jobs[app.selectedId] : undefined);
 
@@ -124,13 +139,23 @@
               : "A few questions, one at a time. You can change everything later."}
           </p>
         </div>
-        <div class="min-h-0 flex-1">
-          <ProfileEditor
-            system={app.creatingSystem}
-            onsaved={(id) => app.open(id)}
-            oncancel={() => (app.creating = false)}
-          />
-        </div>
+        {#if app.creatingTemplate === null}
+          <div class="mx-auto w-full max-w-[760px] overflow-y-auto px-10 pb-10">
+            <TemplatePicker system={app.creatingSystem} onpick={(t) => (app.creatingTemplate = t)} />
+            <div class="mt-6 flex justify-end"><button class="btn btn-ghost" onclick={() => (app.creating = false)}>Cancel</button></div>
+          </div>
+        {:else}
+          <div class="min-h-0 flex-1">
+            {#key app.creatingTemplate}
+              <ProfileEditor
+                system={app.creatingSystem}
+                template={app.creatingTemplate}
+                onsaved={(id) => app.open(id)}
+                oncancel={() => (app.creatingTemplate = null)}
+              />
+            {/key}
+          </div>
+        {/if}
       {:else if app.home && app.profiles.length}
         <AllBackups />
       {:else if app.selected}
@@ -159,11 +184,31 @@
                     <button class="btn shrink-0" onclick={() => (app.tab = "settings")}><Icon name="settings" size={14} /> Open settings</button>
                   </div>
                 {/if}
-                <div class={app.tab !== "overview" ? "flex min-h-0 flex-1 flex-col" : ""}>
+                <!-- Snapshots and Activity fill the window, but never shrink below a usable
+                     height: in a small window the page scrolls instead. -->
+                <div class={app.tab !== "overview" ? "flex min-h-[32rem] flex-1 flex-col" : ""}>
                   {#if app.tab === "overview"}
                     <Overview id={app.selected.id} {onLocked} />
                   {:else if app.tab === "snapshots"}
-                    <Snapshots id={app.selected.id} {onLocked} />
+                    {#if app.selected.destinations?.length}
+                      {@const sel = app.selected}
+                      <div class="mb-3 flex flex-wrap items-center gap-3">
+                        <span class="text-[13px] text-fg-2">Snapshots on</span>
+                        <div class="segmented" role="radiogroup" aria-label="Which destination's snapshots">
+                          <button role="radio" aria-checked={snapId === sel.id} onclick={() => (app.snapshotsOf = null)}>
+                            <Icon name={sel.remote ? "server" : "drive"} size={14} /> {sel.target.split("/").filter(Boolean).pop() ?? sel.target}
+                          </button>
+                          {#each sel.destinations ?? [] as d (d.id)}
+                            <button role="radio" aria-checked={snapId === d.id} onclick={() => (app.snapshotsOf = d.id)}>
+                              <Icon name={d.remote ? "server" : "drive"} size={14} /> {d.label}
+                            </button>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                    {#key snapId}
+                      <Snapshots id={snapId} onLocked={(retry) => (app.unlock = { id: snapId, retry })} />
+                    {/key}
                   {:else}
                     <Activity id={app.selected.id} />
                   {/if}
@@ -182,6 +227,10 @@
               <button class="btn btn-primary h-10 px-5" onclick={() => app.newProfile(false)}><Icon name="plus" size={15} /> Set up a backup</button>
               <button class="btn btn-ghost h-10" onclick={() => app.importProfile(false)}>Import a profile…</button>
             </div>
+            <p class="mt-6 text-[13px] text-fg-2">
+              New computer, or reinstalled?
+              <button class="font-medium text-primary hover:underline" onclick={() => (app.dialog = { kind: "recover" })}>Recover an existing backup…</button>
+            </p>
           </div>
         </div>
       {/if}
@@ -204,6 +253,10 @@
 
 {#if app.dialog?.kind === "pause"}
   <PauseDialog onclose={() => (app.dialog = null)} />
+{:else if app.dialog?.kind === "save-template" && dialogProfile}
+  <SaveTemplateDialog profile={dialogProfile} onclose={() => (app.dialog = null)} />
+{:else if app.dialog?.kind === "recover"}
+  <RecoverDialog onclose={() => (app.dialog = null)} />
 {:else if app.dialog?.kind === "delete-profile" && dialogProfile}
   <DeleteProfileDialog profile={dialogProfile} onclose={() => (app.dialog = null)} />
 {:else if app.dialog?.kind === "recovery" && dialogProfile}
@@ -212,6 +265,8 @@
   <ExportDialog id={dialogProfile.id} name={dialogProfile.name} onclose={() => (app.dialog = null)} />
 {:else if app.dialog?.kind === "system-unlock"}
   <SystemUnlockDialog onclose={() => (app.dialog = null)} />
+{:else if app.dialog?.kind === "about"}
+  <AboutDialog onclose={() => (app.dialog = null)} />
 {/if}
 
 {#if app.showShortcuts}

@@ -57,6 +57,7 @@ impl Env {
                 name: name.map(str::to_owned),
                 dry_run: false,
                 prune: false,
+                keep: Vec::new(),
             },
             &Progress::new(),
             &silent,
@@ -352,6 +353,7 @@ fn dry_run_and_lock() {
             name: None,
             dry_run: true,
             prune: false,
+            keep: Vec::new(),
         },
         &Progress::new(),
         &silent,
@@ -591,4 +593,63 @@ fn restore_is_not_redirected_by_planted_symlinks() {
         .is_err()
     );
     assert!(!outside.join("x").exists());
+}
+
+/// A source whose drive isn't connected (`keep`): its files stay in the new snapshot as
+/// they were in the previous one, hard-linked, and nothing counts as deleted.
+#[test]
+fn missing_drive_keeps_its_files() {
+    let mut e = env();
+    let photos = e._tmp.path().join("photos");
+    fs::create_dir_all(photos.join("2024")).unwrap();
+    write(&photos.join("2024/a.jpg"), "picture");
+    write(&e.src.join("notes.txt"), "v1");
+    e.profile.sources.paths = vec![e.src.clone(), photos.clone()];
+    let first = e.created();
+
+    // Unplugged: the runner leaves the source out and asks to keep it.
+    write(&e.src.join("notes.txt"), "v2 changed");
+    let mut reduced = e.profile.clone();
+    reduced.sources.paths = vec![e.src.clone()];
+    let out = backup(
+        &BackupRequest {
+            id: &e.id,
+            profile: &reduced,
+            name: None,
+            dry_run: false,
+            prune: false,
+            keep: vec![photos.clone()],
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    let BackupOutcome::Created {
+        snapshot: second, ..
+    } = out
+    else {
+        panic!("expected a snapshot")
+    };
+    assert_eq!(second.stats.deleted, 0, "the photos aren't deleted");
+    assert_eq!(second.sources_missing.len(), 1);
+    assert_eq!(second.sources_missing[0].path, photos);
+    assert_eq!(
+        second.sources_missing[0].kept_from.as_deref(),
+        Some(first.id.as_str())
+    );
+    assert!(second.sources.contains(&photos));
+    let kept = e.in_snapshot(&second.id, &photos.join("2024/a.jpg"));
+    assert_eq!(fs::read_to_string(&kept).unwrap(), "picture");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        fs::metadata(&kept).unwrap().ino(),
+        fs::metadata(e.in_snapshot(&first.id, &photos.join("2024/a.jpg")))
+            .unwrap()
+            .ino(),
+        "hard-linked from the previous snapshot, not copied"
+    );
+    assert_eq!(
+        fs::read_to_string(e.in_snapshot(&second.id, &e.src.join("notes.txt"))).unwrap(),
+        "v2 changed"
+    );
 }

@@ -1,0 +1,4 @@
+{
+  "prompt": "Origin: not generated. A screenshot of the Flux Backup desktop app's own UI, captured from its demo build (app/, npm run build + vite preview, demo data, dark theme, 1200x780 at device scale 2, clock fixed at 4 PM) with Playwright and Chrome, converted to WebP (ImageMagick, quality 82). Screen: search.",
+  "createdAt": "2026-11-09T21:27:20.925Z"
+}

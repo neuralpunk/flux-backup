@@ -88,6 +88,7 @@
             [
               { label: "New backup", icon: "plus", shortcut: "Ctrl+N", onselect: () => app.newProfile(false) },
               { label: "Import a profile…", icon: "folder", onselect: () => void app.importProfile(false) },
+              { label: "Recover a backup…", icon: "drive", onselect: () => (app.dialog = { kind: "recover" }) },
             ],
             "New backup or import",
           )}

@@ -68,12 +68,12 @@ pub fn locate_remote(remote_path: &Path, host: &str, user: &str, profile: &str) 
 
 /// The folder (local path or path on the server) a profile's backups go to.
 pub fn repo_location(id: &ProfileId, profile: &Profile) -> String {
-    let (host, user) = (sys::hostname(), sys::username());
+    let k = profile.kept_as(id);
     match &profile.target {
-        Target::Local { path, .. } => locate_local(path, &host, &user, id.as_str())
+        Target::Local { path, .. } => locate_local(path, &k.host, &k.user, &k.profile)
             .display()
             .to_string(),
-        Target::Ssh { path, .. } => locate_remote(path, &host, &user, id.as_str()),
+        Target::Ssh { path, .. } => locate_remote(path, &k.host, &k.user, &k.profile),
     }
 }
 
@@ -85,18 +85,19 @@ pub fn store_for(
     profile: &Profile,
     batch: bool,
 ) -> Result<Store, CompatError> {
-    let (host, user) = (sys::hostname(), sys::username());
+    let k = profile.kept_as(id);
+    let (host, user, id) = (k.host, k.user, k.profile);
     match &profile.target {
         Target::Local { path, fs_uuid } => {
             target_check::check_local_target(path, fs_uuid.as_deref())?;
-            Ok(Store::local(locate_local(path, &host, &user, id.as_str())))
+            Ok(Store::local(locate_local(path, &host, &user, &id)))
         }
         Target::Ssh { path, .. } => {
             let t = SshTarget::from_target(&profile.target, &paths.runtime_dir, batch)
                 .expect("ssh target");
             Ok(Store::remote(
                 Arc::new(SftpPool::new(t, SFTP_SESSIONS)),
-                locate_remote(path, &host, &user, id.as_str()),
+                locate_remote(path, &host, &user, &id),
             ))
         }
     }
@@ -239,6 +240,9 @@ impl RsyncRepo {
             errors: Vec::new(),
             errors_total: 0,
             flux_version: String::new(),
+            sources_missing: Vec::new(),
+            note: None,
+            tags: Vec::new(),
         }
     }
 
@@ -259,6 +263,11 @@ impl RsyncRepo {
     fn read_meta(&self, id: &str) -> Option<SnapshotMeta> {
         let raw = self.store.read(&format!("{}/{META}", snap_rel(id))).ok()?;
         match serde_json::from_slice::<SnapshotMeta>(&raw) {
+            // The folder is plain rsync output: a newer Flux's notes are left aside.
+            Ok(m) if m.check_format().is_err() => {
+                tracing::warn!("snapshot {id}: {META} is from a newer Flux; ignored");
+                None
+            }
             Ok(m) => Some(m),
             Err(e) => {
                 tracing::warn!("snapshot {id}: unreadable {META}: {e}");
@@ -306,6 +315,13 @@ impl RsyncRepo {
         self.cache
             .get(id, &stamp, || self.scan(&data_rel(id)))
             .map_err(|e| CompatError::Failed(format!("listing snapshot {id}: {e}")))
+    }
+
+    /// The snapshot's entries as they are on the disk or server right now, never from the
+    /// cached listing: for checking that what was backed up is still there.
+    pub fn entries_now(&self, snap: &SnapshotMeta) -> Result<Vec<Entry>, CompatError> {
+        self.scan(&data_rel(&snap.id))
+            .map_err(|e| CompatError::Failed(format!("listing snapshot {}: {e}", snap.id)))
     }
 
     /// The entries of folder `rel` of the repository (uncached).
@@ -1153,6 +1169,9 @@ pub fn backup(
         errors: stored_errors,
         errors_total,
         flux_version: flux_core::VERSION.into(),
+        sources_missing: Vec::new(),
+        note: None,
+        tags: Vec::new(),
     };
     let command_text = command_record(&meta, p, &rsync_version, &program, &args, &run);
     repo.store.write(
@@ -1281,8 +1300,10 @@ pub fn prune_locked(
     )
 }
 
-/// Verify an rsync repository: every snapshot's folder can be listed, its file count
-/// matches what rsync reported, and (`read_data`, local targets) every file reads back.
+/// Verify an rsync repository: every snapshot's folder is listed afresh (not from the
+/// cached listing, which would say all is well after the files are gone), it holds at
+/// least the files the backup stored, and (`read_data`, local targets) every file reads
+/// back.
 pub fn check(
     repo: &RsyncRepo,
     read_data: bool,
@@ -1310,8 +1331,19 @@ pub fn check(
         if progress.is_cancelled() {
             return Err(CompatError::Cancelled);
         }
-        match repo.entries(s) {
+        match repo.entries_now(s) {
             Ok(v) => {
+                // What the backup stored (Flux's notes; a snapshot made without Flux has
+                // none). A backup with errors counted files it couldn't store.
+                let files = v.iter().filter(|e| e.kind == Kind::File).count() as u64;
+                if s.status == SnapshotStatus::Complete && files < s.stats.files {
+                    sum.errors.push(format!(
+                        "snapshot {}: {} of the {} files the backup stored are missing",
+                        s.id,
+                        s.stats.files - files,
+                        s.stats.files
+                    ));
+                }
                 if read_data && !repo.store.is_remote() {
                     progress.bytes_total.fetch_add(
                         v.iter()

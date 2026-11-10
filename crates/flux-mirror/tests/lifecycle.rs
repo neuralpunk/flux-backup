@@ -51,6 +51,7 @@ impl Env {
                 name: None,
                 dry_run: false,
                 prune,
+                keep: Vec::new(),
             },
             &Progress::new(),
             &silent,
@@ -77,6 +78,10 @@ fn keep_last(n: u32) -> Retention {
         keep_named: true,
         min_free_space: None,
         min_free_inodes_percent: None,
+        safety_floor: 0,
+        after_problems: flux_core::profile::AfterProblems::Prune,
+        keep_history_days: None,
+        keep_history_runs: None,
     }
 }
 

@@ -1,0 +1,1 @@
+{"id":7,"call":{"method":"restore","params":{"id":"etc","snapshot":"latest","paths":["/etc/hosts"],"to":null,"overwrite":false}}}

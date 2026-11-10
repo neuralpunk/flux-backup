@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::protocol::{Call, Output, PROTOCOL_VERSION, Request};
 use crate::watch::Sink;
 use crate::{ApiError, Result};
+use flux_core::sync::Locked;
 
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value>>>>>;
 
@@ -142,7 +143,7 @@ impl HelperClient {
                     }
                     match serde_json::from_str::<Output>(&line) {
                         Ok(Output::Reply { id, ok, err }) => {
-                            if let Some(tx) = pending.lock().expect("pending").remove(&id) {
+                            if let Some(tx) = pending.locked().remove(&id) {
                                 let _ = tx.send(match err {
                                     Some(e) => Err(e),
                                     None => Ok(ok.unwrap_or(Value::Null)),
@@ -155,7 +156,7 @@ impl HelperClient {
                     }
                 }
                 alive.store(false, Relaxed);
-                for (_, tx) in pending.lock().expect("pending").drain() {
+                for (_, tx) in pending.locked().drain() {
                     let _ = tx.send(Err(gone()));
                 }
                 let _ = child.wait();
@@ -186,10 +187,10 @@ impl HelperClient {
         }
         let id = self.next.fetch_add(1, Relaxed);
         let (tx, rx) = mpsc::channel();
-        self.pending.lock().expect("pending").insert(id, tx);
+        self.pending.locked().insert(id, tx);
         let mut line = serde_json::to_string(&Request { id, call })?;
         line.push('\n');
-        let sent = match self.stdin.lock().expect("stdin").as_mut() {
+        let sent = match self.stdin.locked().as_mut() {
             Some(w) => w
                 .write_all(line.as_bytes())
                 .and_then(|()| w.flush())
@@ -197,7 +198,7 @@ impl HelperClient {
             None => false,
         };
         if !sent {
-            self.pending.lock().expect("pending").remove(&id);
+            self.pending.locked().remove(&id);
             return Err(gone());
         }
         rx.recv().unwrap_or_else(|_| Err(gone()))
@@ -205,7 +206,7 @@ impl HelperClient {
 
     /// Ask the helper to exit (it finishes what it's doing first).
     pub fn close(&self) {
-        self.stdin.lock().expect("stdin").take();
+        self.stdin.locked().take();
     }
 }
 

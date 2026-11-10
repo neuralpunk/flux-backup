@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use flux_core::profile::Target;
 
 use crate::sftp::Sftp;
+use flux_core::sync::Locked;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
@@ -232,7 +233,7 @@ impl SftpPool {
             .sessions
             .iter()
             .find_map(|m| m.try_lock().ok())
-            .unwrap_or_else(|| self.sessions[0].lock().expect("sftp session lock"));
+            .unwrap_or_else(|| self.sessions[0].locked());
         if guard.is_none() {
             *guard = Some(self.target.sftp().map_err(std::io::Error::other)?);
         }

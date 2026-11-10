@@ -170,7 +170,67 @@ fn redacted(p: &Profile) -> Profile {
             *c = "(hidden)".into();
         }
     }
+    // Webhook addresses (a Slack or Gotify URL is a secret) and headers.
+    for w in &mut q.webhooks {
+        w.url = format!("{:?} (address hidden)", w.preset).to_lowercase();
+        for h in &mut w.headers {
+            let name = h.split(':').next().unwrap_or_default().to_owned();
+            *h = format!("{name}: (hidden)");
+        }
+    }
     q
+}
+
+/// A message from a run (an event, or the run's error) without what [`redacted`] hides in
+/// the profile: a hook's command line and everything it printed, a password command, and
+/// webhook addresses and header values. The run log has them in full (it stays on this
+/// computer); diagnostics are pasted into bug reports.
+fn scrubbed(message: &str, p: &Profile) -> String {
+    // "post_backup hook `curl -H 'Authorization: …'` ok:" and the hook's output after it.
+    for event in ["pre_backup", "post_backup", "on_error"] {
+        if let Some(rest) = message.strip_prefix(&format!("{event} hook `")) {
+            let outcome = rest
+                .lines()
+                .next()
+                .and_then(|l| l.rsplit_once("` "))
+                .map_or("ran", |(_, o)| o.trim_end_matches(':'));
+            return format!("{event} hook (hidden) {outcome}");
+        }
+    }
+    let mut secrets: Vec<&str> = p
+        .hooks
+        .pre_backup
+        .iter()
+        .chain(&p.hooks.post_backup)
+        .chain(&p.hooks.on_error)
+        .map(String::as_str)
+        .collect();
+    for source in [
+        p.vault.as_ref().map(|v| &v.password_source),
+        p.borg.as_ref().map(|b| &b.password_source),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let PasswordSource::Command { command } = source {
+            secrets.push(command);
+        }
+    }
+    for w in &p.webhooks {
+        secrets.push(&w.url);
+        secrets.extend(
+            w.headers
+                .iter()
+                .filter_map(|h| h.split_once(':').map(|(_, v)| v.trim())),
+        );
+    }
+    // The longest first, so one that contains another is hidden whole.
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = message.to_owned();
+    for s in secrets.into_iter().filter(|s| !s.is_empty()) {
+        out = out.replace(s, "(hidden)");
+    }
+    out
 }
 
 fn first_line(cmd: &str, args: &[&str]) -> String {
@@ -195,11 +255,52 @@ fn first_line(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_else(|| "not found".into())
 }
 
-/// A text for bug reports: versions, system, tools, the profile without secrets, and the
-/// recent runs with the last one's events. Folder paths are included.
-pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
-    let (pid, p) = state.load(&id)?;
-    let os = std::fs::read_to_string("/etc/os-release")
+/// One installed program of Flux Backup, as found on this computer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Component {
+    pub path: String,
+    /// What `--version` printed (the version number only), or `None` if it didn't run.
+    pub version: Option<String>,
+}
+
+/// What the About dialog shows: this program's version and the versions of the `flux`
+/// command and the helper it would run, which can differ after a partial upgrade.
+#[derive(Debug, Clone, Serialize)]
+pub struct About {
+    pub version: String,
+    pub cli: Component,
+    pub helper: Option<Component>,
+    /// The `flux` command or the helper reports another version than this program.
+    pub mismatch: bool,
+    pub os: String,
+    pub kernel: String,
+}
+
+/// The version number in a `--version` line: `flux 0.3.0` → `0.3.0`,
+/// `flux-helper 0.3.0 (protocol 3)` → `0.3.0`.
+pub fn version_of(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .nth(1)
+        .filter(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(str::to_owned)
+}
+
+fn component(path: PathBuf) -> Component {
+    let version = std::process::Command::new(&path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| version_of(String::from_utf8_lossy(&o.stdout).lines().next()?));
+    Component {
+        path: path.display().to_string(),
+        version,
+    }
+}
+
+fn os_name() -> String {
+    std::fs::read_to_string("/etc/os-release")
         .ok()
         .and_then(|t| {
             t.lines().find_map(|l| {
@@ -207,18 +308,58 @@ pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
                     .map(|v| v.trim_matches('"').to_owned())
             })
         })
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn describe(c: &Component) -> String {
+    format!(
+        "{} ({})",
+        c.version.as_deref().unwrap_or("didn't run"),
+        c.path
+    )
+}
+
+pub fn about_impl() -> About {
+    let cli = component(crate::flux_cli_path());
+    let helper = crate::client::helper_path().map(component);
+    let differs = |c: &Component| {
+        c.version
+            .as_deref()
+            .is_some_and(|v| v != flux_core::VERSION)
+    };
+    About {
+        version: flux_core::VERSION.to_owned(),
+        mismatch: differs(&cli) || helper.as_ref().is_some_and(differs),
+        cli,
+        helper,
+        os: os_name(),
+        kernel: first_line("uname", &["-r"]),
+    }
+}
+
+/// A text for bug reports: versions, system, tools, the profile without secrets, and the
+/// recent runs with the last one's events. Folder paths are included.
+pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
+    let (pid, p) = state.load(&id)?;
+    let os = os_name();
+    let about = about_impl();
     let rsync = flux_compat::tools::rsync_status();
     let borg = flux_compat::tools::borg_status();
     let mut out = format!(
-        "Flux Backup diagnostics ({})\n\nFlux Backup {}, {} profiles\nSystem: {os}, kernel {}\nrsync: {}\nborg: {}\nssh: {}\n\n",
+        "Flux Backup diagnostics ({})\n\nFlux Backup {}, {} profiles\nflux command: {}\nhelper: {}\nSystem: {os}, kernel {}\nrsync: {}\nborg: {}\nssh: {}\n\n",
         Timestamp::now(),
         flux_core::VERSION,
         match state.scope() {
             Scope::User => "user",
             Scope::System => "system",
         },
-        first_line("uname", &["-r"]),
+        describe(&about.cli),
+        about
+            .helper
+            .as_ref()
+            .map(describe)
+            .unwrap_or_else(|| "not installed".into()),
+        about.kernel,
         rsync.version.as_deref().unwrap_or("not found"),
         borg.version.as_deref().unwrap_or("not found"),
         first_line("ssh", &["-V"]),
@@ -245,7 +386,7 @@ pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
             r.snapshot.as_deref().unwrap_or("-"),
             r.error
                 .as_deref()
-                .map(|e| format!("  error: {e}"))
+                .map(|e| format!("  error: {}", scrubbed(e, &p)))
                 .unwrap_or_default()
         ));
     }
@@ -257,9 +398,17 @@ pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
         let events = runlog::run_events(&state.paths, &pid, &last.run_id);
         let skip = events.len().saturating_sub(80);
         for e in events.iter().skip(skip) {
+            let mut e = e.clone();
+            match &mut e.event {
+                flux_core::progress::Event::Info { message }
+                | flux_core::progress::Event::Warning { message, .. } => {
+                    *message = scrubbed(message, &p);
+                }
+                _ => {}
+            }
             out.push_str(&format!(
                 "{}\n",
-                serde_json::to_string(e).unwrap_or_default()
+                serde_json::to_string(&e).unwrap_or_default()
             ));
         }
     }
@@ -270,6 +419,10 @@ pub fn diagnostics_impl(state: &Service, id: String) -> Result<String> {
 pub struct Health {
     /// "warning" or "danger".
     pub level: &'static str,
+    /// What it's about, for filters: `overdue`, `failing`, `low_space`, `unplugged`,
+    /// `source_missing`, `destination_failing`, `restore_test_failed`, `unverified`,
+    /// `unusual`.
+    pub kind: &'static str,
     pub text: String,
     /// What to do about it.
     pub hint: Option<String>,
@@ -306,6 +459,91 @@ fn days(d: Duration) -> String {
     }
 }
 
+/// The latest unusual changes not yet dismissed ("This was me"), from the history.
+pub fn open_unusual(
+    paths: &flux_core::Paths,
+    id: &ProfileId,
+    runs: &[RunRecord],
+) -> Option<flux_runner::unusual::UnusualReport> {
+    let run = runs.iter().find(|r| r.unusual.is_some())?;
+    (!flux_runner::unusual_dismissed(paths, id, run))
+        .then(|| run.unusual.clone())
+        .flatten()
+}
+
+/// Unusual changes in words.
+pub fn unusual_health(u: &flux_runner::unusual::UnusualReport) -> Health {
+    Health {
+        kind: "unusual",
+        level: "danger",
+        text: format!(
+            "Unusual changes in snapshot {}: {}.",
+            u.snapshot,
+            u.signals.join("; ")
+        ),
+        hint: Some(
+            "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”."
+                .into(),
+        ),
+    }
+}
+
+/// Restore tests in words: the last one failed, or a passing one is overdue.
+pub fn restore_test_health(
+    p: &Profile,
+    state: &flux_runner::restore_test::TestState,
+    runs: &[RunRecord],
+    now: Timestamp,
+) -> Vec<Health> {
+    use flux_runner::restore_test::{self, TestResult};
+    let mut out = Vec::new();
+    if let Some(last) = state.history.last()
+        && last.result == TestResult::Failed
+    {
+        out.push(Health {
+            kind: "restore_test_failed",
+            level: "danger",
+            text: format!(
+                "The last restore test failed: {}.",
+                last.error.clone().unwrap_or_else(|| {
+                    last.problems
+                        .iter()
+                        .find(|x| x.problem.is_failure())
+                        .map(|x| format!("{} {}", x.path, x.problem.words()))
+                        .unwrap_or_else(|| "some files have problems".into())
+                })
+            ),
+            hint: Some(
+                "Check the backup (Overview › Check backups), and run another backup.".into(),
+            ),
+        });
+    } else {
+        let oldest_good = runs
+            .iter()
+            .rev()
+            .find(|r| {
+                matches!(
+                    r.status,
+                    RunStatus::Completed | RunStatus::CompletedWithErrors
+                )
+            })
+            .map(|r| r.finished);
+        if let Some(days) = restore_test::overdue(&p.restore_test, state, oldest_good, now) {
+            out.push(Health {
+                kind: "unverified",
+                level: "warning",
+                text: if state.last_passed.is_some() {
+                    format!("No restore test has passed for {days} days.")
+                } else {
+                    "No restore test has passed yet.".into()
+                },
+                hint: Some("Test a restore now, from the Overview.".into()),
+            });
+        }
+    }
+    out
+}
+
 /// Things worth knowing about a profile, in words: no recent backup, the drive not
 /// connected, repeated failures, little space left.
 pub fn health(
@@ -335,6 +573,7 @@ pub fn health(
             |n| n.to_string_lossy().into_owned(),
         );
         out.push(Health {
+            kind: "unplugged",
             level: "warning",
             text: match last_ok {
                 Some(r) => format!(
@@ -348,6 +587,80 @@ pub fn health(
         unplugged = true;
     }
 
+    // A source's drive missed the last backups (they kept, or left out, its files).
+    for src in &p.sources.paths {
+        let missed = runs
+            .iter()
+            .filter(|r| !matches!(r.status, RunStatus::Skipped | RunStatus::DryRun))
+            .take_while(|r| r.sources_missing.contains(src))
+            .count();
+        if missed == 0 {
+            continue;
+        }
+        let name = src.file_name().map_or_else(
+            || src.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let kept = matches!(p.engine, flux_core::Engine::Vault)
+            || (p.engine == flux_core::Engine::Mirror && matches!(p.target, Target::Local { .. }));
+        out.push(Health {
+            kind: "source_missing",
+            level: if missed >= 3 { "danger" } else { "warning" },
+            text: format!(
+                "The drive with {name} wasn't connected for the last {}. {}",
+                if missed == 1 {
+                    "backup".to_owned()
+                } else {
+                    format!("{missed} backups")
+                },
+                if kept {
+                    "Its files were kept as they were before; changes since then aren't backed up."
+                } else {
+                    "Those snapshots don't have it; earlier ones still do."
+                }
+            ),
+            hint: Some(format!(
+                "Connect the drive with {} before the next backup.",
+                src.display()
+            )),
+        });
+    }
+
+    // A destination that keeps failing (the main one is judged below).
+    for d in &p.destinations {
+        let results: Vec<_> = runs
+            .iter()
+            .filter(|r| !matches!(r.status, RunStatus::Skipped | RunStatus::DryRun))
+            .filter_map(|r| r.destinations.iter().find(|x| x.name == d.name))
+            .collect();
+        let failed = results
+            .iter()
+            .take_while(|x| x.status == RunStatus::Failed)
+            .count();
+        if failed > 0 {
+            // A warning: the other copies are still made (the main one is judged below).
+            out.push(Health {
+                kind: "destination_failing",
+                level: "warning",
+                // The error itself is in Activity and on the place's row: the sentence
+                // says what happened and what to do.
+                text: format!(
+                    "The copy on {} failed {}.",
+                    d.label(),
+                    if failed == 1 {
+                        "in the last backup".to_owned()
+                    } else {
+                        format!("in the last {failed} backups")
+                    },
+                ),
+                hint: Some(format!(
+                    "Check that {} is reachable; the other places are fine.",
+                    d.label()
+                )),
+            });
+        }
+    }
+
     // Repeated failures.
     let failed = runs
         .iter()
@@ -355,6 +668,7 @@ pub fn health(
         .count();
     if failed >= 2 {
         out.push(Health {
+            kind: "failing",
             level: "danger",
             text: format!("The last {failed} backups failed."),
             hint: Some("Open Activity to see why, or Copy diagnostics to ask for help.".into()),
@@ -365,6 +679,7 @@ pub fn health(
     let limit = overdue_after(p);
     match last_ok {
         Some(r) if since(r.finished) > limit && !unplugged => out.push(Health {
+            kind: "overdue",
             level: "warning",
             text: format!("No successful backup for {}.", days(since(r.finished))),
             hint: Some(if p.schedule.trigger == Trigger::Manual {
@@ -374,6 +689,7 @@ pub fn health(
             }),
         }),
         None if !runs.is_empty() && failed < 2 => out.push(Health {
+            kind: "overdue",
             level: "warning",
             text: "No backup has succeeded yet.".into(),
             hint: Some("Open Activity to see what happened.".into()),
@@ -386,6 +702,7 @@ pub fn health(
         && f < (5 << 30)
     {
         out.push(Health {
+            kind: "low_space",
             level: if f < (1 << 30) { "danger" } else { "warning" },
             text: format!(
                 "Only {} free where the backups go.",
@@ -399,6 +716,7 @@ pub fn health(
         && d < 30
     {
         out.push(Health {
+            kind: "low_space",
             level: "warning",
             text: format!(
                 "At the rate it's been filling, the backup drive is full in about {}.",
@@ -416,6 +734,141 @@ pub fn health(
 mod tests {
     use super::*;
     use flux_runner::Trigger as RunTrigger;
+
+    #[test]
+    fn a_failing_copy_is_a_warning() {
+        let mut p = Profile::new(
+            "t",
+            Target::Local {
+                path: "/nonexistent-but-unchecked".into(),
+                fs_uuid: None,
+            },
+            vec!["/home/me".into()],
+        );
+        p.destinations.push(flux_core::profile::Destination {
+            name: "nas".into(),
+            label: Some("Office NAS".into()),
+            engine: flux_core::Engine::Rsync,
+            target: Target::Local {
+                path: "/srv".into(),
+                fs_uuid: None,
+            },
+            offsite: true,
+            mode: Default::default(),
+            vault: None,
+            rsync: None,
+            borg: None,
+        });
+        let with = |status: RunStatus| {
+            let mut r = run(RunStatus::Completed, 0);
+            r.destinations = vec![flux_runner::runlog::DestinationRun {
+                name: "nas".into(),
+                status,
+                snapshot: None,
+                error: Some("no route to host.".into()),
+                stats: None,
+            }];
+            r
+        };
+        let now = NOW.with(|n| *n);
+        let h = health(
+            &p,
+            &[
+                with(RunStatus::Failed),
+                with(RunStatus::Failed),
+                with(RunStatus::Completed),
+            ],
+            None,
+            None,
+            now,
+        );
+        let copy: Vec<_> = h.iter().filter(|x| x.text.contains("Office NAS")).collect();
+        assert_eq!(copy.len(), 1, "{h:?}");
+        assert_eq!(copy[0].level, "warning");
+        assert_eq!(
+            copy[0].text,
+            "The copy on Office NAS failed in the last 2 backups."
+        );
+        let h = health(&p, &[with(RunStatus::Completed)], None, None, now);
+        assert!(!h.iter().any(|x| x.text.contains("Office NAS")));
+    }
+
+    #[test]
+    fn a_source_drive_missing_is_said() {
+        let src = std::path::PathBuf::from("/mnt/photos");
+        let mut p = Profile::new(
+            "t",
+            Target::Ssh {
+                user: None,
+                host: "nas".into(),
+                port: None,
+                path: "/srv".into(),
+                identity_file: None,
+                ssh_options: Vec::new(),
+                bandwidth_limit: None,
+            },
+            vec!["/home/me".into(), src.clone()],
+        );
+        p.engine = flux_core::Engine::Vault;
+        let missed = |n: usize| -> Vec<RunRecord> {
+            let mut v: Vec<RunRecord> = (0..5)
+                .map(|i| {
+                    let mut r = run(RunStatus::Completed, i);
+                    if (i as usize) < n {
+                        r.sources_missing = vec![src.clone()];
+                    }
+                    r
+                })
+                .collect();
+            v.insert(0, run(RunStatus::Skipped, 0)); // skips don't count either way
+            v
+        };
+        let now = NOW.with(|n| *n);
+        assert!(health(&p, &missed(0), None, None, now).is_empty());
+        let h = health(&p, &missed(1), None, None, now);
+        assert_eq!(h.len(), 1);
+        assert!(
+            h[0].text
+                .starts_with("The drive with photos wasn't connected for the last backup."),
+            "{}",
+            h[0].text
+        );
+        assert!(h[0].text.contains("kept as they were"));
+        let h = health(&p, &missed(3), None, None, now);
+        assert_eq!(h[0].level, "danger");
+        assert!(h[0].text.contains("last 3 backups"));
+    }
+
+    #[test]
+    fn version_lines() {
+        assert_eq!(version_of("flux 0.3.0").as_deref(), Some("0.3.0"));
+        assert_eq!(
+            version_of("flux-helper 1.0.0 (protocol 3)").as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(version_of("flux"), None);
+        assert_eq!(version_of("usage: flux [OPTIONS]"), None);
+    }
+
+    #[test]
+    fn components_report_their_version_or_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("flux");
+        let bad = tmp.path().join("broken");
+        assert!(flux_transport::testing::executable(
+            &good,
+            "#!/bin/sh\necho 'flux 9.9.9'\n"
+        ));
+        assert!(flux_transport::testing::executable(
+            &bad,
+            "#!/bin/sh\nexit 1\n"
+        ));
+        let c = component(good.clone());
+        assert_eq!(c.version.as_deref(), Some("9.9.9"));
+        assert_eq!(c.path, good.display().to_string());
+        assert_eq!(component(bad).version, None);
+        assert_eq!(component(tmp.path().join("missing")).version, None);
+    }
 
     thread_local! {
         /// One clock for a whole test.
@@ -438,6 +891,10 @@ mod tests {
             warnings: 0,
             hooks: vec![],
             free_after: None,
+            sources_missing: Vec::new(),
+            destinations: Vec::new(),
+            unusual: None,
+            performance: None,
         }
     }
 
@@ -474,6 +931,7 @@ mod tests {
         );
         assert_eq!(h.len(), 1);
         assert!(h[0].text.contains("9 days"), "{:?}", h);
+        assert_eq!(h[0].kind, "overdue", "for the Missed filter");
         let h = health(
             &p,
             &[
@@ -485,7 +943,10 @@ mod tests {
             None,
             now,
         );
-        assert!(h.iter().any(|x| x.text == "The last 2 backups failed."));
+        assert!(
+            h.iter()
+                .any(|x| x.text == "The last 2 backups failed." && x.kind == "failing")
+        );
         let h = health(
             &p,
             &[run(RunStatus::Completed, 0)],
@@ -493,14 +954,14 @@ mod tests {
             None,
             now,
         );
-        assert_eq!(h[0].level, "danger");
+        assert_eq!((h[0].level, h[0].kind), ("danger", "low_space"));
         p.target = Target::Local {
             path: "/nonexistent/BackupDisk".into(),
             fs_uuid: None,
         };
         let h = health(&p, &[run(RunStatus::Completed, 0)], None, None, now);
         assert!(
-            h[0].text.starts_with("BackupDisk isn't connected"),
+            h[0].text.starts_with("BackupDisk isn't connected") && h[0].kind == "unplugged",
             "{:?}",
             h
         );
@@ -537,6 +998,13 @@ mod tests {
             vec!["/home/me".into()],
         );
         p.hooks.pre_backup = vec!["curl -H 'token: secret' …".into()];
+        p.webhooks = vec![flux_core::webhook::Webhook {
+            url: "https://hooks.slack.com/services/T0/B0/XYZsecret".into(),
+            preset: flux_core::webhook::Preset::Slack,
+            events: Vec::new(),
+            headers: vec!["Authorization: Bearer topsecret".into()],
+            enabled: true,
+        }];
         p.vault = Some(flux_core::profile::VaultOptions {
             password_source: PasswordSource::Command {
                 command: "echo hunter2".into(),
@@ -544,6 +1012,30 @@ mod tests {
             ..Default::default()
         });
         let t = redacted(&p).to_toml().unwrap();
+        assert!(!t.contains("XYZsecret") && !t.contains("topsecret"), "{t}");
+        assert!(t.contains("Authorization: (hidden)"));
         assert!(!t.contains("secret") && !t.contains("hunter2"), "{t}");
+        // What a run says is scrubbed of the same things.
+        for (said, shown) in [
+            (
+                "pre_backup hook `curl -H 'token: secret' …` ok:\ntoken accepted: secret",
+                "pre_backup hook (hidden) ok",
+            ),
+            (
+                "on_error hook `curl -H 'token: secret' …` failed:\n",
+                "on_error hook (hidden) failed",
+            ),
+            (
+                "webhook https://hooks.slack.com/services/T0/B0/XYZsecret: timed out",
+                "webhook (hidden): timed out",
+            ),
+            (
+                "password command failed: `echo hunter2` exited with 1",
+                "password command failed: `(hidden)` exited with 1",
+            ),
+            ("copied 12 files", "copied 12 files"),
+        ] {
+            assert_eq!(scrubbed(said, &p), shown);
+        }
     }
 }

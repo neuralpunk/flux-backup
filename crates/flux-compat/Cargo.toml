@@ -27,6 +27,8 @@ toml.workspace = true
 zeroize = "1.9"
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+flux-fs.workspace = true
 tempfile.workspace = true
 
 [lints]

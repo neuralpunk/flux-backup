@@ -1,11 +1,17 @@
 <script lang="ts">
+  import VaultSecurity from "./VaultSecurity.svelte";
+  import DestinationDialog from "./DestinationDialog.svelte";
+  import WebhookList from "./WebhookList.svelte";
+  import RuleTester from "./RuleTester.svelte";
   import { tick, untrack } from "svelte";
   import { api, inTauri, pickFile, pickFolder } from "../api";
   import StorageChoice from "./StorageChoice.svelte";
   import Modal from "./Modal.svelte";
   import { app } from "../state.svelte";
   import { bytes, count, dateTime } from "../format";
-  import { ApiError, SYSTEM_PREFIX, engineLabel, isCompat, isSystem, type Drive, type Engine, type Estimate, type Issue, type PasswordSource, type PreviewRow, type Profile, type Suggestion, type BitProfile, type TargetTest } from "../types";
+  import { sizeLabel } from "../size";
+  import { intervalParts, intervalText, type IntervalUnit } from "../interval";
+  import { ApiError, SYSTEM_PREFIX, engineLabel, isCompat, isSystem, type Drive, type Engine, type Estimate, type Issue, type PasswordSource, type PreviewRow, type Profile, type WhenMissing, type Suggestion, type BitProfile, type TargetTest } from "../types";
   import Field from "./form/Field.svelte";
   import ListEditor from "./form/ListEditor.svelte";
   import NumberInput from "./form/NumberInput.svelte";
@@ -20,9 +26,17 @@
   let {
     id = null,
     system = false,
+    template = null,
     onsaved,
     oncancel,
-  }: { id?: string | null; system?: boolean; onsaved: (id: string) => void; oncancel: () => void } = $props();
+  }: {
+    id?: string | null;
+    system?: boolean;
+    /** A new backup starts from this template. */
+    template?: string | null;
+    onsaved: (id: string) => void;
+    oncancel: () => void;
+  } = $props();
   // The editor is re-created for each profile, so these capture `id` once on purpose.
   const creating = untrack(() => id == null);
   /** A system (root) profile, served by the helper. */
@@ -33,13 +47,34 @@
   let profileId = $state(untrack(() => (id ?? "").replace(SYSTEM_PREFIX, "")));
   let idTouched = $state(false);
   /** The id field is shown (new profiles: after "Change"). */
+  // What to keep: presets for most people, the numbers for whoever wants them.
+  type KeepNumbers = Pick<Profile["retention"], "keep_last" | "keep_hourly" | "keep_daily" | "keep_weekly" | "keep_monthly" | "keep_yearly">;
+  const keepPresets: { id: string; label: string; text: string; v: KeepNumbers }[] = [
+    { id: "recommended", label: "Recommended", text: "Everything from the last day, then one a day for a week, a week for a month, a month for a year and a year for five years.", v: { keep_last: 1, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 12, keep_yearly: 5 } },
+    { id: "less", label: "Save space", text: "Everything from the last day, then one a day for a week, a week for a month and a month for three months.", v: { keep_last: 1, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 3, keep_yearly: 0 } },
+    { id: "more", label: "Keep longer", text: "One an hour for a day, one a day for two weeks, a week for two months, a month for two years and a year for ten years.", v: { keep_last: 1, keep_hourly: 24, keep_daily: 14, keep_weekly: 8, keep_monthly: 24, keep_yearly: 10 } },
+  ];
+  let customKeep = $state(false);
+  function keepPresetOf(r: Profile["retention"]): string | null {
+    if (r.max_age || r.min_free_space || (r.keep_within && r.keep_within !== "1day")) return null;
+    const p = keepPresets.find((k) => (Object.keys(k.v) as (keyof KeepNumbers)[]).every((f) => r[f] === k.v[f]));
+    return p?.id ?? null;
+  }
+  function applyKeepPreset(id: string) {
+    const p = keepPresets.find((k) => k.id === id);
+    if (!draft || !p) return;
+    Object.assign(draft.retention, p.v, { keep_within: "1day", max_age: null, min_free_space: null });
+    customKeep = false;
+  }
+  /** Showing every drive to move an existing backup elsewhere. */
+  let changingWhere = $state(false);
   let editingId = $state(false);
   let issues = $state<Issue[]>([]);
   let saving = $state(false);
   let loadError = $state<string | null>(null);
 
   $effect(() => {
-    (creating ? api.newProfile(sys) : api.getProfile(id!)).then(
+    (creating ? (template ? api.newFromTemplate(template, sys) : api.newProfile(sys)) : api.getProfile(id!)).then(
       (e) => {
         normalize(e.profile);
         draft = e.profile;
@@ -57,7 +92,8 @@
   /** The new profile as it was before importing, for "Start from scratch". */
   let blank: Profile | null = null;
   $effect(() => {
-    if (!creating || sys) return;
+    // Another way to start: offered unless a specific template was chosen.
+    if (!creating || sys || (template && template !== "home" && template !== "blank")) return;
     api.backintimeProfiles().then((v) => (bitProfiles = v), () => {});
   });
   function useBackInTime(b: BitProfile) {
@@ -138,7 +174,7 @@
   // The main page asks the three questions; every further group of settings is a row
   // that opens just that group (docs/UX_PRINCIPLES.md, rule 7). Nothing stays "expanded":
   // the editor always opens on the main page.
-  type Page = "exclusions" | "storage" | "connection" | "schedule" | "retention" | "hooks" | "options";
+  type Page = "exclusions" | "storage" | "security" | "connection" | "network" | "schedule" | "retention" | "tests" | "webhooks" | "hooks" | "options";
   const demoPage = untrack(() => (!inTauri && typeof location !== "undefined" ? new URLSearchParams(location.search).get("page") : null));
   // Another view may ask for one group (e.g. a notice's "Change the size limit").
   const askedPage = untrack(() => {
@@ -150,20 +186,28 @@
   const pageTitle: Record<Page, { title: string; text: string }> = {
     exclusions: { title: "Leave some things out", text: "Files and folders that aren't worth backing up: caches, downloads, build output." },
     storage: { title: "How backups are stored", text: "Flux's own formats, or a standard tool's so the backups work without Flux." },
+    security: { title: "Security", text: "How well the Vault's password resists guessing, an optional unlock file, and what the app and the drive give away." },
     connection: { title: "Connection details", text: "How Flux reaches the server. Empty fields use your ssh settings." },
+    network: { title: "Network", text: "When backups to a server may use the network, and how fast they may upload." },
+    webhooks: { title: "Notify elsewhere", text: "Tell your phone, a chat or a monitoring service how this backup goes (besides the webhooks in Preferences, for every backup)." },
+    tests: { title: "Restore tests", text: "Now and then, restore some files into a temporary folder and check them against the backup: proof it can be read back." },
     schedule: { title: "More schedule options", text: "Other timings, when to wait, and upkeep after scheduled backups." },
-    retention: { title: "Keep and remove snapshots", text: "Which snapshots stay. Pinned and named ones always do." },
+    retention: { title: "Keep and remove snapshots", text: "Which snapshots stay, and for how long." },
     hooks: { title: "Hooks", text: "Shell commands run around each backup, one per line. A failing “before” command cancels the backup." },
     options: { title: "Performance and behaviour", text: "What's copied along with files, how hard Flux works, and what it tells you." },
   };
   /** The page a setting lives on (`null`: the main page). */
   function pageOf(field: string): Page | null {
     if (/^target\.(port|identity_file|ssh_options|bandwidth_limit)/.test(field)) return "connection";
+    if (/^vault\.(hashing|hide_sizes|lock_after_minutes|unlock_file)/.test(field)) return "security";
     if (/^(vault|borg|rsync)/.test(field)) return "storage";
     if (/^sources\.(exclude|exclude_larger_than|exclude_caches|exclude_if_present|one_file_system)/.test(field)) return "exclusions";
     if (/^schedule\.(catch_up|skip_on_battery|every)/.test(field)) return "schedule";
     if (field.startsWith("retention")) return "retention";
     if (field.startsWith("hooks")) return "hooks";
+    if (field.startsWith("network")) return "network";
+    if (field.startsWith("restore_test")) return "tests";
+    if (field.startsWith("webhooks")) return "webhooks";
     if (field.startsWith("options")) return "options";
     return null;
   }
@@ -346,7 +390,11 @@
   let timeOfDay = $state("20:00");
   let weekday = $state("Sun");
   let everyN = $state(4);
-  let everyUnit = $state<"min" | "h" | "d">("h");
+  let everyUnit = $state<IntervalUnit>("h");
+  /** The interval is edited as text: the controls can't show it. */
+  let everyAsText = $state(false);
+  /** The controls' values as last read from, or written to, the profile. */
+  let everyShown = "";
   let scheduleParsed = false;
 
   $effect(() => {
@@ -360,8 +408,15 @@
     else if ((m = c.match(/^Mon\.\.Fri \*-\*-\* (\d\d):(\d\d)(:00)?$/))) (preset = "weekdays"), (timeOfDay = `${m[1]}:${m[2]}`);
     else if ((m = c.match(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (\d\d):(\d\d)(:00)?$/))) (preset = "weekly"), (weekday = m[1]!), (timeOfDay = `${m[2]}:${m[3]}`);
     else preset = "custom";
-    const e = (draft.schedule.every ?? "").match(/^(\d+)\s*(min|m|h|d)/);
-    if (e) (everyN = Number(e[1])), (everyUnit = e[2] === "m" ? "min" : (e[2] as "min" | "h" | "d"));
+    // The whole interval, as stored ("1h 30m" for 90 minutes): never just its first part.
+    const every = draft.schedule.every ?? "";
+    const parts = intervalParts(every);
+    if (parts) (everyN = parts.n), (everyUnit = parts.unit);
+    // One the number-and-unit control can't show (seconds, say) is shown as it is.
+    everyAsText = every.trim() !== "" && !parts;
+    everyShown = `${everyN}|${everyUnit}`;
+    // An interval schedule without an interval: what the controls show is what it gets.
+    if (draft.schedule.trigger === "interval" && !every.trim()) applyEvery();
   });
 
   function applyCalendar() {
@@ -371,13 +426,16 @@
       preset === "hourly" ? "hourly" : preset === "daily" ? `*-*-* ${t}` : preset === "weekdays" ? `Mon..Fri *-*-* ${t}` : `${weekday} *-*-* ${t}`;
   }
   function applyEvery() {
-    if (draft) draft.schedule.every = `${Math.max(1, everyN)}${everyUnit}`;
+    if (!draft) return;
+    draft.schedule.every = intervalText(everyN, everyUnit);
+    everyShown = `${everyN}|${everyUnit}`;
+    everyAsText = false;
   }
-  // Keep `every` in step with the interval controls.
+  // Keep `every` in step with the interval controls: only when they were changed. Just
+  // opening the settings must never rewrite the interval.
   $effect(() => {
-    void everyN;
-    void everyUnit;
-    if (draft?.schedule.trigger === "interval" && scheduleParsed) applyEvery();
+    const now = `${everyN}|${everyUnit}`;
+    if (draft?.schedule.trigger === "interval" && scheduleParsed && now !== everyShown) applyEvery();
   });
 
   function setTrigger(t: "manual" | "calendar" | "interval") {
@@ -460,7 +518,7 @@
   const exclusionsSummary = $derived.by(() => {
     if (!draft) return "";
     const s = draft.sources;
-    const parts = [s.exclude.length ? listSummary(s.exclude, "") : "", s.exclude_caches ? "caches" : "", s.exclude_larger_than ? `files over ${s.exclude_larger_than}` : ""].filter(Boolean);
+    const parts = [s.exclude.length ? listSummary(s.exclude, "") : "", s.exclude_caches ? "caches" : "", s.exclude_larger_than ? `files over ${sizeLabel(s.exclude_larger_than)}` : ""].filter(Boolean);
     return parts.length ? parts.join(" · ") : "Nothing left out";
   });
   const storageSummary = $derived.by(() => {
@@ -489,6 +547,30 @@
     const parts = [sc.trigger === "interval" ? `every ${sc.every}` : preset === "custom" ? "custom times" : preset === "weekdays" ? "weekdays" : "", sc.trigger === "calendar" && sc.catch_up ? "catches up" : "", sc.skip_on_battery ? "waits for power" : "", sc.skip_on_metered && draft.target.kind === "ssh" ? "not on metered" : "", draft.maintenance?.verify_monthly ? "verifies monthly" : ""].filter(Boolean);
     return parts.join(" · ") || "Standard";
   });
+  /** The backup, or one of its places, is on a server. */
+  const usesServer = $derived(!!draft && (draft.target.kind === "ssh" || (draft.destinations ?? []).some((d) => d.target.kind === "ssh")));
+  const networkSummary = $derived.by(() => {
+    const n = draft?.network;
+    const parts: string[] = [];
+    if (n?.wifi_only?.length) parts.push(`only on ${n.wifi_only.join(", ")}`);
+    if (n?.wifi_never?.length) parts.push(`never on ${n.wifi_never.join(", ")}`);
+    if (n?.bandwidth?.length) parts.push(`${n.bandwidth.length} upload limit${n.bandwidth.length === 1 ? "" : "s"}`);
+    return parts.join(" · ") || "Any network, full speed";
+  });
+  const testsSummary = $derived.by(() => {
+    const t = draft?.restore_test;
+    const every = t?.every ?? "off";
+    if (every === "off") return "Only when you ask";
+    const what = t?.mode === "full" ? "everything" : t?.mode === "percent" ? `${t.percent ?? 5}% of it` : t?.mode === "rolling" ? "every file once a month" : `${t?.files ?? 10} files`;
+    return `${every === "backup" ? "After every backup" : every === "week" ? "Weekly" : "Monthly"} · ${what}`;
+  });
+  function setTest(patch: NonNullable<Profile["restore_test"]>) {
+    if (draft) draft.restore_test = { ...(draft.restore_test ?? {}), ...patch };
+  }
+  /** Change `[network]` (created on the first change, so an untouched profile stays as it was). */
+  function setNet(patch: NonNullable<Profile["network"]>) {
+    if (draft) draft.network = { ...(draft.network ?? {}), ...patch };
+  }
   const hooksSummary = $derived.by(() => {
     const n = (draft?.hooks?.pre_backup?.length ?? 0) + (draft?.hooks?.post_backup?.length ?? 0) + (draft?.hooks?.on_error?.length ?? 0);
     return n === 0 ? "None" : n === 1 ? "1 command" : `${n} commands`;
@@ -603,6 +685,49 @@
     const d = drives.find((x) => x.mount_point === t.path);
     return d ? `${d.label} · ${bytes(d.free)} free` : t.path || "Not chosen yet";
   });
+  const securitySummary = $derived.by(() => {
+    const v = draft?.vault;
+    if (!v) return "";
+    const h = v.hashing?.level ?? "standard";
+    const parts = [h === "standard" ? "Standard hashing" : h === "custom" ? "Custom hashing" : `${h[0]!.toUpperCase()}${h.slice(1)} hashing`];
+    if (v.unlock_file) parts.push("unlock file");
+    if (v.hide_sizes) parts.push("sizes hidden");
+    if (v.lock_after_minutes) parts.push(`locks after ${v.lock_after_minutes} min`);
+    return parts.join(" · ");
+  });
+  // Destinations are added and removed at once (they may need a password), and the
+  // editor takes the saved list as its own.
+  let addingDest = $state(false);
+  let removingDest = $state<string | null>(null);
+  function syncDestinations(saved: Profile) {
+    if (!draft) return;
+    draft.destinations = saved.destinations ?? [];
+    const base = JSON.parse(initial) as Profile;
+    base.destinations = saved.destinations ?? [];
+    initial = JSON.stringify(base);
+    void app.refresh();
+  }
+  async function removeDest(name: string) {
+    if (!id) return;
+    removingDest = name;
+    try {
+      syncDestinations(await api.removeDestination(id, name));
+      app.toast("ok", "Removed. The backups already made there stay where they are.");
+    } catch (e) {
+      app.toast("bad", (e as Error).message);
+    } finally {
+      removingDest = null;
+    }
+  }
+  /** The Vault changed and the saved profile with it (Security): take the values as saved,
+   * so they neither count as unsaved changes nor get overwritten by an older draft. */
+  function syncSaved(fields: Partial<NonNullable<Profile["vault"]>>) {
+    if (!draft?.vault) return;
+    Object.assign(draft.vault, fields);
+    const base = JSON.parse(initial) as Profile;
+    if (base.vault) Object.assign(base.vault, fields);
+    initial = JSON.stringify(base);
+  }
   const sourceWords: Record<string, string> = { keyring: "kept in your desktop keyring", prompt: "asked every time", file: "kept in a key file", command: "from your command" };
   const protectSummary = $derived.by(() => {
     if (!draft) return "";
@@ -738,6 +863,37 @@
             {#if draft}
             <ListEditor bind:items={draft.sources.paths} placeholder="/home/you" icon="folder" label="Folders to back up" pick={() => pickFolder("Add a folder to back up")} after={sourcesAfter} />
             {#each at("sources.paths") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+            {@const vols = (draft.sources.volumes ?? []).filter((v) => draft!.sources.paths.includes(v.path))}
+            {#if vols.length}
+              <div class="rows mt-3">
+                {#each vols as v (v.path)}
+                  <Row
+                    title={`${v.path.split("/").filter(Boolean).pop() ?? v.path} is on a drive of its own`}
+                    subtitle={v.when_missing === "skip"
+                      ? (draft.engine === "vault" || (draft.engine === "mirror" && draft.target.kind === "local") ? "If it isn't connected, the backup keeps its files as they were last time, and says so." : "If it isn't connected, the backup leaves it out, and says so. Earlier snapshots still have it.")
+                      : v.when_missing === "wait"
+                        ? "If it isn't connected, the backup waits up to an hour for it, then fails."
+                        : "If it isn't connected, the backup fails, so you notice."}
+                    icon="drive"
+                  >
+                    <select
+                      class="input w-auto min-w-48"
+                      value={v.when_missing}
+                      onchange={(e) => {
+                        v.when_missing = e.currentTarget.value as WhenMissing;
+                        if (v.when_missing !== "wait") v.wait_for = null;
+                      }}
+                      aria-label={`When ${v.path} isn't connected`}
+                    >
+                      <option value="skip">Back up the rest</option>
+                      <option value="wait">Wait for it</option>
+                      <option value="fail">Fail the backup</option>
+                    </select>
+                  </Row>
+                {/each}
+              </div>
+              <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">Flux recognises these drives, so an unplugged one is never mistaken for deleted files.</p>
+            {/if}
             {#if creating && draft.sources.paths.length}
               <div class="mt-2 flex items-start gap-2 px-0.5 text-[13px] text-fg-2" aria-live="polite">
                 <Icon name="gauge" size={15} class="mt-0.5 shrink-0 text-fg-muted" />
@@ -784,8 +940,10 @@
             {#if draft.target.kind === "local"}
               {@const target = draft.target}
               {@const custom = target.path && !drives.some((d) => d.mount_point === target.path)}
+              <!-- A backup that's set up shows its place; every drive only when changing it. -->
+              {@const all = creating || changingWhere || !target.path}
               <div class="rows" role="radiogroup" aria-label="Where to keep it">
-                {#each drives as d (d.mount_point)}
+                {#each drives.filter((d) => all || target.path === d.mount_point) as d (d.mount_point)}
                   {@const chosen = target.path === d.mount_point}
                   <button role="radio" aria-checked={chosen} class="row row-link" onclick={() => useDrive(d)}>
                     <Icon name="drive" size={17} class="shrink-0 text-fg-2" />
@@ -810,10 +968,17 @@
                 {:else if !drives.length && !target.path}
                   <div class="row text-[13.5px] text-fg-muted">No drive connected. Plug one in, or choose a folder.</div>
                 {/if}
-                <button class="row row-link text-fg-2" onclick={chooseFolder}>
-                  <Icon name="folder" size={17} class="shrink-0" />
-                  <span class="flex-1 font-medium">{drives.length || custom ? "Another folder…" : "Choose a folder…"}</span>
-                </button>
+                {#if all}
+                  <button class="row row-link text-fg-2" onclick={chooseFolder}>
+                    <Icon name="folder" size={17} class="shrink-0" />
+                    <span class="flex-1 font-medium">{drives.length || custom ? "Another folder…" : "Choose a folder…"}</span>
+                  </button>
+                {:else}
+                  <button class="row row-link text-fg-2" onclick={() => (changingWhere = true)}>
+                    <Icon name="refresh" size={16} class="shrink-0" />
+                    <span class="flex-1 font-medium">Change where it's kept…</span>
+                  </button>
+                {/if}
               </div>
               {#each [...at("target.path"), ...at("target.connected")] as i (i.message)}
                 <!-- A new profile without a target yet isn't an error, just the next step. -->
@@ -866,6 +1031,9 @@
                 </label>
               {/if}
               {@render pageRow("storage", "layers", storageSummary, "Flux's formats, or rsync and Borg so backups work without Flux")}
+              {#if draft.engine === "vault" && encrypted && draft.vault}
+                {@render pageRow("security", "shield", securitySummary, "Password hashing, an unlock file, hiding sizes")}
+              {/if}
             </div>
             {#if askPassword}
               <p class="mt-1.5 px-0.5 text-[12.5px] {pw && pw2 && pw !== pw2 ? 'text-danger' : 'text-fg-muted'}">
@@ -1031,10 +1199,32 @@
             <section id="sec-destination">
               <div class="flex items-end justify-between gap-3 pb-2">
                 <h2 class="group-title pb-0">Where to keep it</h2>
-                {@render whereKind()}
+                {#if creating || changingWhere || draft.target.kind === "ssh"}{@render whereKind()}{/if}
               </div>
               {@render whereList()}
               {@render protectRows()}
+            </section>
+            <section id="sec-copies">
+              <h2 class="group-title">Also keep copies elsewhere</h2>
+              <div class="rows">
+                {#each draft.destinations ?? [] as d (d.name)}
+                  <Row
+                    title={d.label || d.name}
+                    subtitle={`${d.target.kind === "local" ? d.target.path : `${d.target.user ? `${d.target.user}@` : ""}${d.target.host}:${d.target.path}`} · ${d.mode === "replicate" ? "copy of the first backup" : engineLabel[d.engine]}${d.offsite ? " · offsite" : ""}`}
+                    icon={d.target.kind === "local" ? "drive" : "server"}
+                  >
+                    <button class="btn" disabled={!!removingDest} title="Stops backing up there; the backups already made stay where they are" onclick={() => void removeDest(d.name)}>{removingDest === d.name ? "Removing…" : "Remove"}</button>
+                  </Row>
+                {/each}
+                <Row
+                  title="Add another place…"
+                  subtitle={draft.destinations?.length ? "Each backup goes to every place, one after the other." : "A second copy on another drive or a server: if one is damaged or lost, the other isn't."}
+                  icon="plus"
+                  onclick={creating ? undefined : () => (addingDest = true)}
+                  disabled={creating}
+                  reason="Available once this backup is set up."
+                />
+              </div>
             </section>
             <section id="sec-schedule">
               <h2 class="group-title">When</h2>
@@ -1043,13 +1233,18 @@
             <!-- Keep -->
             <section id="sec-retention">
               <h2 class="group-title">What to keep</h2>
-              <div class="rows">{@render pageRow("retention", "history", "", keepSummary)}</div>
+              <div class="rows">
+                {@render pageRow("retention", "history", "", keepSummary)}
+                {@render pageRow("tests", "shieldCheck", testsSummary, "Check now and then that files come back")}
+              </div>
             </section>
 
             <!-- More -->
             <section>
               <h2 class="group-title">More</h2>
               <div class="rows">
+                {#if usesServer}{@render pageRow("network", "server", networkSummary)}{/if}
+                {@render pageRow("webhooks", "external", draft.webhooks?.length ? `${draft.webhooks.length} webhook${draft.webhooks.length === 1 ? "" : "s"}` : "Only on this computer")}
                 {@render pageRow("hooks", "terminal", hooksSummary)}
                 {@render pageRow("options", "gauge", optionsSummary)}
                 {#if !creating && id}
@@ -1232,6 +1427,12 @@
                 <ListEditor bind:items={draft.sources.exclude_if_present!} placeholder=".nobackup" label="Marker files" />
               </Field>
             </section>
+            <section>
+              <h2 class="group-title">Check the rules</h2>
+              <RuleTester profile={draft} />
+            </section>
+          {:else if page === "security" && draft.vault}
+            <VaultSecurity bind:vault={draft.vault} id={creating ? null : (id ?? null)} name={draft.name} onsynced={syncSaved} />
           {:else if page === "storage"}
             <section>
               <StorageChoice engine={draft.engine} onchoose={(e) => setEngine(e)} />
@@ -1256,6 +1457,14 @@
                 <Row title="Compression: level {vault.compression_level}" subtitle="0 off · 3 fast (default) · 19 smallest">
                   <input type="range" min="0" max="19" class="w-40 accent-[var(--c-primary)]" bind:value={vault.compression_level} aria-label="Compression level" />
                 </Row>
+                {#if draft.target.kind === "local"}
+                  <Toggle
+                    row
+                    bind:checked={() => vault.keep_recovery_tool ?? true, (v) => (vault.keep_recovery_tool = v)}
+                    label="Keep the recovery tool on the drive"
+                    hint="A small program next to the Vault that lists, restores and checks your backups without Flux, on any Linux, with a note on using it."
+                  />
+                {/if}
               </div>
               {#if vault.encryption && vault.password_source.from === "file"}
                 {@const src = vault.password_source}
@@ -1349,14 +1558,21 @@
                 </Field>
               {:else if draft.schedule.trigger === "interval"}
                 <Field label="Every" issues={at("schedule.every")} hint="Counted from the last successful backup.">
-                  <div class="flex gap-2">
-                    <NumberInput bind:value={everyN} min={1} label="Interval" />
-                    <select class="input w-32" bind:value={everyUnit} aria-label="Unit">
-                      <option value="min">minutes</option>
-                      <option value="h">hours</option>
-                      <option value="d">days</option>
-                    </select>
-                  </div>
+                  {#if everyAsText}
+                    <div class="flex items-center gap-2">
+                      <input class="input w-48 font-mono text-[13px]" value={draft.schedule.every ?? ""} oninput={(e) => draft && (draft.schedule.every = opt(e.currentTarget.value))} aria-label="Interval" />
+                      <button type="button" class="btn" onclick={applyEvery}>Use minutes, hours or days</button>
+                    </div>
+                  {:else}
+                    <div class="flex gap-2">
+                      <NumberInput bind:value={everyN} min={1} label="Interval" />
+                      <select class="input w-32" bind:value={everyUnit} aria-label="Unit">
+                        <option value="min">minutes</option>
+                        <option value="h">hours</option>
+                        <option value="d">days</option>
+                      </select>
+                    </div>
+                  {/if}
                 </Field>
               {:else}
                 <p class="text-[13px] text-fg-muted">The main page sets hourly, daily and weekly backups. Pick one of these for other timings.</p>
@@ -1391,12 +1607,25 @@
           {:else if page === "retention"}
             {@const r = draft.retention}
             <div class="rows">
-              <Toggle row bind:checked={r.enabled} label="Remove old snapshots automatically" hint="The newest, pinned and named snapshots always stay." />
+              <Toggle row bind:checked={r.enabled} label="Remove old snapshots automatically" hint="The newest and pinned snapshots always stay." />
               {#if r.enabled}<Toggle row bind:checked={r.keep_named} label="Never remove named snapshots" />{/if}
             </div>
             {#if r.enabled}
+              {@const current = keepPresetOf(r)}
+              <section>
+                <h3 class="group-title">How long to keep them</h3>
+                <div class="segmented" role="radiogroup" aria-label="How long to keep snapshots">
+                  {#each keepPresets as kp (kp.id)}
+                    {@render choice(current === kp.id && !customKeep, kp.label, () => applyKeepPreset(kp.id))}
+                  {/each}
+                  {@render choice(current === null || customKeep, "Custom", () => (customKeep = true))}
+                </div>
+                {#if current && !customKeep}
+                  <p class="mt-2 px-0.5 text-[13px] text-fg-2">{keepPresets.find((k) => k.id === current)?.text}</p>
+                {/if}
+              </section>
+              {#if current === null || customKeep}
               <section class="card flex flex-col gap-4 px-6 py-5">
-                <h3 class="text-[14px] font-medium">Keep</h3>
                 <div class="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2.5 text-sm text-fg-2">
                   <span>The newest snapshots</span><NumberInput bind:value={r.keep_last} label="Keep last" />
                   <span>One per hour, for … hours</span><NumberInput bind:value={r.keep_hourly} label="Hourly" />
@@ -1418,13 +1647,54 @@
                 </div>
                 {#each at("retention").filter((i) => i.field === "retention") as i (i.message)}<p class="text-sm text-danger">{i.message}</p>{/each}
               </section>
-            {/if}
-            {#if preview}
-              <div class="rounded-lg bg-surface-3/50 p-1.5">
-                <div class="flex justify-between px-3 pt-2 pb-1 text-[13px]">
-                  <span class="text-fg-2">Your snapshots with these rules</span>
-                  <span class={previewRemoved ? "text-warning" : "text-fg-muted"}>{previewRemoved ? `${previewRemoved} of ${preview.length} would go` : `all ${preview.length} stay`}</span>
+              {/if}
+              <section>
+                <h3 class="group-title">Safety</h3>
+                <div class="rows">
+                  <Row title="Always keep at least" subtitle="Complete snapshots (with no files left out), whatever the rules above say." icon="shieldCheck">
+                    <span class="flex items-center gap-2 text-sm text-fg-2"><NumberInput bind:value={() => r.safety_floor ?? 1, (n) => (r.safety_floor = n)} min={0} max={100} label="Always keep at least" /> snapshots</span>
+                  </Row>
+                  <Toggle
+                    row
+                    icon="pause"
+                    bind:checked={() => (r.after_problems ?? "hold") === "hold", (on) => (r.after_problems = on ? "hold" : "prune")}
+                    label="After a backup with problems, keep everything"
+                    hint="If a backup fails or leaves something out, nothing is removed until one runs cleanly."
+                  />
+                  <Row title="Watch for unusual changes" subtitle="Warns when a backup looks like ransomware or a mistake (far more changes than usual, files suddenly encrypted) and keeps the snapshot before." icon="alert">
+                    <select class="input w-auto min-w-36" value={draft.unusual_changes ?? "normal"} onchange={(e) => draft && (draft.unusual_changes = e.currentTarget.value as "normal")} aria-label="Watch for unusual changes">
+                      <option value="normal">Normally</option>
+                      <option value="high">Closely</option>
+                      <option value="off">Not at all</option>
+                    </select>
+                  </Row>
                 </div>
+              </section>
+            {/if}
+            <section>
+              <h3 class="group-title">Activity history</h3>
+              <div class="rows">
+                <Row title="Keep the history of backups" subtitle="What Activity shows. Separate from snapshots: removing history never removes backups." icon="activity">
+                  <select
+                    class="input w-auto min-w-44"
+                    value={String(r.keep_history_days ?? "")}
+                    onchange={(e) => (r.keep_history_days = e.currentTarget.value ? Number(e.currentTarget.value) : null)}
+                    aria-label="Keep the history of backups"
+                  >
+                    <option value="">The last 1000 backups</option>
+                    <option value="30">For 30 days</option>
+                    <option value="90">For 3 months</option>
+                    <option value="365">For a year</option>
+                  </select>
+                </Row>
+              </div>
+            </section>
+            {#if preview}
+              <details class="group rounded-lg bg-surface-3/50 p-1.5">
+                <summary class="flex cursor-pointer list-none justify-between px-3 py-1.5 text-[13px] select-none [&::-webkit-details-marker]:hidden">
+                  <span class="flex items-center gap-1.5 text-fg-2"><Icon name="chevronRight" size={13} class="transition-transform group-open:rotate-90" /> Your snapshots with these rules</span>
+                  <span class={previewRemoved ? "text-warning" : "text-fg-muted"}>{previewRemoved ? `${previewRemoved} of ${preview.length} would go` : `all ${preview.length} stay`}</span>
+                </summary>
                 <ul class="max-h-56 overflow-y-auto text-[13px]">
                   {#each preview as row (row.id)}
                     <li class="flex items-center gap-3 rounded-md px-3 py-1.5 {row.keep ? '' : 'text-danger'}" title={row.keep ? row.reasons.join(", ") : row.expired ? "older than the limit" : "no rule keeps it"}>
@@ -1434,8 +1704,98 @@
                     </li>
                   {/each}
                 </ul>
-              </div>
+              </details>
             {/if}
+          {:else if page === "webhooks"}
+            <WebhookList hooks={draft.webhooks ?? []} onchange={(h) => draft && (draft.webhooks = h)} />
+            {#each at("webhooks") as i (i.message)}<p class="mt-1.5 text-[13px] text-danger">{i.message}</p>{/each}
+          {:else if page === "tests"}
+            {@const t = draft.restore_test ?? {}}
+            <section>
+              <h2 class="group-title">How often</h2>
+              <div class="segmented self-start" role="radiogroup" aria-label="How often">
+                {#each [["off", "Only when I ask"], ["backup", "After every backup"], ["week", "Weekly"], ["month", "Monthly"]] as [v, label] (v)}
+                  <button role="radio" aria-checked={(t.every ?? "off") === v} onclick={() => setTest({ every: v as "off" })}>{label}</button>
+                {/each}
+              </div>
+              <p class="mt-1.5 px-0.5 text-[12.5px] text-fg-muted">A test runs after a backup once it's due. To run one any time, use <em>Test a restore now</em> on the Overview.</p>
+            </section>
+            <section>
+              <h2 class="group-title">Which files</h2>
+              <div class="rows" role="radiogroup" aria-label="Which files">
+                {#each [["random_files", "Some files at random", "Quick. Pick how many."], ["percent", "A share of the backup", "Random files making up this much of its size."], ["rolling", "Every file once a month", "A different part each time, so every file is tested within 30 days."], ["full", "Everything", "Restores the whole snapshot: thorough, and as slow as a full restore."]] as [v, label, text] (v)}
+                  <button role="radio" aria-checked={(t.mode ?? "random_files") === v} class="row row-link items-start gap-3 py-3 text-left" onclick={() => setTest({ mode: v as "full" })}>
+                    <span class="min-w-0 flex-1">
+                      <span class="block font-medium">{label}</span>
+                      <span class="block text-[12.5px] text-fg-muted">{text}</span>
+                    </span>
+                    {#if v === "random_files" && (t.mode ?? "random_files") === v}
+                      <span class="flex items-center gap-2 text-sm text-fg-2"><NumberInput bind:value={() => t.files ?? 10, (n) => setTest({ files: n })} min={1} max={10000} label="Files" /> files</span>
+                    {:else if v === "percent" && t.mode === v}
+                      <span class="flex items-center gap-2 text-sm text-fg-2"><NumberInput bind:value={() => t.percent ?? 5, (n) => setTest({ percent: n })} min={1} max={100} label="Percent" /> %</span>
+                    {:else if (t.mode ?? "random_files") === v}
+                      <Icon name="check" size={18} class="mt-0.5" />
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            </section>
+            <section>
+              <div class="rows">
+                <Toggle row icon="diff" bind:checked={() => t.compare_with_source ?? false, (on) => setTest({ compare_with_source: on })} label="Also compare with the files now" hint="Notes files that differ from your copy now (they may have changed since): a hint at damage on either side." />
+                <Row title="Stop after" subtitle="A time (e.g. 1h) and an amount read (e.g. 5GB), for big tests; it then ends with a note." icon="clock">
+                  <span class="flex items-center gap-2">
+                    <input class="input h-8 w-24 py-0" value={t.max_runtime ?? ""} oninput={(e) => setTest({ max_runtime: e.currentTarget.value.trim() || null })} placeholder="time" aria-label="Time limit" />
+                    <input class="input h-8 w-24 py-0" value={t.max_read ?? ""} oninput={(e) => setTest({ max_read: e.currentTarget.value.trim() || null })} placeholder="data" aria-label="Data limit" />
+                  </span>
+                </Row>
+              </div>
+              {#each at("restore_test") as i (i.message)}<p class="mt-1.5 text-[13px] text-danger">{i.message}</p>{/each}
+            </section>
+          {:else if page === "network"}
+            {@const n = draft.network ?? {}}
+            <section>
+              <h2 class="group-title">Wi-Fi networks</h2>
+              <p class="-mt-1 mb-2 px-0.5 text-[12.5px] text-fg-muted">For scheduled backups to a server. On a wired connection these don't apply; backing up by hand always works.</p>
+              <div class="flex flex-col gap-3">
+                <Field label="Only on these networks (empty: any)" id="f-wifi-only">
+                  <ListEditor bind:items={() => n.wifi_only ?? [], (v) => setNet({ wifi_only: v })} placeholder="Home WiFi" label="Only on" icon="server" />
+                </Field>
+                <Field label="Never on these networks" id="f-wifi-never">
+                  <ListEditor bind:items={() => n.wifi_never ?? [], (v) => setNet({ wifi_never: v })} placeholder="Phone hotspot" label="Never on" icon="server" />
+                </Field>
+              </div>
+            </section>
+            <section>
+              <h2 class="group-title">Upload limits by time of day</h2>
+              <p class="-mt-1 mb-2 px-0.5 text-[12.5px] text-fg-muted">
+                Outside these times, {draft.target.kind === "ssh" && draft.target.bandwidth_limit ? `the connection's limit (${draft.target.bandwidth_limit}/s)` : "full speed"}. Vault backups follow a change of limit as they run; rsync and Borg use the limit in force when they start.
+              </p>
+              <div class="rows">
+                {#each n.bandwidth ?? [] as w, i (i)}
+                  <div class="row flex-wrap gap-2 text-[13px]">
+                    <select class="input h-8 w-auto py-0" bind:value={w.days} aria-label="Days">
+                      <option value="Mon..Fri">Weekdays</option>
+                      <option value="Sat,Sun">Weekends</option>
+                      <option value="*">Every day</option>
+                      {#if !["Mon..Fri", "Sat,Sun", "*"].includes(w.days)}<option value={w.days}>{w.days}</option>{/if}
+                    </select>
+                    <span class="text-fg-2">from</span>
+                    <input class="input h-8 w-20 py-0 font-mono" bind:value={w.from} aria-label="From" placeholder="09:00" />
+                    <span class="text-fg-2">to</span>
+                    <input class="input h-8 w-20 py-0 font-mono" bind:value={w.to} aria-label="To" placeholder="18:00" />
+                    <span class="text-fg-2">at most</span>
+                    <input class="input h-8 w-24 py-0 font-mono" value={w.limit ?? ""} oninput={(e) => (w.limit = e.currentTarget.value.trim() || null)} aria-label="Limit" placeholder="no limit" />
+                    <span class="text-fg-2">/s</span>
+                    <button class="btn-icon ml-auto size-8" aria-label="Remove this limit" onclick={() => setNet({ bandwidth: (n.bandwidth ?? []).filter((_, j) => j !== i) })}><Icon name="x" size={14} /></button>
+                  </div>
+                {/each}
+                <button class="row row-link gap-3" onclick={() => setNet({ bandwidth: [...(n.bandwidth ?? []), { days: "Mon..Fri", from: "09:00", to: "18:00", limit: "2MB" }] })}>
+                  <Icon name="plus" size={16} class="text-fg-2" /> <span class="font-medium">Add a limit</span>
+                </button>
+              </div>
+              {#each at("network") as i (i.message)}<p class="mt-1.5 text-[13px] text-danger">{i.message}</p>{/each}
+            </section>
           {:else if page === "hooks"}
             <section class="card flex flex-col gap-4 px-6 py-5">
               {#each [{ k: "pre_backup", label: "Before the backup", ph: "mount /mnt/nas" }, { k: "post_backup", label: "After a successful backup", ph: "notify-send 'Backup done'" }, { k: "on_error", label: "When a backup fails", ph: "logger -t flux \"$FLUX_ERROR\"" }] as h (h.k)}
@@ -1558,4 +1918,18 @@
       </footer>
     {/if}
   </div>
+{/if}
+
+{#if addingDest && id && draft}
+  <DestinationDialog
+    {id}
+    taken={(draft.destinations ?? []).map((d) => d.name)}
+    mainEngine={draft.engine}
+    mainRemote={draft.target.kind === "ssh"}
+    onadded={(saved) => {
+      syncDestinations(saved);
+      addingDest = false;
+    }}
+    onclose={() => (addingDest = false)}
+  />
 {/if}

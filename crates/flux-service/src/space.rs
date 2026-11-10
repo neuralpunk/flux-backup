@@ -197,6 +197,10 @@ mod tests {
             warnings: 0,
             hooks: vec![],
             free_after: Some(free),
+            sources_missing: Vec::new(),
+            destinations: Vec::new(),
+            unusual: None,
+            performance: None,
         }
     }
 

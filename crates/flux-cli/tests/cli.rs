@@ -774,6 +774,93 @@ fn vault_end_to_end() {
     assert_eq!(v.as_array().unwrap().len(), 3);
 }
 
+/// A Mirror on an SSH server holds what its snapshots say: a file whose name isn't UTF-8
+/// comes back, a change that kept the file's size and time is stored when changes are
+/// detected by checksum, and following links (which rsync wouldn't do there) is refused.
+#[test]
+fn ssh_mirror_stores_what_it_lists() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let Some(fake) = flux_transport::testing::fake_ssh(h) else {
+        eprintln!("skipping: no sftp-server installed");
+        return;
+    };
+    if Command::new("rsync").arg("--version").output().is_err() {
+        eprintln!("skipping: no rsync");
+        return;
+    }
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("FLUX_SSH", &fake)
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("units"))
+            .env("FLUX_SYSTEMCTL", "true")
+            .output()
+            .unwrap()
+    };
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let odd = src.join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+    let odd_name_ok = std::fs::write(&odd, "latin-1 name").is_ok(); // some filesystems refuse
+    let db = src.join("db.bin");
+    std::fs::write(&db, "AAAA").unwrap();
+    let s = src.to_str().unwrap();
+    let target = format!("localhost:{}", h.join("remote").display());
+    assert!(
+        run(&["profile", "create", "m", "-t", &target, "-s", s])
+            .status
+            .success()
+    );
+    let f = h.join("config/profiles/m.toml");
+    let edit = |from: &str, to: &str| {
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains(from), "{from} in {text}");
+        std::fs::write(&f, text.replace(from, to)).unwrap();
+    };
+    edit("notify = true", "notify = false");
+    edit(
+        "change_detection = \"metadata\"",
+        "change_detection = \"checksum\"",
+    );
+    let o = run(&["backup", "m"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // The same size and the same time, other content.
+    let mtime = std::fs::metadata(&db).unwrap().modified().unwrap();
+    std::fs::write(&db, "BBBB").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&db)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let o = run(&["backup", "m"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = h.join("out");
+    let o = run(&["restore", "m", s, "--to", out.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        std::fs::read_to_string(out.join("src/db.bin")).unwrap(),
+        "BBBB",
+        "the snapshot holds the new content, not a link to the old"
+    );
+    if odd_name_ok {
+        assert_eq!(
+            std::fs::read_to_string(out.join("src").join(odd.file_name().unwrap())).unwrap(),
+            "latin-1 name"
+        );
+    }
+
+    // Following links: refused, in words, before anything is sent.
+    edit("symlinks = \"preserve\"", "symlinks = \"follow\"");
+    let o = run(&["backup", "m"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("stores links as links"), "{err}");
+}
+
 /// Both engines against an "SSH server" that is a local stand-in for ssh: the real
 /// OpenSSH sftp-server and rsync run, only the network hop is skipped.
 #[test]
@@ -1097,6 +1184,19 @@ fn rsync_compatibility_mode() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(glob_dirs(&target.join("flux-rsync"), "snapshots").len(), 2);
     assert!(flux(h, &["prune", "plain"]).status.success());
+
+    // `check` looks at the disk, not at the listing it remembers: a snapshot (the first,
+    // made by Flux) whose files are gone is a problem.
+    assert!(flux(h, &["check", "plain"]).status.success());
+    let snaps = glob_dirs(&target.join("flux-rsync"), "snapshots");
+    let oldest = snaps.iter().min().unwrap();
+    std::fs::remove_file(data(oldest, "docs/a.txt")).unwrap();
+    let o = flux(h, &["check", "plain"]);
+    assert!(!o.status.success(), "{}", stdout(&o));
+    assert!(stdout(&o).contains("are missing"), "{}", stdout(&o));
+    std::fs::remove_dir_all(oldest.join("data")).unwrap();
+    let o = flux(h, &["check", "plain"]);
+    assert!(!o.status.success(), "{}", stdout(&o));
 }
 
 /// With a size limit, rsync still counts the files it skipped; the snapshot must show
@@ -1275,6 +1375,111 @@ fn borg_available() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).starts_with("borg 1."))
+}
+
+/// Restoring from Borg: a file `borg extract` couldn't write out whole is an error and
+/// never replaces the file that's there; and the folder above the backed-up ones, which
+/// the archive knows nothing about, keeps its permissions and date.
+#[test]
+fn borg_restores_only_what_came_out_whole() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if !borg_available() {
+        eprintln!("skipping: Borg 1.x is not installed");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    // A borg whose `extract` can't write files over 1 MiB (a full disk, in effect).
+    let limited = h.join("borg-limited");
+    let text = h.join("borg-limited.txt");
+    std::fs::write(
+        &text,
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = extract ] && ulimit -f 2048; done\nexec borg \"$@\"\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "0755"])
+            .arg(&text)
+            .arg(&limited)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let run = |borg: Option<&Path>, args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_flux"));
+        c.args(args)
+            .env("FLUX_HOME", h)
+            .env("BORG_BASE_DIR", h.join("borg-base"))
+            .env("FLUX_PASSWORD", "pw")
+            .env("FLUX_SECRET_TOOL", "false")
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("units"))
+            .env("FLUX_SYSTEMCTL", "true");
+        if let Some(b) = borg {
+            c.env("FLUX_BORG", b);
+        }
+        c.output().unwrap()
+    };
+    let top = h.join("top");
+    let src = top.join("docs");
+    std::fs::create_dir_all(&src).unwrap();
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("large.bin"), &big).unwrap();
+    std::fs::write(src.join("small.txt"), "small").unwrap();
+    let drive = h.join("drive");
+    std::fs::create_dir(&drive).unwrap();
+    let o = run(
+        None,
+        &[
+            "profile",
+            "create",
+            "b",
+            "-t",
+            drive.to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+            "--engine",
+            "borg",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let f = h.join("config/profiles/b.toml");
+    let text = std::fs::read_to_string(&f).unwrap();
+    std::fs::write(&f, text.replace("notify = true", "notify = false")).unwrap();
+    let o = run(None, &["backup", "b"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // Extraction cuts the large file short: the restore says so (exit 4, partial) and
+    // the whole file that's there stays, as it is.
+    std::fs::write(src.join("small.txt"), "changed").unwrap();
+    let o = run(
+        Some(&limited),
+        &["restore", "b", src.to_str().unwrap(), "--yes"],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(4),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(std::fs::read(src.join("large.bin")).unwrap(), big);
+    assert_eq!(
+        std::fs::read_to_string(src.join("small.txt")).unwrap(),
+        "small",
+        "what came out whole is restored"
+    );
+
+    // Restoring the folder above the backed-up one: it is only the way there.
+    std::fs::set_permissions(&top, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let before = std::fs::metadata(&top).unwrap();
+    std::fs::remove_file(src.join("small.txt")).unwrap();
+    let o = run(None, &["restore", "b", top.to_str().unwrap(), "--yes"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(src.join("small.txt").exists());
+    let after = std::fs::metadata(&top).unwrap();
+    assert_eq!(after.mode() & 0o7777, 0o1777, "its permissions are its own");
+    assert_eq!(after.mtime(), before.mtime(), "and so is its date");
 }
 
 #[test]
@@ -1869,4 +2074,1588 @@ fn walk_find(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// `flux unlock` clears locks a dead job left (no password needed), says who still holds
+/// one, and `--force` clears those too; `flux vault upgrade` moves a format 1 Vault on.
+#[test]
+fn unlock_and_upgrade_a_vault() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("src")).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    std::fs::write(h.join("src/a.txt"), "alpha").unwrap();
+    let tgt = h.join("tgt");
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "v",
+            "-t",
+            tgt.to_str().unwrap(),
+            "-s",
+            h.join("src").to_str().unwrap(),
+            "--engine",
+            "vault",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let pw = "pass phrase";
+    let o = flux_pw(h, pw, &["backup", "v"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // A job on another computer died an hour ago (stale), and one is running there now.
+    let locks = tgt.join("flux-vault/locks");
+    let lock = |host: &str, ago_min: i64| {
+        let t = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(ago_min);
+        format!(r#"{{"host":"{host}","user":"bob","pid":7,"exclusive":true,"time":"{t}"}}"#)
+    };
+    std::fs::write(locks.join("aaaa"), lock("old-pc", 60)).unwrap();
+    std::fs::write(locks.join("bbbb"), lock("nas-box", 1)).unwrap();
+
+    let o = flux_pw(h, pw, &["backup", "v"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("bob@nas-box") && err.contains("flux unlock"),
+        "{err}"
+    );
+
+    let o = flux(h, &["unlock", "v"]);
+    let out = stdout(&o);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(out.contains("Removed the lock of bob@old-pc"), "{out}");
+    assert!(
+        out.contains("In use by bob@nas-box") && out.contains("--force"),
+        "{out}"
+    );
+    let o = flux(h, &["--json", "unlock", "v", "--force"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["removed"].as_array().unwrap().len(), 1);
+    assert!(v["still_held"].as_array().unwrap().is_empty());
+    assert!(flux_pw(h, pw, &["backup", "v"]).status.success());
+
+    // Upgrading: already format 2; a format 1 config moves to 2 and still opens.
+    assert!(stdout(&flux(h, &["vault", "upgrade", "v"])).contains("already in format 2"));
+    let config = tgt.join("flux-vault/config");
+    let text = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("\"format\": 2", "\"format\": 1");
+    std::fs::write(&config, text).unwrap();
+    let out = stdout(&flux(h, &["vault", "upgrade", "v"]));
+    assert!(out.contains("from format 1 to 2"), "{out}");
+    assert!(flux_pw(h, pw, &["snapshots", "v"]).status.success());
+
+    // Other engines have no lock files to clear.
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "m",
+            "-t",
+            tgt.to_str().unwrap(),
+            "-s",
+            h.join("src").to_str().unwrap(),
+        ],
+    );
+    assert!(o.status.success());
+    assert!(!flux(h, &["unlock", "m"]).status.success());
+}
+
+/// Vault security from the command line: stronger hashing for the password in use, and an
+/// unlock file the password then needs (backups say where it should be when it's gone).
+#[test]
+fn key_strengthen_and_unlock_file() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("src")).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    std::fs::create_dir_all(h.join("stick")).unwrap();
+    std::fs::write(h.join("src/a.txt"), "alpha").unwrap();
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "v",
+            "-t",
+            h.join("tgt").to_str().unwrap(),
+            "-s",
+            h.join("src").to_str().unwrap(),
+            "--engine",
+            "vault",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let pw = "pass phrase";
+    assert!(flux_pw(h, pw, &["backup", "v"]).status.success());
+
+    let o = flux_pw(
+        h,
+        pw,
+        &[
+            "key",
+            "strengthen",
+            "v",
+            "--memory",
+            "8",
+            "--passes",
+            "1",
+            "--threads",
+            "1",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        stdout(&o).contains("custom (8 MiB, 1 passes, 1 threads)"),
+        "{}",
+        stdout(&o)
+    );
+    let o = flux_pw(h, pw, &["--json", "key", "list", "v"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v[0]["hashing"]["level"], "custom");
+    assert_eq!(v[0]["hashing"]["memory_mib"], 8);
+    let profile = std::fs::read_to_string(h.join("config/profiles/v.toml")).unwrap();
+    assert!(profile.contains("memory_mib = 8"), "{profile}");
+    // Out of range is refused before anything changes.
+    let o = flux_pw(
+        h,
+        pw,
+        &[
+            "key",
+            "strengthen",
+            "v",
+            "--memory",
+            "2",
+            "--passes",
+            "1",
+            "--threads",
+            "1",
+        ],
+    );
+    assert!(!o.status.success());
+
+    let file = h.join("stick/flux.unlock");
+    let o = flux_pw(
+        h,
+        pw,
+        &["key", "unlock-file", "v", "create", file.to_str().unwrap()],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("only together with"));
+    std::fs::write(h.join("src/b.txt"), "beta").unwrap();
+    assert!(
+        flux_pw(h, pw, &["backup", "v"]).status.success(),
+        "the file is there"
+    );
+
+    let away = h.join("away");
+    std::fs::rename(&file, &away).unwrap();
+    std::fs::write(h.join("src/c.txt"), "gamma").unwrap();
+    let o = flux_pw(h, pw, &["backup", "v"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("unlock file") && err.contains("flux.unlock"),
+        "{err}"
+    );
+
+    std::fs::rename(&away, &file).unwrap();
+    let o = flux_pw(h, pw, &["key", "unlock-file", "v", "remove"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::remove_file(&file).unwrap();
+    assert!(
+        flux_pw(h, pw, &["backup", "v"]).status.success(),
+        "the password alone again"
+    );
+}
+
+/// Source drives, simulated with `FLUX_FAKE_MOUNTS` (a file of "UUID FOLDER" lines the
+/// test edits to plug and unplug the photos drive).
+#[test]
+fn source_drives_are_recognised_when_missing() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let (src, photos, mounts) = (h.join("src"), h.join("photos"), h.join("mounts"));
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&photos).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    std::fs::write(src.join("notes.txt"), "v1").unwrap();
+    std::fs::write(photos.join("a.jpg"), "picture").unwrap();
+    let plug = |on: bool| {
+        let line = if on {
+            format!("PHOTO-UUID {}\n", photos.display())
+        } else {
+            String::new()
+        };
+        std::fs::write(&mounts, line).unwrap();
+    };
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("FLUX_FAKE_MOUNTS", &mounts)
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("systemd-units"))
+            .env("FLUX_SYSTEMCTL", "true")
+            .env("FLUX_CRONTAB", h.join("no-crontab"))
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
+            .env("FLUX_SHUTDOWN", "false")
+            .env_remove("FLUX_LOG")
+            .output()
+            .unwrap()
+    };
+    let profile_file = h.join("config/profiles/p.toml");
+    let set = |from: &str, to: &str| {
+        let t = std::fs::read_to_string(&profile_file).unwrap();
+        assert!(t.contains(from), "{t}");
+        std::fs::write(&profile_file, t.replace(from, to)).unwrap();
+    };
+
+    plug(true);
+    let o = run(&[
+        "profile",
+        "create",
+        "p",
+        "-t",
+        h.join("tgt").to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+        "-s",
+        photos.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(&profile_file).unwrap();
+    assert!(
+        text.contains("fs_uuid = \"PHOTO-UUID\""),
+        "the photos drive is recorded:\n{text}"
+    );
+    set("notify = true", "notify = false");
+    assert!(run(&["backup", "p"]).status.success());
+
+    // Unplugged (skip, the default): the backup keeps the photos and says so.
+    plug(false);
+    std::fs::write(src.join("notes.txt"), "v2").unwrap();
+    let o = run(&["--json", "backup", "p"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let snap = &v["result"]["snapshot"];
+    assert_eq!(snap["stats"]["deleted"], 0, "{v}");
+    assert_eq!(snap["sources_missing"][0]["path"], photos.to_str().unwrap());
+    let id = snap["id"].as_str().unwrap();
+    let ls = stdout(&run(&["ls", "p", "-s", id, photos.to_str().unwrap()]));
+    assert!(ls.contains("a.jpg"), "{ls}");
+    let log = run(&["--json", "log", "p"]);
+    let runs: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
+    assert_eq!(
+        runs[0]["sources_missing"][0],
+        photos.to_str().unwrap(),
+        "{runs}"
+    );
+
+    // Fail: refused, in words.
+    set("when_missing = \"skip\"", "when_missing = \"fail\"");
+    let o = run(&["backup", "p"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("isn't there") && err.contains("PHOTO-UUID"),
+        "{err}"
+    );
+
+    // Wait: in vain (fails after the limit), then plugged in while waiting (runs).
+    set(
+        "when_missing = \"fail\"",
+        "when_missing = \"wait\"\nwait_for = \"1s\"",
+    );
+    let o = run(&["backup", "p"]);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("waited 1s"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    set("wait_for = \"1s\"", "wait_for = \"20s\"");
+    std::fs::write(src.join("notes.txt"), "v3").unwrap();
+    let child = std::thread::spawn({
+        let plug_later = (mounts.clone(), photos.clone());
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            std::fs::write(
+                &plug_later.0,
+                format!("PHOTO-UUID {}\n", plug_later.1.display()),
+            )
+            .unwrap();
+        }
+    });
+    let o = run(&["--json", "backup", "p"]);
+    child.join().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(
+        v["result"]["snapshot"].get("sources_missing").is_none(),
+        "{v}"
+    );
+
+    // Only the photos, unplugged: nothing to back up, so the run is skipped.
+    plug(true);
+    let o = run(&[
+        "profile",
+        "create",
+        "only",
+        "-t",
+        h.join("tgt").to_str().unwrap(),
+        "-s",
+        photos.to_str().unwrap(),
+    ]);
+    assert!(o.status.success());
+    plug(false);
+    let o = run(&["backup", "only"]);
+    let all = format!("{}{}", stdout(&o), String::from_utf8_lossy(&o.stderr));
+    assert!(all.contains("nothing to back up"), "{all}");
+
+    // rsync can't keep files from before: the source is left out, and said so.
+    plug(true);
+    let o = run(&[
+        "profile",
+        "create",
+        "r",
+        "-t",
+        h.join("tgt-r").to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+        "-s",
+        photos.to_str().unwrap(),
+        "--engine",
+        "rsync",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::create_dir_all(h.join("tgt-r")).unwrap();
+    plug(false);
+    let o = run(&["backup", "r"]);
+    let all = format!("{}{}", stdout(&o), String::from_utf8_lossy(&o.stderr));
+    assert!(o.status.success(), "{all}");
+    assert!(all.contains("left out of this snapshot"), "{all}");
+}
+
+/// Notes and tags, on every engine: kept with the snapshot, shown, found by tag, and
+/// never a reason to keep a snapshot (a tagged one is pruned like any other).
+#[test]
+fn notes_and_tags_on_every_engine() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let engines: &[(&str, &str)] = if borg_available() {
+        &[
+            ("m", "mirror"),
+            ("v", "vault"),
+            ("r", "rsync"),
+            ("b", "borg"),
+        ]
+    } else {
+        &[("m", "mirror"), ("v", "vault"), ("r", "rsync")]
+    };
+    for &(id, engine) in engines {
+        let tgt = h.join(format!("tgt-{id}"));
+        std::fs::create_dir_all(&tgt).unwrap();
+        let o = flux_pw(
+            h,
+            "pw",
+            &[
+                "profile",
+                "create",
+                id,
+                "-t",
+                tgt.to_str().unwrap(),
+                "-s",
+                src.to_str().unwrap(),
+                "--engine",
+                engine,
+            ],
+        );
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        // Retention: only the newest snapshot (plus anything named or pinned).
+        let f = h.join(format!("config/profiles/{id}.toml"));
+        let t = std::fs::read_to_string(&f).unwrap();
+        let t = t
+            .replace("notify = true", "notify = false")
+            .replace("keep_within = \"1day\"\n", "")
+            .replace("keep_daily = 7", "keep_daily = 0")
+            .replace("keep_weekly = 4", "keep_weekly = 0")
+            .replace("keep_monthly = 12", "keep_monthly = 0")
+            .replace("keep_yearly = 5", "keep_yearly = 0")
+            // Exact pruning: without unusual-change detection (which keeps one more).
+            .replacen("\n[", "\nunusual_changes = \"off\"\n\n[", 1);
+        std::fs::write(&f, t).unwrap();
+
+        std::fs::write(src.join("a.txt"), format!("{id} one")).unwrap();
+        assert!(
+            flux_pw(h, "pw", &["backup", id]).status.success(),
+            "{engine}"
+        );
+        let o = flux_pw(h, "pw", &["note", id, "latest", "before", "the", "upgrade"]);
+        assert!(
+            o.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let o = flux_pw(h, "pw", &["tag", id, "latest", "Taxes", "release", "taxes"]);
+        assert!(
+            stdout(&o).contains("tagged Taxes, release"),
+            "{engine}: {}",
+            stdout(&o)
+        );
+        let o = flux_pw(h, "pw", &["tag", id, "latest", "release", "--remove"]);
+        assert!(
+            stdout(&o).contains("tagged Taxes."),
+            "{engine}: {}",
+            stdout(&o)
+        );
+
+        let info = stdout(&flux_pw(h, "pw", &["info", id, "latest"]));
+        assert!(
+            info.contains("before the upgrade") && info.contains("Taxes"),
+            "{engine}: {info}"
+        );
+        let o = flux_pw(h, "pw", &["--json", "snapshots", id, "--tag", "taxes"]);
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1, "{engine}: {v}");
+        assert_eq!(v[0]["note"], "before the upgrade");
+        let list = stdout(&flux_pw(h, "pw", &["snapshots", id]));
+        assert!(
+            list.contains("#Taxes · before the upgrade"),
+            "{engine}: {list}"
+        );
+
+        // A newer snapshot: retention removes the tagged one (tags don't keep it).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(src.join("a.txt"), format!("{id} two")).unwrap();
+        let o = flux_pw(h, "pw", &["backup", id]);
+        assert!(
+            o.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let o = flux_pw(h, "pw", &["--json", "snapshots", id]);
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(
+            v.as_array().unwrap().len(),
+            1,
+            "{engine}: tagged snapshot pruned: {v}"
+        );
+        assert!(v[0].get("note").is_none());
+        let o = flux_pw(h, "pw", &["note", id, "latest", "--clear"]);
+        assert!(stdout(&o).contains("Removed the note"), "{engine}");
+    }
+}
+
+/// One profile, three destinations (Mirror here, a Vault and rsync elsewhere): every
+/// backup goes to all of them, each has its own snapshots (`home+usb`), and one failing
+/// doesn't stop the others.
+#[test]
+fn several_destinations() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), "one").unwrap();
+    for t in ["tgt-main", "tgt-usb", "tgt-plain"] {
+        std::fs::create_dir_all(h.join(t)).unwrap();
+    }
+    let ok = |o: &Output| {
+        assert!(
+            o.status.success(),
+            "{}{}",
+            stdout(o),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    ok(&flux_pw(
+        h,
+        "pw",
+        &[
+            "profile",
+            "create",
+            "home",
+            "-t",
+            h.join("tgt-main").to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+        ],
+    ));
+    let f = h.join("config/profiles/home.toml");
+    std::fs::write(
+        &f,
+        std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("notify = true", "notify = false"),
+    )
+    .unwrap();
+    ok(&flux_pw(
+        h,
+        "pw",
+        &[
+            "profile",
+            "destination",
+            "add",
+            "home",
+            "usb",
+            "-t",
+            h.join("tgt-usb").to_str().unwrap(),
+            "--engine",
+            "vault",
+            "--label",
+            "USB stick",
+        ],
+    ));
+    ok(&flux_pw(
+        h,
+        "pw",
+        &[
+            "profile",
+            "destination",
+            "add",
+            "home",
+            "plain",
+            "-t",
+            h.join("tgt-plain").to_str().unwrap(),
+            "--engine",
+            "rsync",
+            "--offsite",
+        ],
+    ));
+    // Same place twice, or a name taken: refused.
+    assert!(
+        !flux_pw(
+            h,
+            "pw",
+            &[
+                "profile",
+                "destination",
+                "add",
+                "home",
+                "again",
+                "-t",
+                h.join("tgt-usb").to_str().unwrap(),
+                "--engine",
+                "vault"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !flux_pw(
+            h,
+            "pw",
+            &[
+                "profile",
+                "destination",
+                "add",
+                "home",
+                "usb",
+                "-t",
+                h.join("x").to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    let list = stdout(&flux_pw(
+        h,
+        "pw",
+        &["profile", "destination", "list", "home"],
+    ));
+    assert!(
+        list.contains("home+usb") && list.contains("USB stick") && list.contains("offsite"),
+        "{list}"
+    );
+    // A destination isn't a profile of its own.
+    assert!(
+        !flux_pw(
+            h,
+            "pw",
+            &["profile", "create", "home+x", "-t", "/tmp", "-s", "/tmp"]
+        )
+        .status
+        .success()
+    );
+
+    let o = flux_pw(h, "pw", &["backup", "home"]);
+    ok(&o);
+    let out = stdout(&o);
+    assert!(
+        out.contains("✓ usb: snapshot") && out.contains("✓ plain: snapshot"),
+        "{out}"
+    );
+    for id in ["home", "home+usb", "home+plain"] {
+        let o = flux_pw(h, "pw", &["--json", "snapshots", id]);
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout)
+            .unwrap_or_else(|_| panic!("{id}: {}", String::from_utf8_lossy(&o.stderr)));
+        assert_eq!(v.as_array().unwrap().len(), 1, "{id}: {v}");
+    }
+    let o = flux_pw(h, "pw", &["--json", "log", "home"]);
+    let runs: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let d = runs[0]["destinations"].as_array().unwrap();
+    assert_eq!(d.len(), 2);
+    assert_eq!(d[0]["status"], "completed");
+
+    // The USB stick gone: the main backup and the rsync copy still happen.
+    std::fs::remove_dir_all(h.join("tgt-usb")).unwrap();
+    std::fs::write(src.join("a.txt"), "second version").unwrap(); // another size: rsync compares size and time
+    let o = flux_pw(h, "pw", &["backup", "home"]);
+    assert_eq!(
+        o.status.code(),
+        Some(4),
+        "a failed destination is a partial run"
+    );
+    let out = stdout(&o);
+    assert!(
+        out.contains("✗ usb: failed") && out.contains("✓ plain: snapshot"),
+        "{out}"
+    );
+    let o = flux_pw(h, "pw", &["--json", "snapshots", "home+plain"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+
+    // Restoring from a destination works like from any backup.
+    let o = flux_pw(
+        h,
+        "pw",
+        &[
+            "restore",
+            "home+plain",
+            "-s",
+            "latest",
+            src.join("a.txt").to_str().unwrap(),
+            "--to",
+            h.join("back").to_str().unwrap(),
+            "-y",
+        ],
+    );
+    ok(&o);
+    // Backing up one destination alone; removing one keeps its backups.
+    std::fs::create_dir_all(h.join("tgt-usb")).unwrap();
+    ok(&flux_pw(h, "pw", &["backup", "home+usb"]));
+    ok(&flux_pw(
+        h,
+        "pw",
+        &["profile", "destination", "remove", "home", "usb"],
+    ));
+    assert!(h.join("tgt-usb/flux-vault/config").exists());
+    assert!(
+        !flux_pw(h, "pw", &["snapshots", "home+usb"])
+            .status
+            .success()
+    );
+}
+
+/// Copies of the main backup (`--replicate`): the sources are read once, the copy holds the
+/// same snapshots (a Vault copy opens with the main Vault's password, here from a fake
+/// keyring that only knows the main profile), and what can't be copied is refused.
+#[test]
+fn replicated_destinations() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), "one").unwrap();
+    std::fs::write(src.join("big.bin"), vec![7u8; 300_000]).unwrap();
+    for t in ["v-main", "v-usb", "m-main", "m-copy"] {
+        std::fs::create_dir_all(h.join(t)).unwrap();
+    }
+    // A keyring that has the password of "vault" only.
+    let fake = h.join("secret-tool");
+    assert!(flux_transport_executable(
+        &fake,
+        "#!/bin/sh\nfor a; do last=$a; done\n[ \"$last\" = vault ] && printf pw && exit 0\nexit 1\n"
+    ));
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("FLUX_SECRET_TOOL", &fake)
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("systemd-units"))
+            .env("FLUX_SYSTEMCTL", "true")
+            .env("FLUX_CRONTAB", h.join("no-crontab"))
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
+            .env("FLUX_SHUTDOWN", "false")
+            .env_remove("FLUX_PASSWORD")
+            .env_remove("FLUX_LOG")
+            .output()
+            .unwrap()
+    };
+    let ok = |o: &Output| {
+        assert!(
+            o.status.success(),
+            "{}{}",
+            stdout(o),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+
+    // A Vault, copied to a "USB stick".
+    ok(&run(&[
+        "profile",
+        "create",
+        "vault",
+        "-t",
+        h.join("v-main").to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+        "--engine",
+        "vault",
+    ]));
+    let f = h.join("config/profiles/vault.toml");
+    std::fs::write(
+        &f,
+        std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("notify = true", "notify = false"),
+    )
+    .unwrap();
+    ok(&run(&[
+        "profile",
+        "destination",
+        "add",
+        "vault",
+        "usb",
+        "-t",
+        h.join("v-usb").to_str().unwrap(),
+        "--replicate",
+    ]));
+    assert!(stdout(&run(&["profile", "destination", "list", "vault"])).contains("copy of main"));
+    // The first backup creates the Vault: its password is typed (here, given).
+    let o = flux_pw(h, "pw", &["backup", "vault"]);
+    ok(&o);
+    assert!(stdout(&o).contains("✓ usb: snapshot"), "{}", stdout(&o));
+    // From then on the keyring has it (and only under "vault").
+    std::fs::write(src.join("new.txt"), "new").unwrap();
+    let o = run(&["backup", "vault"]);
+    ok(&o);
+    let ids = |id: &str| -> Vec<String> {
+        let o = run(&["--json", "snapshots", id]);
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout)
+            .unwrap_or_else(|_| panic!("{id}: {}", String::from_utf8_lossy(&o.stderr)));
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        ids("vault"),
+        ids("vault+usb"),
+        "the same snapshots, opened with the main password"
+    );
+    ok(&run(&[
+        "restore",
+        "vault+usb",
+        src.join("a.txt").to_str().unwrap(),
+        "--to",
+        h.join("back").to_str().unwrap(),
+        "-y",
+    ]));
+
+    // Mirror, copied to another folder: unchanged files hard-linked in the copy too.
+    ok(&run(&[
+        "profile",
+        "create",
+        "plain",
+        "-t",
+        h.join("m-main").to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+    ]));
+    let f = h.join("config/profiles/plain.toml");
+    std::fs::write(
+        &f,
+        std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("notify = true", "notify = false"),
+    )
+    .unwrap();
+    ok(&run(&[
+        "profile",
+        "destination",
+        "add",
+        "plain",
+        "copy",
+        "-t",
+        h.join("m-copy").to_str().unwrap(),
+        "--replicate",
+    ]));
+    ok(&run(&["backup", "plain"]));
+    std::fs::write(src.join("a.txt"), "second version").unwrap();
+    ok(&run(&["backup", "plain"]));
+    let copy_ids = ids("plain+copy");
+    assert_eq!(ids("plain"), copy_ids);
+    let find = |name: &str| -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![h.join("m-copy")];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() && !p.is_symlink() {
+                    stack.push(p)
+                } else if p.file_name().is_some_and(|n| n == name) {
+                    out.push(p)
+                }
+            }
+        }
+        out
+    };
+    use std::os::unix::fs::MetadataExt;
+    let bigs = find("big.bin");
+    assert_eq!(bigs.len(), 2, "{bigs:?}");
+    assert_eq!(
+        std::fs::metadata(&bigs[0]).unwrap().ino(),
+        std::fs::metadata(&bigs[1]).unwrap().ino(),
+        "the unchanged file is one file in the copy too"
+    );
+
+    // Not copyable: another engine, Borg, or plain folders to a server.
+    for (t, extra) in [("x1", &["--engine", "vault"][..]), ("x2", &[][..])] {
+        let tgt = if t == "x2" {
+            "me@nas:/srv/x2".to_string()
+        } else {
+            h.join(t).display().to_string()
+        };
+        let mut args = vec![
+            "profile",
+            "destination",
+            "add",
+            "plain",
+            t,
+            "-t",
+            &tgt,
+            "--replicate",
+        ];
+        args.extend_from_slice(extra);
+        let o = run(&args);
+        assert!(!o.status.success(), "{t}: {}", stdout(&o));
+    }
+}
+
+/// Create an executable script (written by `install`, so this process never holds it open
+/// for writing: "Text file busy" otherwise).
+fn flux_transport_executable(path: &Path, text: &str) -> bool {
+    let src = path.with_extension("txt");
+    std::fs::write(&src, text).unwrap();
+    Command::new("install")
+        .args(["-m", "0755"])
+        .arg(&src)
+        .arg(path)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Wi-Fi rules for scheduled backups to a server, with a fake `nmcli` saying which
+/// network this is (and `ssh` replaced by `false`: nothing really connects).
+#[test]
+fn wifi_rules_for_scheduled_backups() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("src")).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    std::fs::write(h.join("src/a"), "a").unwrap();
+    let nmcli = h.join("nmcli");
+    let on = |ssid: &str| {
+        let _ = std::fs::remove_file(&nmcli);
+        assert!(flux_transport_executable(
+            &nmcli,
+            &format!("#!/bin/sh\necho 'no:Neighbour'\necho 'yes:{ssid}'\n")
+        ));
+    };
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(args)
+            .env("FLUX_HOME", h)
+            .env("FLUX_NMCLI", &nmcli)
+            .env("FLUX_SSH", "/bin/false")
+            .env("FLUX_SYSTEMD_UNIT_DIR", h.join("systemd-units"))
+            .env("FLUX_SYSTEMCTL", "true")
+            .env("FLUX_CRONTAB", h.join("no-crontab"))
+            .env("FLUX_CRON_DIR", h.join("cron.d"))
+            .env("FLUX_SHUTDOWN", "false")
+            .env("FLUX_PASSWORD", "pw")
+            .env_remove("FLUX_LOG")
+            .output()
+            .unwrap()
+    };
+    let all = |o: &Output| format!("{}{}", stdout(o), String::from_utf8_lossy(&o.stderr));
+    assert!(
+        run(&[
+            "profile",
+            "create",
+            "srv",
+            "-t",
+            "me@nas:/srv/flux",
+            "-s",
+            h.join("src").to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let f = h.join("config/profiles/srv.toml");
+    let add = "\n[network]\nwifi_only = [\"Home\"]\nwifi_never = [\"Phone\"]\n";
+    std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + add).unwrap();
+
+    on("Café");
+    let o = run(&["backup", "srv", "--scheduled"]);
+    assert!(
+        all(&o).contains("Skipped: on the Wi-Fi network “Café”, not one of “Home”"),
+        "{}",
+        all(&o)
+    );
+    on("Phone");
+    assert!(all(&run(&["backup", "srv", "--scheduled"])).contains("where backups don't run"));
+    // On an allowed network, or started by hand, it goes ahead (and fails to connect,
+    // since there's no server here).
+    on("Home");
+    let o = run(&["backup", "srv", "--scheduled"]);
+    assert!(!all(&o).contains("Wi-Fi"), "{}", all(&o));
+    on("Café");
+    assert!(
+        !all(&run(&["backup", "srv"])).contains("Wi-Fi"),
+        "by hand: no rule"
+    );
+
+    // A server among several places: only that place is skipped.
+    assert!(
+        run(&[
+            "profile",
+            "create",
+            "home",
+            "-t",
+            h.join("tgt").to_str().unwrap(),
+            "-s",
+            h.join("src").to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let f = h.join("config/profiles/home.toml");
+    std::fs::write(
+        &f,
+        std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("notify = true", "notify = false")
+            + add,
+    )
+    .unwrap();
+    assert!(
+        run(&[
+            "profile",
+            "destination",
+            "add",
+            "home",
+            "nas",
+            "-t",
+            "me@nas:/srv/flux"
+        ])
+        .status
+        .success()
+    );
+    let o = run(&["backup", "home", "--scheduled"]);
+    let out = all(&o);
+    assert!(
+        out.contains("✓ Snapshot") && out.contains("nas: skipped"),
+        "{out}"
+    );
+}
+
+/// `flux restore-test` by hand: a sample, everything, its history.
+#[test]
+fn restore_test_by_hand() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("src/sub")).unwrap();
+    std::fs::create_dir_all(h.join("tgt")).unwrap();
+    for i in 0..6 {
+        std::fs::write(h.join(format!("src/f{i}")), format!("file {i}")).unwrap();
+    }
+    std::fs::write(h.join("src/sub/f0"), "same name, another folder").unwrap();
+    assert!(
+        flux(
+            h,
+            &[
+                "profile",
+                "create",
+                "p",
+                "-t",
+                h.join("tgt").to_str().unwrap(),
+                "-s",
+                h.join("src").to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    let f = h.join("config/profiles/p.toml");
+    std::fs::write(
+        &f,
+        std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("notify = true", "notify = false"),
+    )
+    .unwrap();
+    assert!(flux(h, &["backup", "p"]).status.success());
+
+    let o = flux(h, &["restore-test", "p", "--files", "3"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        stdout(&o).contains("✓ restore test passed: 3 files"),
+        "{}",
+        stdout(&o)
+    );
+    // Two files named f0 in different folders: both restored and checked.
+    let o = flux(h, &["--json", "restore-test", "p", "--full"]);
+    assert!(o.status.success());
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(
+        (r["result"].as_str(), r["tested"].as_u64()),
+        (Some("passed"), Some(7))
+    );
+    let o = flux(h, &["--json", "restore-test", "p", "--history"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert!(stdout(&flux(h, &["restore-test", "p", "--history"])).contains("passed"));
+}
+
+#[test]
+fn recover_backups_on_a_new_computer() {
+    let t = tempfile::tempdir().unwrap();
+    let (old, new) = (t.path().join("old"), t.path().join("new"));
+    let (src, tgt) = (t.path().join("src"), t.path().join("tgt"));
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&tgt).unwrap();
+    std::fs::write(src.join("a.txt"), "alpha").unwrap();
+    let pw = "s3cret pass";
+    let create = [
+        "profile",
+        "create",
+        "home",
+        "-t",
+        tgt.to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+        "--engine",
+        "vault",
+    ];
+    assert!(flux(&old, &create).status.success());
+    let f = old.join("config/profiles/home.toml");
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("notify = true", "notify = false");
+    std::fs::write(&f, text).unwrap();
+    // The installed recovery tool (here a stand-in) is kept next to the Vault.
+    let fake_tool = t.path().join("tool-build");
+    std::fs::write(&fake_tool, "#!/bin/sh\n").unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_flux"))
+        .args(["backup", "home"])
+        .env("FLUX_HOME", &old)
+        .env("FLUX_PASSWORD", pw)
+        .env("FLUX_SECRET_TOOL", "false")
+        .env("FLUX_VAULT_RECOVER", &fake_tool)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(tgt.join("flux-vault-recover").is_file());
+    assert!(tgt.join("FLUX-VAULT-RECOVERY.txt").is_file());
+
+    // The new computer: without the password, the Vault's backups can't be listed.
+    let o = flux(&new, &["recover", tgt.to_str().unwrap()]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("encrypted Vault"));
+    let o = flux_pw(&new, pw, &["recover", tgt.to_str().unwrap()]);
+    let out = stdout(&o);
+    assert!(
+        out.contains("1. home (Vault)") && out.contains("1 snapshot"),
+        "{out}"
+    );
+    assert!(out.contains("settings kept with it"), "{out}");
+    // The flux-vault folder itself can be given too.
+    let o = flux_pw(
+        &new,
+        pw,
+        &[
+            "--json",
+            "recover",
+            tgt.join("flux-vault").to_str().unwrap(),
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["found"][0]["kept"]["profile"], "home");
+
+    let o = flux_pw(
+        &new,
+        pw,
+        &[
+            "recover",
+            tgt.to_str().unwrap(),
+            "--pick",
+            "1",
+            "--id",
+            "laptop",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("Recovered “"));
+    let saved = std::fs::read_to_string(new.join("config/profiles/laptop.toml")).unwrap();
+    assert!(
+        saved.contains("[origin]") && saved.contains("profile = \"home\""),
+        "{saved}"
+    );
+    let o = flux_pw(&new, pw, &["snapshots", "laptop"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        stdout(&o).lines().filter(|l| l.contains(" ok ")).count(),
+        1,
+        "{}",
+        stdout(&o)
+    );
+    // Restoring works from the recovered profile.
+    let to = t.path().join("restored");
+    let o = flux_pw(
+        &new,
+        pw,
+        &[
+            "restore",
+            "laptop",
+            "--to",
+            to.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        glob_files(&to, "a.txt")
+            .iter()
+            .any(|p| std::fs::read_to_string(p).unwrap() == "alpha")
+    );
+    assert!(
+        !flux(&new, &["recover", tgt.to_str().unwrap(), "--pick", "9"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn export_snapshots_as_archives() {
+    let t = tempfile::tempdir().unwrap();
+    let h = t.path();
+    let (src, tgt) = (h.join("src"), h.join("tgt"));
+    std::fs::create_dir_all(src.join("docs")).unwrap();
+    std::fs::create_dir_all(&tgt).unwrap();
+    std::fs::write(src.join("docs/a.txt"), "alpha").unwrap();
+    std::fs::write(src.join("b.txt"), "beta").unwrap();
+    std::os::unix::fs::symlink("a.txt", src.join("docs/link")).unwrap();
+    let create = [
+        "profile",
+        "create",
+        "p",
+        "-t",
+        tgt.to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+    ];
+    assert!(flux(h, &create).status.success());
+    assert!(flux(h, &["backup", "p"]).status.success());
+
+    let tar = h.join("all.tar.zst");
+    let o = flux(
+        h,
+        &[
+            "export",
+            "p",
+            tar.to_str().unwrap(),
+            "--checksums",
+            "sha256",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    assert!(
+        out.contains("Exported 2 files") && out.contains("Checksums:"),
+        "{out}"
+    );
+    assert!(tar.is_file() && h.join("all.tar.zst.sha256").is_file());
+
+    let zip = h.join("docs.zip");
+    let docs = src.join("docs");
+    let o = flux(
+        h,
+        &["export", "p", zip.to_str().unwrap(), docs.to_str().unwrap()],
+    );
+    let out = stdout(&o);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        out.contains("Exported 1 file ") && out.contains("1 symbolic link left out"),
+        "{out}"
+    );
+    assert!(out.contains("ZIP keeps files"), "{out}");
+
+    // An existing archive, an unknown kind, a path that isn't backed up: refused.
+    assert!(
+        !flux(h, &["export", "p", zip.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let o = flux(h, &["export", "p", h.join("x.rar").to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&o.stderr).contains(".tar.zst"));
+    let o = flux(
+        h,
+        &["export", "p", h.join("y.zip").to_str().unwrap(), "/nowhere"],
+    );
+    assert!(!o.status.success());
+}
+
+#[test]
+fn explain_what_is_backed_up() {
+    let t = tempfile::tempdir().unwrap();
+    let h = t.path();
+    let src = h.join("src");
+    std::fs::create_dir_all(src.join("app/node_modules/x")).unwrap();
+    let tgt = h.join("tgt");
+    std::fs::create_dir_all(&tgt).unwrap();
+    std::fs::write(src.join("app/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(src.join("app/node_modules/x/lib.js"), "x".repeat(100)).unwrap();
+    std::fs::write(src.join("notes.tmp"), "t").unwrap();
+    let create = [
+        "profile",
+        "create",
+        "p",
+        "-t",
+        tgt.to_str().unwrap(),
+        "-s",
+        src.to_str().unwrap(),
+    ];
+    assert!(flux(h, &create).status.success());
+    let f = h.join("config/profiles/p.toml");
+    let text = std::fs::read_to_string(&f).unwrap();
+    let text = if text.contains("exclude = [") {
+        text.replacen(
+            "exclude = [",
+            "exclude = [\"node_modules/\", \"*.tmp\", ",
+            1,
+        )
+    } else {
+        text.replacen(
+            "[sources]\n",
+            "[sources]\nexclude = [\"node_modules/\", \"*.tmp\"]\n",
+            1,
+        )
+    };
+    std::fs::write(&f, text).unwrap();
+
+    let o = flux(
+        h,
+        &[
+            "explain",
+            "p",
+            src.join("app/main.rs").to_str().unwrap(),
+            src.join("notes.tmp").to_str().unwrap(),
+            "/etc/hostname",
+        ],
+    );
+    let out = stdout(&o);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(out.contains("Backed up: it's in"), "{out}");
+    assert!(out.contains("Left out by the rule *.tmp"), "{out}");
+    assert!(out.contains("isn't in any of the folders"), "{out}");
+
+    let o = flux(
+        h,
+        &["explain", "p", src.join("app").to_str().unwrap(), "--list"],
+    );
+    let out = stdout(&o);
+    assert!(
+        out.contains("✓ main.rs") && out.contains("✗ node_modules/"),
+        "{out}"
+    );
+    assert!(out.contains("Left out by the rule node_modules/"), "{out}");
+
+    let o = flux(
+        h,
+        &[
+            "--json",
+            "explain",
+            "p",
+            src.join("app/node_modules/x/lib.js").to_str().unwrap(),
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v[0]["backed_up"], false);
+    assert_eq!(v[0]["why"]["kind"], "excluded");
+    assert_eq!(v[0]["why"]["rule"], "node_modules/");
+}
+
+#[test]
+fn profiles_from_templates() {
+    let t = tempfile::tempdir().unwrap();
+    let h = t.path();
+    let tgt = h.join("tgt");
+    std::fs::create_dir_all(&tgt).unwrap();
+    let out = stdout(&flux(h, &["profile", "templates"]));
+    assert!(
+        out.contains("development") && out.contains("Photos"),
+        "{out}"
+    );
+    let src = h.join("code");
+    std::fs::create_dir_all(&src).unwrap();
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "dev",
+            "-t",
+            tgt.to_str().unwrap(),
+            "-s",
+            src.to_str().unwrap(),
+            "--template",
+            "development",
+            "-x",
+            "*.log",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(h.join("config/profiles/dev.toml")).unwrap();
+    assert!(
+        text.contains("node_modules/")
+            && text.contains("*.log")
+            && text.contains("trigger = \"interval\""),
+        "{text}"
+    );
+    assert!(text.contains("name = \"Projects\""), "{text}");
+    // A backup created with a schedule gets its timer there and then: without one it
+    // would never run.
+    assert!(
+        stdout(&o).contains("Updated the schedule"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(
+        h.join("systemd-units/flux-backup-dev.timer").exists()
+            || std::fs::read_dir(h.join("systemd-units"))
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("dev")),
+        "a timer unit for the new profile"
+    );
+    // Saved as yours, then used by name.
+    let o = flux(h, &["profile", "save-template", "dev", "Work laptop"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&flux(h, &["profile", "templates"])).contains("Work laptop (yours)"));
+    let o = flux(
+        h,
+        &[
+            "profile",
+            "create",
+            "dev2",
+            "-t",
+            tgt.to_str().unwrap(),
+            "--template",
+            "Work laptop",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        std::fs::read_to_string(h.join("config/profiles/dev2.toml"))
+            .unwrap()
+            .contains("*.log")
+    );
+    assert!(
+        flux(h, &["profile", "delete-template", "Work laptop"])
+            .status
+            .success()
+    );
+    assert!(
+        !flux(
+            h,
+            &[
+                "profile",
+                "create",
+                "x",
+                "-t",
+                tgt.to_str().unwrap(),
+                "--template",
+                "nope"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !flux(h, &["profile", "create", "y", "-t", tgt.to_str().unwrap()])
+            .status
+            .success(),
+        "sources or a template"
+    );
+}
+
+/// Copy a folder, keeping symbolic links as links.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let t = e.file_type().unwrap();
+        if t.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&src).unwrap(), &dst).unwrap();
+        } else if t.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+fn sha256(path: &Path) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(std::fs::read(path).unwrap());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Profiles and backups written by every release of Flux (made by that release itself,
+/// see crates/flux-runner/tests/fixtures/README.md) are read by this one: the profile
+/// files validate, the snapshots are listed and restored as they were, and a new backup
+/// carries on into the old repository.
+#[test]
+fn backups_from_every_release_are_read() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../flux-runner/tests/fixtures");
+    let mut versions: Vec<_> = std::fs::read_dir(&fixtures)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().join("expected.json").is_file())
+        .map(|e| e.path())
+        .collect();
+    versions.sort();
+    assert!(versions.len() >= 4, "{versions:?}");
+    for dir in versions {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let exp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("expected.json")).unwrap()).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let (home, tgt, src) = (
+            t.path().join("home"),
+            t.path().join("tgt"),
+            t.path().join("src"),
+        );
+        copy_tree(&dir.join("tgt"), &tgt);
+        std::fs::create_dir_all(src.join("new")).unwrap();
+        std::fs::write(src.join("new/file.txt"), "made by this Flux").unwrap();
+        let profiles = home.join("config/profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        for engine in exp["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap())
+        {
+            if engine == "borg" && !borg_available() {
+                continue;
+            }
+            let what = format!("{name} {engine}");
+            // The profile as that release wrote it, moved here and recovered as its origin.
+            let text = std::fs::read_to_string(dir.join(format!("profiles/{engine}.toml")))
+                .unwrap()
+                .replace("/srv/tgt", tgt.to_str().unwrap())
+                .replace("/srv/src", src.to_str().unwrap())
+                .replace("notify = true", "notify = false");
+            let text = format!(
+                "{text}\n[origin]\nhost = \"fixture-host\"\nuser = \"root\"\nprofile = \"{engine}\"\n"
+            );
+            std::fs::write(profiles.join(format!("{engine}.toml")), text).unwrap();
+            let run = |args: &[&str]| {
+                Command::new(env!("CARGO_BIN_EXE_flux"))
+                    .args(args)
+                    .env("FLUX_HOME", &home)
+                    .env("FLUX_PASSWORD", "fixture")
+                    .env("BORG_BASE_DIR", home.join("borg-base"))
+                    .env("FLUX_SECRET_TOOL", "false")
+                    .env("FLUX_SYSTEMCTL", "true")
+                    .env("FLUX_SYSTEMD_UNIT_DIR", home.join("units"))
+                    .output()
+                    .unwrap()
+            };
+            let o = run(&["profile", "validate", engine]);
+            assert!(
+                o.status.success(),
+                "{what}: {}{}",
+                stdout(&o),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let o = run(&["--json", "snapshots", engine]);
+            assert!(
+                o.status.success(),
+                "{what}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let snaps: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+            let snaps = snaps.as_array().unwrap();
+            assert_eq!(snaps.len(), 2, "{what}: {snaps:?}");
+            // The newest snapshot, restored, is the files as they were.
+            let out = t.path().join(format!("out-{engine}"));
+            let o = run(&["restore", engine, "--to", out.to_str().unwrap(), "/srv/src"]);
+            assert!(
+                o.status.success(),
+                "{what}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            for (rel, want) in exp["latest"].as_object().unwrap() {
+                let p = out.join("src").join(rel);
+                let want = want.as_str().unwrap();
+                match want.strip_prefix("link:") {
+                    Some(target) => assert_eq!(
+                        std::fs::read_link(&p).unwrap(),
+                        Path::new(target),
+                        "{what}: {rel}"
+                    ),
+                    None => assert_eq!(sha256(&p), want, "{what}: {rel}"),
+                }
+            }
+            // And the first one, before the change.
+            let first = snaps
+                .iter()
+                .min_by_key(|s| s["started"].as_str().unwrap().to_owned())
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let out1 = t.path().join(format!("first-{engine}"));
+            let o = run(&[
+                "restore",
+                engine,
+                "--snapshot",
+                &first,
+                "--to",
+                out1.to_str().unwrap(),
+                "/srv/src/docs/a.txt",
+            ]);
+            assert!(
+                o.status.success(),
+                "{what}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            assert_eq!(
+                sha256(&out1.join("a.txt")),
+                exp["first"]["docs/a.txt"].as_str().unwrap(),
+                "{what}"
+            );
+            // This Flux carries on into the old repository.
+            let o = run(&["backup", engine]);
+            assert!(
+                o.status.success(),
+                "{what}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let o = run(&["--json", "snapshots", engine]);
+            let snaps: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+            assert_eq!(snaps.as_array().unwrap().len(), 3, "{what}");
+        }
+    }
 }

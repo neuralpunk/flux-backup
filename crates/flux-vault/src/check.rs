@@ -14,6 +14,7 @@ use crate::backend::pack_path;
 use crate::crypto::{BlobId, hex_id, parse_id};
 use crate::pack::{decode_blob, read_header, split_pack};
 use crate::repo::VaultRepo;
+use flux_core::sync::Locked;
 
 #[derive(Debug, Default, Serialize)]
 pub struct CheckReport {
@@ -68,7 +69,7 @@ pub fn check(
     by_pack.par_iter().for_each(|(pack, blobs)| {
         let hex = hex_id(pack);
         let Some(&size) = on_disk.get(&hex) else {
-            errors.lock().expect("errors").push(format!(
+            errors.locked().push(format!(
                 "pack {hex} is missing ({} blobs lost)",
                 blobs.len()
             ));
@@ -78,16 +79,13 @@ pub fn check(
             Ok(header) => {
                 let ids: HashSet<BlobId> = header.iter().map(|e| e.id).collect();
                 if let Some(b) = blobs.iter().find(|b| !ids.contains(*b)) {
-                    errors.lock().expect("errors").push(format!(
+                    errors.locked().push(format!(
                         "pack {hex} lacks blob {} listed in the index",
                         hex_id(b)
                     ));
                 }
             }
-            Err(e) => errors
-                .lock()
-                .expect("errors")
-                .push(format!("pack {hex}: {e}")),
+            Err(e) => errors.locked().push(format!("pack {hex}: {e}")),
         }
     });
     r.errors.extend(errors.into_inner().expect("errors"));
@@ -99,7 +97,10 @@ pub fn check(
     }
 
     // 2. Every snapshot's trees and data blobs are present.
-    let records = repo.records()?;
+    let (records, unreadable) = repo.record_listing()?;
+    for (name, e) in unreadable {
+        r.errors.push(format!("snapshot {name} can't be read: {e}"));
+    }
     r.snapshots = records.len() as u64;
     let mut seen_trees: HashSet<BlobId> = HashSet::new();
     let mut used_data: HashSet<BlobId> = HashSet::new();
@@ -114,10 +115,17 @@ pub fn check(
             if !seen_trees.insert(t) {
                 continue;
             }
-            match repo.load_tree(&t) {
+            match repo.load_tree(&t, rec.tree_format) {
                 Ok(tree) => {
                     for n in tree.nodes {
                         stack.extend(n.subtree);
+                        if !holes_fit(&n.holes, n.size) {
+                            r.errors.push(format!(
+                                "snapshot {}: the holes recorded for /{} don't fit the file",
+                                rec.meta.id,
+                                String::from_utf8_lossy(&n.name),
+                            ));
+                        }
                         used_data.extend(n.content.iter().copied());
                         for b in &n.content {
                             if !index.contains(b) {
@@ -185,10 +193,7 @@ pub fn check(
                 Ok(())
             })();
             if let Err(e) = result {
-                errors
-                    .lock()
-                    .expect("errors")
-                    .push(format!("pack {name}: {e}"));
+                errors.locked().push(format!("pack {name}: {e}"));
             }
             progress.bytes_done.fetch_add(**size, Relaxed);
             progress.entries_done.fetch_add(1, Relaxed);
@@ -203,4 +208,33 @@ pub fn check(
     r.errors.sort();
     progress.set_phase(Phase::Done);
     Ok(r)
+}
+
+/// Holes in order, not overlapping, not empty, and inside the file.
+fn holes_fit(holes: &[crate::format::Hole], size: u64) -> bool {
+    let mut pos = 0u64;
+    holes.iter().all(|h| {
+        let ok =
+            h.len > 0 && h.offset >= pos && h.offset.checked_add(h.len).is_some_and(|e| e <= size);
+        pos = h.offset.saturating_add(h.len);
+        ok
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holes_fit;
+    use crate::format::Hole;
+
+    #[test]
+    fn hole_lists_are_checked() {
+        let h = |offset, len| Hole { offset, len };
+        assert!(holes_fit(&[], 0));
+        assert!(holes_fit(&[h(0, 4), h(8, 2)], 10));
+        assert!(!holes_fit(&[h(8, 2), h(0, 4)], 10), "out of order");
+        assert!(!holes_fit(&[h(0, 4), h(2, 4)], 10), "overlapping");
+        assert!(!holes_fit(&[h(8, 4)], 10), "past the end");
+        assert!(!holes_fit(&[h(3, 0)], 10), "empty");
+        assert!(!holes_fit(&[h(u64::MAX, 2)], 10), "overflow");
+    }
 }

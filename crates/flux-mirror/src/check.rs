@@ -14,6 +14,7 @@ use flux_fs::outcome::CheckSummary;
 use crate::MirrorError;
 use crate::manifest::{Kind, ManifestReader};
 use crate::repo::MirrorRepo;
+use flux_core::sync::Locked;
 
 pub fn check(
     repo: &MirrorRepo,
@@ -29,10 +30,7 @@ pub fn check(
         let entries = match ManifestReader::read_all(&repo.manifest_path(&s.id)) {
             Ok(e) => e,
             Err(e) => {
-                errors
-                    .lock()
-                    .expect("errors")
-                    .push(format!("snapshot {}: {e}", s.id));
+                errors.locked().push(format!("snapshot {}: {e}", s.id));
                 continue;
             }
         };
@@ -66,7 +64,7 @@ pub fn check(
                     _ => None,
                 };
                 if let Some(msg) = problem {
-                    errors.lock().expect("errors").push(format!(
+                    errors.locked().push(format!(
                         "snapshot {}: {}: {msg}",
                         s.id,
                         e.abs_path().display()

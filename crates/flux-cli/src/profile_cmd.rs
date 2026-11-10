@@ -33,15 +33,25 @@ pub enum ProfileCmd {
         /// Where backups go: /local/path, [user@]host:/path or ssh://[user@]host[:port]/path.
         #[arg(long, short)]
         target: String,
-        /// File or folder to back up (repeatable).
-        #[arg(long = "source", short = 's', required = true)]
+        /// File or folder to back up (repeatable; replaces the template's).
+        #[arg(long = "source", short = 's', required_unless_present = "template")]
         sources: Vec<PathBuf>,
-        /// Exclude pattern (repeatable).
+        /// Exclude pattern (repeatable; added to the template's).
         #[arg(long, short = 'x')]
         exclude: Vec<String>,
         #[arg(long, value_enum, default_value_t = EngineArg::Mirror)]
         engine: EngineArg,
+        /// Start from a template: its folders, exclusions, schedule and what to keep
+        /// (`flux profile templates` lists them).
+        #[arg(long)]
+        template: Option<String>,
     },
+    /// The templates new profiles can start from.
+    Templates,
+    /// Save a profile's settings as a template (without where it backs up to).
+    SaveTemplate { id: String, name: String },
+    /// Remove one of your templates.
+    DeleteTemplate { template: String },
     /// Open a profile in $EDITOR, then validate it.
     Edit { id: String },
     /// Delete a profile (existing backups are left untouched).
@@ -94,6 +104,177 @@ pub enum ProfileCmd {
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
     },
+    /// More places a profile's backups go: each backup run goes to all of them, one after
+    /// the other, each from the sources (independent copies). A destination's snapshots
+    /// are those of `<id>+<name>`: `flux snapshots home+nas`.
+    #[command(subcommand)]
+    Destination(DestinationCmd),
+}
+
+#[derive(Subcommand)]
+pub enum DestinationCmd {
+    /// List a profile's destinations, the main one first.
+    List { id: String },
+    /// Add a destination.
+    #[command(after_help = "Example:\n  \
+        flux profile destination add home nas --target me@nas:/srv/backup --engine vault --offsite")]
+    Add {
+        id: String,
+        /// Its name in the profile (`nas`): lowercase letters, digits, '-' and '_'.
+        name: String,
+        /// Where: /local/path, [user@]host:/path or ssh://[user@]host[:port]/path.
+        #[arg(long, short)]
+        target: String,
+        /// How it's stored (default: mirror; with --replicate, the main destination's).
+        #[arg(long, value_enum)]
+        engine: Option<EngineArg>,
+        /// Copy the main destination's backup after each run instead of backing up from
+        /// the sources again (Vault anywhere; Mirror and rsync between local drives).
+        #[arg(long)]
+        replicate: bool,
+        /// What the app calls it ("NAS in the office").
+        #[arg(long)]
+        label: Option<String>,
+        /// Kept away from this computer's building.
+        #[arg(long)]
+        offsite: bool,
+    },
+    /// Remove a destination. Its backups stay where they are.
+    #[command(alias = "rm")]
+    Remove { id: String, name: String },
+}
+
+/// An engine and its default options.
+fn engine_options(
+    e: EngineArg,
+) -> (
+    Engine,
+    Option<VaultOptions>,
+    Option<flux_core::profile::BorgOptions>,
+) {
+    match e {
+        EngineArg::Mirror => (Engine::Mirror, None, None),
+        EngineArg::Vault => (Engine::Vault, Some(VaultOptions::default()), None),
+        EngineArg::Rsync => (Engine::Rsync, None, None),
+        EngineArg::Borg => (
+            Engine::Borg,
+            None,
+            Some(flux_core::profile::BorgOptions::default()),
+        ),
+    }
+}
+
+fn destinations(ctx: &Ctx, store: &ProfileStore, cmd: DestinationCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        DestinationCmd::List { id } => {
+            let pid = parse_id(&id)?;
+            let p = store.load(&pid)?;
+            if ctx.json {
+                crate::output::print_json(&serde_json::json!({
+                    "main": { "id": pid.as_str(), "engine": p.engine.label(), "target": target_summary(&p.target), "offsite": p.offsite },
+                    "destinations": p.destinations.iter().map(|d| serde_json::json!({
+                        "id": pid.with_destination(&d.name).map(|i| i.to_string()).unwrap_or_default(),
+                        "name": d.name, "label": d.label(), "engine": d.engine.label(),
+                        "target": target_summary(&d.target), "offsite": d.offsite,
+                    })).collect::<Vec<_>>(),
+                }))?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            let mut rows = vec![vec![
+                pid.to_string(),
+                "(main)".into(),
+                p.engine.label().into(),
+                target_summary(&p.target),
+                if p.offsite { "offsite" } else { "" }.into(),
+            ]];
+            for d in &p.destinations {
+                rows.push(vec![
+                    pid.with_destination(&d.name)?.to_string(),
+                    d.label().into(),
+                    d.engine.label().into(),
+                    target_summary(&d.target),
+                    [
+                        (d.mode == flux_core::profile::CopyMode::Replicate)
+                            .then_some("copy of main"),
+                        d.offsite.then_some("offsite"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                ]);
+            }
+            crate::output::table(&["ID", "NAME", "ENGINE", "WHERE", ""], &rows);
+            Ok(ExitCode::SUCCESS)
+        }
+        DestinationCmd::Add {
+            id,
+            name,
+            target,
+            engine,
+            replicate,
+            label,
+            offsite,
+        } => {
+            let pid = parse_id(&id)?;
+            let mut p = store.load(&pid)?;
+            if p.destinations.iter().any(|d| d.name == name) {
+                anyhow::bail!("{id} already has a destination named {name:?}");
+            }
+            let (engine, vault, borg) = match (engine, replicate) {
+                (Some(e), _) => engine_options(e),
+                // A copy of the main backup: stored the same way (its options come along).
+                (None, true) => (p.engine, None, None),
+                (None, false) => engine_options(EngineArg::Mirror),
+            };
+            p.destinations.push(flux_core::profile::Destination {
+                name: name.clone(),
+                label,
+                engine,
+                target: crate::target_spec::parse(&target)?,
+                offsite,
+                mode: if replicate {
+                    flux_core::profile::CopyMode::Replicate
+                } else {
+                    flux_core::profile::CopyMode::Independent
+                },
+                vault,
+                rsync: None,
+                borg,
+            });
+            let issues = p.validate_in(ctx.paths.scope);
+            let errors: Vec<_> = issues
+                .iter()
+                .filter(|i| i.severity == flux_core::profile::Severity::Error)
+                .collect();
+            if !errors.is_empty() {
+                for i in &errors {
+                    eprintln!("{id}: {i}");
+                }
+                anyhow::bail!("the destination wasn't added");
+            }
+            store.save(&pid, &p)?;
+            println!(
+                "Backups of {id} also go to {target} now (snapshots: flux snapshots {}).",
+                pid.with_destination(&name)?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        DestinationCmd::Remove { id, name } => {
+            let pid = parse_id(&id)?;
+            let mut p = store.load(&pid)?;
+            let before = p.destinations.len();
+            p.destinations.retain(|d| d.name != name);
+            if p.destinations.len() == before {
+                anyhow::bail!("{id} has no destination named {name:?}");
+            }
+            store.save(&pid, &p)?;
+            println!(
+                "Removed destination {name} from {id}. The backups made there stay where they are."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -112,6 +293,7 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
     let store = ProfileStore::new(&ctx.paths);
     match cmd {
         ProfileCmd::List => list(ctx, &store),
+        ProfileCmd::Destination(cmd) => destinations(ctx, &store, cmd),
         ProfileCmd::Show { id } => show(ctx, &store, &parse_id(&id)?),
         ProfileCmd::Create {
             id,
@@ -120,15 +302,40 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
             sources,
             exclude,
             engine,
+            template,
         } => {
             let id = parse_id(&id)?;
             let target = target_spec::parse(&target)?;
-            let sources = sources
+            let sources: Vec<PathBuf> = sources
                 .into_iter()
                 .map(absolutize)
                 .collect::<anyhow::Result<_>>()?;
-            let mut p = Profile::new(name.unwrap_or_else(|| id.to_string()), target, sources);
-            p.sources.exclude = exclude;
+            let mut p = match &template {
+                Some(t) => {
+                    let service = flux_service::Service::new(ctx.paths.clone());
+                    let t = own_template(&ctx.paths, t);
+                    let mut p = flux_service::edit::new_from_template_impl(&service, t)
+                        .map_err(|e| anyhow::anyhow!("{e} (see flux profile templates)"))?
+                        .profile;
+                    p.target = target;
+                    if !sources.is_empty() {
+                        p.sources.paths = sources;
+                    }
+                    p.sources.exclude.extend(exclude);
+                    if let Some(n) = name {
+                        p.name = n;
+                    } else if p.name.is_empty() {
+                        p.name = id.to_string();
+                    }
+                    p
+                }
+                None => {
+                    let mut p =
+                        Profile::new(name.unwrap_or_else(|| id.to_string()), target, sources);
+                    p.sources.exclude = exclude;
+                    p
+                }
+            };
             match engine {
                 EngineArg::Mirror => {}
                 EngineArg::Vault => {
@@ -147,11 +354,40 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::from(EXIT_INVALID));
             }
             let path = store.create(&id, &p)?;
+            sync_schedule(ctx, &id, &p);
             if ctx.json {
                 output::print_json(&serde_json::json!({ "id": id, "path": path }))?;
             } else {
                 println!("Created profile {id} ({})", path.display());
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfileCmd::Templates => {
+            let list = flux_runner::templates::list(&ctx.paths);
+            if ctx.json {
+                output::print_json(&list)?;
+            } else {
+                for t in list {
+                    let id = t.id.strip_prefix("own:").unwrap_or(&t.id);
+                    println!("{id:<14} {}{}", t.name, if t.own { " (yours)" } else { "" });
+                    println!("{:<14} {}", "", t.line);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfileCmd::SaveTemplate { id, name } => {
+            let service = flux_service::Service::new(ctx.paths.clone());
+            flux_service::edit::save_template_impl(&service, id, name.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!(
+                "Saved the template “{name}”. Use it with: flux profile create … --template \"{name}\""
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfileCmd::DeleteTemplate { template } => {
+            let id = own_template(&ctx.paths, &template);
+            flux_runner::templates::delete(&ctx.paths, &id).map_err(|e| anyhow::anyhow!(e))?;
+            println!("Removed the template {template}.");
             Ok(ExitCode::SUCCESS)
         }
         ProfileCmd::Edit { id } => edit(ctx, &store, &parse_id(&id)?),
@@ -251,6 +487,7 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::from(EXIT_INVALID));
             }
             let path = store.create(&id, &p)?;
+            sync_schedule(ctx, &id, &p);
             if ctx.json {
                 output::print_json(&serde_json::json!({ "id": id, "path": path }))?;
             } else {
@@ -346,6 +583,7 @@ fn backintime(
         return Ok(ExitCode::from(EXIT_INVALID));
     }
     let path = store.create(&id, &p)?;
+    sync_schedule(ctx, &id, &p);
     if ctx.json {
         output::print_json(&serde_json::json!({ "id": id, "path": path, "notes": b.notes }))?;
     } else {
@@ -568,21 +806,30 @@ fn validate(ctx: &Ctx, store: &ProfileStore, ids: Vec<String>) -> anyhow::Result
     })
 }
 
-/// Keep the profile's timer in step after an edit (only if it has or needs one).
-fn sync_schedule(ctx: &Ctx, id: &ProfileId, p: &Profile) {
+/// Keep the profile's timer in step after it is created or changed (only if it has or
+/// needs one). A profile with a schedule and no timer never runs, and nothing says so.
+pub(crate) fn sync_schedule(ctx: &Ctx, id: &ProfileId, p: &Profile) {
     use flux_runner::schedule;
+    // With --json, standard output is the answer and nothing else.
+    let say = |m: String| {
+        if ctx.json {
+            eprintln!("{m}");
+        } else {
+            println!("{m}");
+        }
+    };
     let sd = schedule::Scheduler::new(&ctx.paths);
     let needs = p.schedule.trigger != flux_core::profile::Trigger::Manual || p.schedule.on_connect;
     if !needs && !sd.installed_ids().contains(id) {
         return;
     }
     match sd.apply(id, p, &schedule::UnitEnv::current(ctx.paths.scope)) {
-        Ok(a) if a.changed() => println!("Updated the schedule ({}).", schedule::summary(p)),
+        Ok(a) if a.changed() => say(format!("Updated the schedule ({}).", schedule::summary(p))),
         Ok(_) => {}
         Err(e) => eprintln!("warning: profile saved, but the schedule could not be updated: {e}"),
     }
     if let Some(w) = sd.unsupported(p) {
-        println!("Note: {w}");
+        say(format!("Note: {w}"));
     }
 }
 
@@ -641,4 +888,13 @@ fn edit(ctx: &Ctx, store: &ProfileStore, id: &ProfileId) -> anyhow::Result<ExitC
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A template by id or by name: a built-in id (`development`), yours by its name
+/// (`"Work laptop"`) or id (`work-laptop`, `own:work-laptop`).
+fn own_template(paths: &flux_core::Paths, t: &str) -> String {
+    let list = flux_runner::templates::list(paths);
+    list.iter()
+        .find(|x| x.id == t || x.id == format!("own:{t}") || (x.own && x.name == t))
+        .map_or_else(|| t.to_owned(), |x| x.id.clone())
 }

@@ -499,8 +499,8 @@ FOR RSYNC USERS
     are the equivalent.
 ",
         name = p.name,
-        host = sys::hostname(),
-        user = sys::username(),
+        host = p.kept_as(id).host,
+        user = p.kept_as(id).user,
         flux = flux_core::VERSION,
     )
 }
@@ -1000,8 +1000,8 @@ FOR BORG USERS
     the equivalent. Retention: Flux's policy, applied with borg delete + compact.
 ",
         name = p.name,
-        host = sys::hostname(),
-        user = sys::username(),
+        host = p.kept_as(id).host,
+        user = p.kept_as(id).user,
         enc = opts.encryption.as_arg(),
         enc_short = if encrypted {
             "compressed, deduplicated and encrypted"

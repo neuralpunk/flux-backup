@@ -21,6 +21,7 @@ use flux_runner::schedule;
 use flux_vault::VaultError;
 
 use crate::{ApiError, CACHE_SNAPSHOTS, Result, Service};
+use flux_core::sync::Locked;
 
 #[derive(Debug, Serialize)]
 pub struct ProfileSummary {
@@ -39,6 +40,25 @@ pub struct ProfileSummary {
     pub errors: Vec<String>,
     last_run: Option<RunRecord>,
     pub running: bool,
+    /// The main destination is kept away from this computer's building.
+    offsite: bool,
+    /// More places the backups go (each a profile id of its own: `home+nas`).
+    destinations: Vec<DestinationSummary>,
+}
+
+/// One more destination of a profile.
+#[derive(Debug, Clone, Serialize)]
+pub struct DestinationSummary {
+    /// `home+nas`: what to browse, restore or back up just this one with.
+    id: String,
+    name: String,
+    label: String,
+    engine: Engine,
+    target: String,
+    remote: bool,
+    offsite: bool,
+    /// A copy of the main destination's backup (replicate).
+    replica: bool,
 }
 
 pub fn target_label(t: &Target) -> String {
@@ -87,6 +107,24 @@ fn summary(
             .collect(),
         last_run: runlog::recent_runs(paths, id, 1).into_iter().next(),
         running: running.iter().any(|j| j.profile == id.as_str()),
+        offsite: p.offsite,
+        destinations: p
+            .destinations
+            .iter()
+            .map(|d| DestinationSummary {
+                id: id
+                    .with_destination(&d.name)
+                    .map(|i| i.to_string())
+                    .unwrap_or_default(),
+                name: d.name.clone(),
+                label: d.label().to_owned(),
+                engine: d.engine,
+                target: target_label(&d.target),
+                remote: matches!(d.target, Target::Ssh { .. }),
+                offsite: d.offsite,
+                replica: d.mode == flux_core::profile::CopyMode::Replicate,
+            })
+            .collect(),
     }
 }
 
@@ -120,6 +158,8 @@ pub fn profiles_impl(state: &Service) -> Result<Vec<ProfileSummary>> {
                 errors: vec![e.to_string()],
                 last_run: None,
                 running: false,
+                offsite: false,
+                destinations: Vec::new(),
             }),
         }
     }
@@ -144,6 +184,18 @@ pub struct Overview {
     health: Vec<crate::extras::Health>,
     /// Free space, its history and forecast (local targets).
     space: Option<crate::space::Space>,
+    /// Restore tests: the setting and the latest one.
+    restore_test: RestoreTestView,
+    /// Unusual changes found and not yet dismissed.
+    unusual: Option<flux_runner::unusual::UnusualReport>,
+}
+
+/// What the Overview says about restore tests.
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreTestView {
+    every: flux_core::profile::TestEvery,
+    last: Option<flux_runner::restore_test::TestReport>,
+    last_passed: Option<jiff::Timestamp>,
 }
 
 pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
@@ -163,14 +215,26 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
     let now = jiff::Timestamp::now();
     let runs = runlog::recent_runs(&state.paths, &id, 300);
     let space = crate::space::forecast(&runs, free_bytes, flux_runner::disk_size(&p.target), now);
-    let health = crate::extras::health(
+    let tests = flux_runner::restore_test::load_state(&state.paths, &id);
+    let mut health = crate::extras::health(
         &p,
         &runs,
         free_bytes,
         space.as_ref().and_then(|s| s.days_left),
         now,
     );
+    health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
+    let unusual = crate::extras::open_unusual(&state.paths, &id, &runs);
+    if let Some(u) = &unusual {
+        health.insert(0, crate::extras::unusual_health(u));
+    }
     Ok(Overview {
+        unusual,
+        restore_test: RestoreTestView {
+            every: p.restore_test.every,
+            last: tests.history.last().cloned(),
+            last_passed: tests.last_passed,
+        },
         health,
         space,
         profile: summary(&state.paths, &id, &p, &running),
@@ -207,6 +271,8 @@ pub struct Status {
     health: Vec<crate::extras::Health>,
     /// The last [`STATUS_DAYS`] days, oldest first, today last.
     days: Vec<Day>,
+    /// Restore tests are on, and none has passed within their interval.
+    unverified: bool,
 }
 
 pub const STATUS_DAYS: usize = 30;
@@ -218,15 +284,24 @@ pub fn status_impl(state: &Service, id: String) -> Result<Status> {
     let runs = runlog::recent_runs(&state.paths, &id, 300);
     let free = flux_runner::free_space(&p.target);
     let space = crate::space::forecast(&runs, free, flux_runner::disk_size(&p.target), now);
-    let health = crate::extras::health(
+    let tests = flux_runner::restore_test::load_state(&state.paths, &id);
+    let mut health = crate::extras::health(
         &p,
         &runs,
         free,
         space.as_ref().and_then(|s| s.days_left),
         now,
     );
+    health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
+    if let Some(u) = crate::extras::open_unusual(&state.paths, &id, &runs) {
+        health.insert(0, crate::extras::unusual_health(&u));
+    }
+    let unverified = p.restore_test.every != flux_core::profile::TestEvery::Off
+        && (tests.last_passed.is_none()
+            || flux_runner::restore_test::overdue(&p.restore_test, &tests, None, now).is_some());
     let tz = jiff::tz::TimeZone::system();
     Ok(Status {
+        unverified,
         next_run: st.next_run_at,
         timer_active: st.timer_active,
         last_good: runs
@@ -395,7 +470,7 @@ pub fn list_dir_impl(
 ) -> Result<Listing> {
     let key = (id.clone(), snapshot.clone());
     let cached = {
-        let mut c = state.entries.lock().expect("cache");
+        let mut c = state.entries.locked();
         // Most recently used first: move a hit to the front.
         c.iter().position(|(k, _)| *k == key).map(|i| {
             let hit = c.remove(i).expect("position is in range");
@@ -414,7 +489,7 @@ pub fn list_dir_impl(
                 .entries(&snap)?
                 .collect::<std::result::Result<_, _>>()?;
             let v = Arc::new(SnapshotIndex::new(v));
-            let mut c = state.entries.lock().expect("cache");
+            let mut c = state.entries.locked();
             c.push_front((key, v.clone()));
             c.truncate(CACHE_SNAPSHOTS);
             v
@@ -486,17 +561,19 @@ pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) 
         return Ok(());
     }
     let pool = flux_runner::repo::sftp_pool(&state.paths, &p, true);
-    match flux_vault::VaultRepo::open(flux_runner::repo::vault_backend(&p, pool), Some(&password)) {
+    use flux_runner::repo::RepoError;
+    match flux_runner::repo::open_vault_with(
+        flux_runner::repo::vault_backend(&p, pool),
+        &p,
+        &password,
+    ) {
         Ok(_) => {}
-        Err(VaultError::NoRepository(_)) if create => {}
-        Err(VaultError::NoRepository(_)) => {
+        Err(RepoError::Vault(VaultError::NoRepository(_))) if create => {}
+        Err(RepoError::Vault(VaultError::NoRepository(_))) => {
             return Err(ApiError::new(
                 "new_vault",
                 "This Vault doesn't exist yet. Choose its password; the first backup creates it.",
             ));
-        }
-        Err(e @ VaultError::WrongPassword) => {
-            return Err(ApiError::new("wrong_password", e.to_string()));
         }
         Err(e) => return Err(e.into()),
     }
@@ -707,9 +784,18 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
     if shutdown {
         cmd.arg("--shutdown");
     }
+    // What the backup says goes to a file, not to a pipe this process holds: the backup
+    // outlives the app (and the administrator helper, which exits when idle), and with a
+    // pipe its next message after that would fail to be written and stop it mid-run.
+    let said = start_log(&state.paths, &pid)
+        .map_err(|e| ApiError::new("error", format!("cannot start the backup: {e}")))?;
+    let said_by_child = std::fs::File::options()
+        .append(true)
+        .open(&said)
+        .map_err(|e| ApiError::new("error", format!("{}: {e}", said.display())))?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(said_by_child))
         .process_group(0);
     if let Some(pw) = state.password(&pid) {
         cmd.env("FLUX_PASSWORD", pw.as_str());
@@ -721,15 +807,12 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
             format!("cannot start {}: {e}", program.to_string_lossy()),
         )
     })?;
-    // Read stderr as it comes, so a chatty child never blocks on a full pipe.
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut s) = stderr {
-            let _ = std::io::Read::read_to_string(&mut s, &mut text);
-        }
-        text
-    });
+    // The end of what it said (a backup with many warnings says a lot).
+    let read_said = move || {
+        let text = std::fs::read(&said).unwrap_or_default();
+        let from = text.len().saturating_sub(16 << 10);
+        String::from_utf8_lossy(&text[from..]).into_owned()
+    };
     let deadline = std::time::Instant::now() + START_WAIT;
     let exited = loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -748,14 +831,13 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
         // Running: reap it in the background; its own socket reports progress and outcome.
         std::thread::spawn(move || {
             let status = child.wait();
-            let text = reader.join().unwrap_or_default();
             if !matches!(status, Ok(s) if s.success()) {
-                tracing::warn!("flux backup exited with {status:?}: {}", text.trim());
+                tracing::warn!("flux backup exited with {status:?}: {}", read_said().trim());
             }
         });
         return Ok(Started { running: true });
     };
-    let text = reader.join().unwrap_or_default();
+    let text = read_said();
     // The run log has the outcome in the same words as Activity; stderr is the fallback
     // (a run that ended before it was recorded, such as an unreadable profile).
     let run = runlog::recent_runs(&state.paths, &pid, 1)
@@ -779,6 +861,25 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
             Err(ApiError::new("backup_failed", why))
         }
     }
+}
+
+/// A new, empty file for what a backup started from here writes to standard error
+/// (private: it can name files). One per backup, replaced at its next start.
+fn start_log(paths: &flux_core::Paths, id: &ProfileId) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = paths.state_dir.join("started");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    let path = dir.join(format!("{id}.log"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    Ok(path)
 }
 
 /// Shut the computer down when a running backup ends (or no longer).
@@ -811,6 +912,53 @@ pub fn cancel_impl(state: &Service, id: String) -> Result<()> {
     })?;
     client.cancel()?;
     Ok(())
+}
+
+/// What a backup's snapshots hold, the space they take, and what deduplication and
+/// compression save.
+pub fn storage_impl(state: &Service, id: String) -> Result<flux_runner::repo::Storage> {
+    let (pid, p) = state.load(&id)?;
+    let repo = state.open(&pid, &p)?;
+    Ok(repo.storage()?)
+}
+
+/// A Vault's format and the newest this Flux writes (no password needed: only its
+/// `config` is read). `None` for other engines or a Vault that isn't there.
+#[derive(Serialize)]
+pub struct VaultFormat {
+    pub format: u32,
+    pub newest: u32,
+}
+
+pub fn vault_format_impl(state: &Service, id: String) -> Result<Option<VaultFormat>> {
+    let (_, p) = state.load(&id)?;
+    if p.engine != flux_core::Engine::Vault {
+        return Ok(None);
+    }
+    let backend =
+        flux_runner::repo::vault_backend(&p, flux_runner::repo::sftp_pool(&state.paths, &p, true));
+    let Ok(raw) = backend.read("config") else {
+        return Ok(None);
+    };
+    let format = serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v["format"].as_u64())
+        .unwrap_or(1) as u32;
+    Ok(Some(VaultFormat {
+        format,
+        newest: flux_vault::format::FORMAT,
+    }))
+}
+
+/// Move a Vault to the newest format (`flux vault upgrade`).
+pub fn upgrade_vault_impl(state: &Service, id: String) -> Result<Option<VaultFormat>> {
+    let (pid, p) = state.load(&id)?;
+    let backend =
+        flux_runner::repo::vault_backend(&p, flux_runner::repo::sftp_pool(&state.paths, &p, true));
+    flux_vault::VaultRepo::upgrade_format(backend.as_ref())
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    state.forget_cached(&pid);
+    vault_format_impl(state, id)
 }
 
 #[cfg(test)]
@@ -1135,6 +1283,15 @@ mod tests {
                 .unwrap()
                 .running
         );
+        // What the backup says goes to a file: a pipe would break when this process (the
+        // app, or the helper) exits before the backup does, and stop the backup with it.
+        let started = backup_now_impl(
+            &with(
+                "test -f /dev/stderr || { echo 'Error: standard error is not a file' >&2; exit 1; }",
+            ),
+            "t".into(),
+        );
+        assert!(started.is_ok(), "{:?}", started.err().map(|e| e.message));
         // Stop with nothing running says so in its own code.
         assert_eq!(
             cancel_impl(&with("true"), "t".into()).unwrap_err().code,
@@ -1577,12 +1734,20 @@ mod tests {
             st,
             "t".into(),
             snap.id.clone(),
-            Some("milestone".into()),
-            true,
-            Some(true),
+            flux_fs::snapshot::SnapshotChange {
+                name: Some(Some("milestone".into())),
+                pinned: Some(true),
+                note: Some(Some("  before the upgrade ".into())),
+                tags: Some(vec!["Taxes".into(), "taxes".into(), " release ".into()]),
+            },
         )
         .unwrap();
         assert_eq!((m.name.as_deref(), m.pinned), (Some("milestone"), true));
+        assert_eq!(m.note.as_deref(), Some("before the upgrade"));
+        assert_eq!(m.tags, ["Taxes", "release"]);
+        // Kept: a fresh listing reads them back from the snapshot.
+        let again = snapshots_impl(st, "t".into()).unwrap().remove(0);
+        assert_eq!((again.note, again.tags), (m.note.clone(), m.tags.clone()));
         std::fs::write(e.src.join("c.txt"), "new").unwrap();
         let c = actions::compare_impl(st, "t".into(), snap.id.clone(), None).unwrap();
         assert_eq!(c.added(), 1);
@@ -1649,5 +1814,47 @@ mod tests {
         // Other engines have no kit.
         let m = env(Engine::Mirror);
         assert!(recovery_kit_impl(&m.state, "t".into()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod vault_format_tests {
+    use super::*;
+
+    #[test]
+    fn a_vault_from_0_3_is_offered_the_upgrade() {
+        let t = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../flux-runner/tests/fixtures/v0.3/tgt/flux-vault");
+        let vault = t.path().join("tgt/flux-vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        for dir in ["", "keys", "index", "snapshots"] {
+            let from = fixture.join(dir);
+            std::fs::create_dir_all(vault.join(dir)).unwrap();
+            for e in std::fs::read_dir(&from).unwrap().flatten() {
+                if e.file_type().unwrap().is_file() {
+                    std::fs::copy(e.path(), vault.join(dir).join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let paths = flux_core::Paths::under(t.path().join("home"), flux_core::Scope::User);
+        let mut p = Profile::new(
+            "Old",
+            flux_core::profile::Target::Local {
+                path: t.path().join("tgt"),
+                fs_uuid: None,
+            },
+            vec!["/srv/src".into()],
+        );
+        p.engine = flux_core::Engine::Vault;
+        p.vault = Some(Default::default());
+        flux_core::ProfileStore::new(&paths)
+            .create(&flux_core::ProfileId::new("old").unwrap(), &p)
+            .unwrap();
+        let state = Service::new(paths);
+        let f = vault_format_impl(&state, "old".into()).unwrap().unwrap();
+        assert_eq!((f.format, f.newest), (1, 2));
+        let f = upgrade_vault_impl(&state, "old".into()).unwrap().unwrap();
+        assert_eq!(f.format, 2);
     }
 }

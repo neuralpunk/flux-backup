@@ -46,6 +46,8 @@ pub enum Reason {
     Weekly,
     Monthly,
     Yearly,
+    /// Kept by the safety floor: the rules would leave too few complete snapshots.
+    Floor,
 }
 
 impl Reason {
@@ -61,6 +63,7 @@ impl Reason {
             Reason::Weekly => "weekly",
             Reason::Monthly => "monthly",
             Reason::Yearly => "yearly",
+            Reason::Floor => "safety-floor",
         }
     }
 }
@@ -171,22 +174,42 @@ pub fn evaluate(
         now.saturating_sub(age.as_duration())
             .unwrap_or(Timestamp::MIN)
     });
+    let mut expired = vec![false; order.len()];
+    if let Some(cut) = expiry {
+        for (i, s) in order.iter().enumerate() {
+            let r = &mut reasons[i];
+            let protected = r
+                .iter()
+                .any(|x| matches!(x, Reason::Pinned | Reason::Named | Reason::Newest));
+            if s.time < cut && !protected && !r.is_empty() {
+                expired[i] = true;
+                r.clear();
+            }
+        }
+    }
+    // The safety floor: keep the newest complete snapshots the rules would remove until
+    // enough complete ones stay (even past `max_age`: the floor wins).
+    let healthy_kept = order
+        .iter()
+        .zip(&reasons)
+        .filter(|(s, r)| s.healthy && !r.is_empty())
+        .count();
+    let mut short = (policy.safety_floor as usize).saturating_sub(healthy_kept);
+    for (i, s) in order.iter().enumerate() {
+        if short == 0 {
+            break;
+        }
+        if s.healthy && reasons[i].is_empty() {
+            reasons[i].push(Reason::Floor);
+            expired[i] = false;
+            short -= 1;
+        }
+    }
     order
         .iter()
         .zip(reasons)
-        .map(|(s, mut r)| {
-            let mut expired = false;
-            if let Some(cut) = expiry
-                && s.time < cut
-            {
-                let protected = r
-                    .iter()
-                    .any(|x| matches!(x, Reason::Pinned | Reason::Named | Reason::Newest));
-                if !protected && !r.is_empty() {
-                    expired = true;
-                    r.clear();
-                }
-            }
+        .zip(expired)
+        .map(|((s, mut r), expired)| {
             r.sort();
             r.dedup();
             Decision {
@@ -244,6 +267,10 @@ mod tests {
             keep_named: true,
             min_free_space: None,
             min_free_inodes_percent: None,
+            safety_floor: 0,
+            after_problems: crate::profile::AfterProblems::Hold,
+            keep_history_days: None,
+            keep_history_runs: None,
         }
     }
 
@@ -379,5 +406,57 @@ mod tests {
         s[0].pinned = true;
         let c = space_candidates(&s, &none(), &HashSet::new());
         assert_eq!(c, ["b"], "pinned and newest are never candidates");
+    }
+
+    #[test]
+    fn the_safety_floor_keeps_complete_snapshots() {
+        let now = Timestamp::from_second(1_800_000_000).unwrap();
+        let tz = TimeZone::UTC;
+        let hours = |h: i64| now - jiff::SignedDuration::from_hours(h);
+        let mut s: Vec<SnapshotInfo> = (0..6)
+            .map(|i| snap(&format!("s{i}"), hours(i * 30)))
+            .collect();
+        // The two newest finished with problems.
+        s[0].healthy = false;
+        s[1].healthy = false;
+        let policy = Retention {
+            keep_last: 1,
+            keep_within: None,
+            keep_daily: 0,
+            keep_weekly: 0,
+            keep_monthly: 0,
+            keep_yearly: 0,
+            safety_floor: 2,
+            ..Retention::default()
+        };
+        let d = evaluate(&s, &policy, now, &tz);
+        let kept: Vec<&str> = d.iter().filter(|x| x.keep).map(|x| x.id.as_str()).collect();
+        // s0 (newest, last-n); then the two newest complete ones: s2 and s3.
+        assert_eq!(kept, ["s0", "s2", "s3"]);
+        assert_eq!(d[2].reasons, [Reason::Floor]);
+        // The floor beats max_age too.
+        let old = Retention {
+            max_age: Some(crate::units::HumanDuration::from_secs(3600)),
+            ..policy.clone()
+        };
+        let d = evaluate(&s, &old, now, &tz);
+        assert_eq!(
+            d.iter()
+                .filter(|x| x.keep && x.reasons == [Reason::Floor])
+                .count(),
+            2
+        );
+        // No floor: only the newest stays.
+        let none = Retention {
+            safety_floor: 0,
+            ..policy
+        };
+        assert_eq!(
+            evaluate(&s, &none, now, &tz)
+                .iter()
+                .filter(|x| x.keep)
+                .count(),
+            1
+        );
     }
 }

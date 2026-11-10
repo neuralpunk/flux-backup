@@ -42,6 +42,11 @@ const prefersDark = typeof window !== "undefined" ? window.matchMedia("(prefers-
 
 class AppState {
   profiles = $state<ProfileSummary[]>([]);
+  /** Which destination's snapshots the Snapshots tab shows (a `home+usb` id; `null`: the
+   * main one). Forgotten when another backup is opened. */
+  snapshotsOf = $state<string | null>(null);
+  /** A snapshot the Snapshots tab should open on (then forgotten). */
+  showSnapshot = $state<string | null>(null);
   loading = $state(true);
   loadError = $state<string | null>(null);
   selectedId = $state<string | null>(null);
@@ -64,7 +69,9 @@ class AppState {
   /** A password dialog for profile `id`; `retry` runs once it's unlocked. */
   unlock = $state<{ id: string; retry: () => void } | null>(null);
   /** A dialog opened from a menu (any backup, not only the selected one). */
-  dialog = $state<{ kind: "delete-profile" | "recovery" | "system-unlock" | "export" | "pause"; id?: string } | null>(null);
+  /** Setting up a backup: the template chosen (`null`: choosing one). */
+  creatingTemplate = $state<string | null>(null);
+  dialog = $state<{ kind: "delete-profile" | "recovery" | "recover" | "save-template" | "system-unlock" | "export" | "pause" | "about"; id?: string } | null>(null);
   /** The app's preferences page is showing (instead of a backup). */
   prefsOpen = $state(false);
   /** Scheduled backups are paused (until a moment, or until resumed). */
@@ -137,9 +144,22 @@ class AppState {
 
   newProfile(system = false) {
     this.creatingSystem = system;
+    this.creatingTemplate = null;
     this.creating = true;
     this.prefsOpen = false;
     this.home = false;
+  }
+
+  /** A profile, or one of its destinations (`home+usb`) as a profile of its own: its id,
+   * name ("Home folder → USB stick") and engine. */
+  profileOrDestination(id: string): { id: string; name: string; engine: ProfileSummary["engine"] } | null {
+    const p = this.profiles.find((x) => x.id === id);
+    if (p) return p;
+    const plus = id.indexOf("+");
+    if (plus < 0) return null;
+    const base = this.profiles.find((x) => x.id === id.slice(0, plus));
+    const d = base?.destinations?.find((x) => x.id === id);
+    return base && d ? { id, name: `${base.name} → ${d.label}`, engine: d.engine } : null;
   }
 
   openPreferences() {
@@ -417,6 +437,12 @@ class AppState {
       this.revision++;
     });
     await listen("flux://pause", () => void this.loadPause());
+    // A Vault unused for its "lock again after" time: its password was forgotten.
+    await listen<{ profile: string }>("flux://locked", (e) => {
+      const name = this.profiles.find((p) => p.id === e.profile)?.name ?? e.profile;
+      this.toast("info", `“${name}” is locked again: it wasn't used for a while.`);
+      this.revision++;
+    });
     await listen<{ unlocked: boolean }>("flux://system", (e) => {
       if (!e.unlocked && this.system.unlocked) {
         this.onSystemLocked();

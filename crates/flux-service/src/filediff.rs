@@ -176,7 +176,7 @@ pub fn compare(old_file: &Path, new_file: &Path) -> Result<FileDiff> {
     }
     // Unchanged lines after the last change.
     let last_end = prev_end;
-    let total = diff.old_slices().len();
+    let total = diff.old_len();
     if total > last_end {
         push(
             &mut out,

@@ -39,6 +39,26 @@ import {
   type Preferences,
   type Scheduler,
   type FileDiff,
+  type About,
+  type LinkName,
+  type PasswordHashing,
+  type VaultSecurity,
+  type UnlockFileResult,
+  type Destination,
+  type TestReport,
+  type Webhook,
+  type BackupSearch,
+  type FoundBackup,
+  type RecoverThen,
+  type Target,
+  type ArchiveFormat,
+  type ChecksumKind,
+  type ExportOutcome,
+  type Explained,
+  type Template,
+  type Storage,
+  type Coverage,
+  type ReadinessCheck,
 } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -88,6 +108,18 @@ export const api = {
 
   getProfile: (id: string) => call<Editable>("get_profile", { id }),
   newProfile: (system = false) => call<Editable>("new_profile", { system }),
+  /** A Vault's format and the newest one (`null`: not a Vault, or not there). */
+  vaultFormat: (id: string) => call<{ format: number; newest: number } | null>("vault_format", { id }),
+  /** Move a Vault to the newest format. */
+  upgradeVault: (id: string) => call<{ format: number; newest: number } | null>("upgrade_vault", { id }),
+  /** What the snapshots hold and take, and what dedup and compression save. */
+  storage: (id: string) => call<Storage>("storage", { id }),
+  /** The templates a new backup can start from (built in, then yours). */
+  templates: (system = false) => call<Template[]>("templates", { system }),
+  newFromTemplate: (template: string, system = false) => call<Editable>("new_from_template", { template, system }),
+  /** Save a backup's settings as a template, without where it goes. */
+  saveTemplate: (id: string, name: string) => call<Template[]>("save_template", { id, name }),
+  deleteTemplate: (template: string, system = false) => call<Template[]>("delete_template", { template, system }),
   /** Back In Time's profiles on this computer (yours only), to start a new one from. */
   backintimeProfiles: () => call<BitProfile[]>("backintime_profiles"),
   validateProfile: (profile: Profile, system = false) => call<Issue[]>("validate_profile", { profile, system }),
@@ -105,13 +137,17 @@ export const api = {
   systemUnlock: () => call<void>("system_unlock"),
   systemLock: () => call<void>("system_lock"),
 
-  updateSnapshot: (id: string, snapshot: string, change: { name?: string | null; pinned?: boolean }) =>
+  /** Change a snapshot's name, pin, note or tags (only the keys given change). */
+  updateSnapshot: (id: string, snapshot: string, change: { name?: string | null; pinned?: boolean; note?: string | null; tags?: string[] }) =>
     call<SnapshotMeta>("update_snapshot", {
       id,
       snapshot,
       name: change.name ?? null,
       setName: "name" in change,
       pinned: change.pinned ?? null,
+      note: change.note ?? null,
+      setNote: "note" in change,
+      tags: change.tags ?? null,
     }),
   /** Bytes freed (Vault, Borg), or `null` (Mirror, rsync: folders simply go). */
   deleteSnapshot: (id: string, snapshot: string) => call<number | null>("delete_snapshot", { id, snapshot }),
@@ -152,6 +188,51 @@ export const api = {
   restorePreview: (id: string, snapshot: string, paths: string[], to: string | null, overwrite: boolean, exact = false) =>
     call<RestorePreview>("restore_preview", { id, snapshot, paths, to, overwrite, exact }),
   exportFormats: () => call<ExportFormat[]>("export_formats"),
+  /** Versions of the app, the `flux` command and the helper, for the About dialog. */
+  about: () => call<About>("about"),
+  /** A Vault's passwords, their hashing and unlock file (lists keys even while locked). */
+  vaultSecurity: (id: string) => call<VaultSecurity>("vault_security", { id }),
+  /** Hash the password in use again with this strength (needs the Vault unlocked). */
+  strengthenKey: (id: string, hashing: PasswordHashing) => call<void>("strengthen_key", { id, hashing }),
+  /** Require an unlock file (`create`: a new one at `path`), or stop (`path: null`). */
+  setUnlockFile: (id: string, path: string | null, create = false) => call<UnlockFileResult>("set_unlock_file", { id, path, create }),
+  /** Milliseconds hashing one password takes on this computer. */
+  timeHashing: (hashing: PasswordHashing) => call<number>("time_hashing", { hashing }),
+  /** Add a destination to a saved backup (saved at once; `password` sets up an encrypted
+   * one). Returns the saved profile. */
+  addDestination: (id: string, destination: Destination, password: string | null) => call<Profile>("add_destination", { id, destination, password }),
+  /** Remove a destination (its backups stay). Returns the saved profile. */
+  removeDestination: (id: string, name: string) => call<Profile>("remove_destination", { id, name }),
+  /** Test a restore now (the backup's settings; by default 10 random files). */
+  restoreTest: (id: string) => call<TestReport>("restore_test", { id }),
+  /** The latest restore tests, newest first. */
+  restoreTests: (id: string) => call<TestReport[]>("restore_tests", { id }),
+  /** The webhooks told about every backup (replaces the list). */
+  setWebhooks: (webhooks: Webhook[]) => call<Preferences>("set_webhooks", { webhooks }),
+  /** Send a test message; the HTTP status it answered. */
+  testWebhook: (webhook: Webhook) => call<number>("test_webhook", { webhook }),
+  /** Is `path` backed up by `profile` (the editor's draft), and why? */
+  explain: (profile: Profile, path: string) => call<Explained>("explain", { profile, path }),
+  /** A folder's items, each backed up or left out by `profile`, with totals. */
+  coverage: (profile: Profile, dir: string) => call<Coverage>("coverage", { profile, dir }),
+  /** Save files of a snapshot (all of it with `paths` empty) as an archive in folder `dir`. */
+  exportSnapshot: (id: string, snapshot: string, paths: string[], format: ArchiveFormat, dir: string, checksums: ChecksumKind | null) =>
+    call<ExportOutcome>("export_snapshot", { id, snapshot, paths, format, dir, checksums }),
+  /** The Flux backups on a drive or a server; an encrypted Vault's with its password. */
+  findBackups: (target: Target, password: string | null) => call<BackupSearch>("find_backups", { target, password }),
+  /** Set up a backup found there on this computer. */
+  recover: (target: Target, found: FoundBackup, then: RecoverThen, id: string | null, password: string | null) =>
+    call<{ id: string; note: string | null }>("recover", { target, engine: found.engine, kept: found.kept, then, id, password }),
+  /** Could this backup be recovered on another computer? */
+  readiness: (id: string) => call<ReadinessCheck[]>("readiness", { id }),
+  /** Tick (or untick) a readiness question only you can answer. */
+  setReadiness: (id: string, key: string, yes: boolean) => call<ReadinessCheck[]>("set_readiness", { id, key, yes }),
+  /** "This was me": the unusual changes in `snapshot` were your own. */
+  dismissUnusual: (id: string, snapshot: string) => call<void>("dismiss_unusual", { id, snapshot }),
+  /** Forget the Vault's password in the app (lock it again now). */
+  lockVault: (id: string) => call<void>("lock_vault", { id }),
+  /** Open one of the project's pages in the web browser. */
+  openLink: (which: LinkName) => call<void>("open_link", { which }),
   exportProfile: (id: string, format: string) => call<ProfileExport>("export_profile", { id, format }),
   /** Save an export into a folder; returns the file written. */
   saveExport: (id: string, format: string, dir: string) => call<string>("save_export", { id, format, dir }),

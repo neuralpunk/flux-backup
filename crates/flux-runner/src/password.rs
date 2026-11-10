@@ -43,14 +43,28 @@ pub enum PasswordError {
     Command(String),
     #[error("keyring: {0}")]
     Keyring(String),
+    #[error("the password {0} is empty. An encrypted backup needs a password; nothing was created")]
+    Empty(String),
 }
 
 fn secret_tool() -> String {
     std::env::var("FLUX_SECRET_TOOL").unwrap_or_else(|_| "secret-tool".into())
 }
 
-/// The profile's password from the keyring, if stored.
+/// The profile's password from the keyring, if stored. For one of a profile's
+/// destinations (`home+usb`) without an entry of its own, the profile's: a copy of the
+/// main Vault has the same password, and other places often do.
 pub fn keyring_lookup(id: &ProfileId) -> Result<Option<Secret>, PasswordError> {
+    match keyring_lookup_exact(id)? {
+        None => match id.split_destination() {
+            Some((base, _)) => keyring_lookup_exact(&base),
+            None => Ok(None),
+        },
+        found => Ok(found),
+    }
+}
+
+fn keyring_lookup_exact(id: &ProfileId) -> Result<Option<Secret>, PasswordError> {
     let out = Command::new(secret_tool())
         .args(["lookup", "service", "flux-backup", "profile", id.as_str()])
         .stdin(Stdio::null())
@@ -108,8 +122,33 @@ fn first_line(s: &str) -> Secret {
     Zeroizing::new(s.lines().next().unwrap_or("").to_owned())
 }
 
-/// The password for a Vault profile, or the passphrase for a Borg profile.
+/// The password for a Vault profile, or the passphrase for a Borg profile. A new one is
+/// never empty: a password file that is missing its content, or a command that printed nothing
+/// (a secret manager that wasn't unlocked), would otherwise set up "encryption" that
+/// opens without a password.
 pub fn obtain(
+    id: &ProfileId,
+    profile: &Profile,
+    purpose: Purpose,
+    ask: Option<Ask<'_>>,
+) -> Result<Secret, PasswordError> {
+    let pw = obtain_any(id, profile, purpose, ask)?;
+    // Only when a password is being set. To open, an empty one is simply tried (and is
+    // wrong, except for a repository made with one before this was refused, which must
+    // stay readable).
+    if pw.is_empty() && purpose == Purpose::Create {
+        let from = match profile.password_source().unwrap_or_default() {
+            PasswordSource::File { path } => format!("in {}", path.display()),
+            PasswordSource::Command { command } => format!("printed by `{command}`"),
+            PasswordSource::Keyring => "in the keyring".into(),
+            PasswordSource::Prompt => "that was entered".into(),
+        };
+        return Err(PasswordError::Empty(from));
+    }
+    Ok(pw)
+}
+
+fn obtain_any(
     id: &ProfileId,
     profile: &Profile,
     purpose: Purpose,

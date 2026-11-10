@@ -93,6 +93,32 @@ pub enum KeyCmd {
     Remove { profile: String, key: String },
     /// Change the password: add the new one, then remove the one used to open.
     Passwd { profile: String },
+    /// Hash the password in use harder (or less hard): makes guessing a stolen drive's
+    /// password slower, and unlocking slower by the same factor. Instant: only the key
+    /// changes. Also the strength for the Vault's new passwords.
+    Strengthen {
+        profile: String,
+        /// standard (64 MiB, 3 passes), strong (256 MiB, 4) or maximum (1 GiB, 6);
+        /// default: the profile's setting.
+        #[arg(long, value_parser = ["standard", "strong", "maximum"], conflicts_with = "memory")]
+        level: Option<String>,
+        /// Custom: memory in MiB (with --passes and --threads).
+        #[arg(long, requires_all = ["passes", "threads"])]
+        memory: Option<u32>,
+        #[arg(long)]
+        passes: Option<u32>,
+        #[arg(long)]
+        threads: Option<u32>,
+    },
+    /// An unlock file: the password in use then opens the Vault only together with it
+    /// (keep it on a USB stick). `create PATH` makes a new one, `use PATH` takes an
+    /// existing file, `remove` makes the password enough again.
+    UnlockFile {
+        profile: String,
+        #[arg(value_parser = ["create", "use", "remove"])]
+        action: String,
+        path: Option<std::path::PathBuf>,
+    },
     /// Set up encryption before the first backup: choose the password, create the
     /// encrypted Vault or Borg repository now, and keep the password where the profile
     /// says it comes from (keyring, or a key file that doesn't exist yet), so the first
@@ -132,6 +158,8 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
                             k.id.clone(),
                             k.label.clone(),
                             when(k.created),
+                            hashing_words(k.hashing),
+                            if k.unlock_file { "yes" } else { "" }.into(),
                             if k.current {
                                 "← used now".into()
                             } else {
@@ -140,7 +168,10 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
                         ]
                     })
                     .collect();
-                output::table(&["KEY", "LABEL", "CREATED", ""], &rows);
+                output::table(
+                    &["KEY", "LABEL", "CREATED", "HASHING", "UNLOCK FILE", ""],
+                    &rows,
+                );
             }
         }
         KeyCmd::Add { profile, label } => {
@@ -176,6 +207,86 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
                 println!(
                     "Password changed (key {new}). Update the profile's password source if it stores the old one."
                 );
+            }
+        }
+        KeyCmd::Strengthen {
+            profile,
+            level,
+            memory,
+            passes,
+            threads,
+        } => {
+            use flux_core::profile::PasswordHashing as H;
+            let (id, p) = load_profile(ctx, &profile)?;
+            let hashing = match (level.as_deref(), memory) {
+                (Some("strong"), _) => H::Strong,
+                (Some("maximum"), _) => H::Maximum,
+                (Some(_), _) => H::Standard,
+                (None, Some(m)) => H::Custom {
+                    memory_mib: m,
+                    passes: passes.unwrap_or(3),
+                    threads: threads.unwrap_or(4),
+                },
+                (None, None) => p.vault.as_ref().map(|v| v.hashing).unwrap_or_default(),
+            };
+            let mut check = p.clone();
+            check.vault.get_or_insert_with(Default::default).hashing = hashing;
+            if let Some(i) = check
+                .validate()
+                .into_iter()
+                .find(|i| i.field == "vault.hashing")
+            {
+                bail!("{i}");
+            }
+            let pw = cli_password(&id, &p)?;
+            let service = flux_service::Service::new(ctx.paths.clone());
+            flux_service::security::strengthen(&service, profile, hashing, Some(&pw))
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let ms = flux_service::security::time_hashing_impl(hashing)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            println!(
+                "The password is now hashed with {} settings. Unlocking takes about {:.1} s on this computer.",
+                hashing_words(hashing),
+                ms as f64 / 1000.0
+            );
+        }
+        KeyCmd::UnlockFile {
+            profile,
+            action,
+            path,
+        } => {
+            let (id, p) = load_profile(ctx, &profile)?;
+            let path = match (action.as_str(), path) {
+                ("remove", _) => None,
+                (_, Some(path)) => Some(crate::backup_cmd::absolutize(path)?),
+                (_, None) => bail!(
+                    "say where the unlock file is: `flux key unlock-file {profile} {action} PATH`"
+                ),
+            };
+            let pw = cli_password(&id, &p)?;
+            let service = flux_service::Service::new(ctx.paths.clone());
+            let r = flux_service::security::set_unlock_file(
+                &service,
+                profile.clone(),
+                path.map(|p| p.display().to_string()),
+                action == "create",
+                Some(&pw),
+            )
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            match &r.unlock_file {
+                Some(f) => {
+                    println!(
+                        "The password now opens this Vault only together with {}. Keep a copy of that file somewhere safe: without it the password doesn't work.",
+                        f.display()
+                    );
+                    for k in &r.without_file {
+                        println!(
+                            "Note: password {} (“{}”) still opens it without the file; `flux key remove {profile} {}` removes it.",
+                            k.id, k.label, k.id
+                        );
+                    }
+                }
+                None => println!("The password alone opens this Vault again."),
             }
         }
         KeyCmd::Init { profile } => {
@@ -270,8 +381,112 @@ fn verify_password(
     use flux_runner::repo::{sftp_pool, vault_backend};
     let pool = sftp_pool(&ctx.paths, p, false);
     if flux_vault::VaultRepo::exists(vault_backend(p, pool.clone()).as_ref())? {
-        flux_vault::VaultRepo::open(vault_backend(p, pool), Some(pw))
+        flux_runner::repo::open_vault_with(vault_backend(p, pool), p, pw)
             .with_context(|| format!("that password doesn't open the Vault of {id}"))?;
     }
     Ok(())
+}
+
+#[derive(Args)]
+pub struct UnlockArgs {
+    pub profile: String,
+    /// Also remove locks that still look in use (a job on another computer that died or
+    /// lost its connection less than 30 minutes ago). Only when you're sure no job is
+    /// using the backup from anywhere.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Subcommand)]
+pub enum VaultCmd {
+    /// Move a Vault to the newest format (format 2 keeps holes in sparse files). The
+    /// snapshots already there stay readable. Flux Backup before 1.0 can't open it
+    /// afterwards, so upgrade only once every computer using it runs 1.0.
+    Upgrade { profile: String },
+}
+
+fn vault_backend_of(ctx: &Ctx, profile: &str) -> anyhow::Result<Box<dyn flux_vault::Backend>> {
+    let (_, p) = load_profile(ctx, profile)?;
+    if p.engine != Engine::Vault {
+        bail!(
+            "profile {profile} uses the {} engine; only Vault backups use lock files that can be left behind",
+            p.engine.label()
+        );
+    }
+    let pool = flux_runner::repo::sftp_pool(&ctx.paths, &p, false);
+    Ok(flux_runner::repo::vault_backend(&p, pool))
+}
+
+/// Remove locks left by jobs that died (a computer switched off mid-backup, a lost
+/// connection). Needs no password.
+pub fn run_unlock(ctx: &Ctx, args: UnlockArgs) -> anyhow::Result<ExitCode> {
+    let backend = vault_backend_of(ctx, &args.profile)?;
+    let removed = backend
+        .clear_locks(args.force)
+        .with_context(|| format!("removing locks at {}", backend.describe()))?;
+    let held = backend.lock_holders().unwrap_or_default();
+    if ctx.json {
+        let describe = |v: &[flux_transport::lock::LockInfo]| {
+            v.iter().map(|l| l.describe()).collect::<Vec<_>>()
+        };
+        output::print_json(&serde_json::json!({
+            "removed": describe(&removed),
+            "still_held": describe(&held),
+        }))?;
+    } else {
+        if removed.is_empty() {
+            println!("No locks to remove.");
+        }
+        for l in &removed {
+            println!("Removed the lock of {}.", l.describe());
+        }
+        for l in &held {
+            println!(
+                "In use by {}. If that job is no longer running, `flux unlock {} --force` removes its lock.",
+                l.describe(),
+                args.profile
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_vault(ctx: &Ctx, cmd: VaultCmd) -> anyhow::Result<ExitCode> {
+    match cmd {
+        VaultCmd::Upgrade { profile } => {
+            let backend = vault_backend_of(ctx, &profile)?;
+            let u = flux_vault::VaultRepo::upgrade_format(backend.as_ref())?;
+            if ctx.json {
+                output::print_json(&u)?;
+            } else if u.from == u.to {
+                println!("The Vault is already in format {}.", u.to);
+            } else {
+                println!(
+                    "Upgraded the Vault from format {} to {}. Its snapshots stay as they were; new ones keep holes in sparse files.",
+                    u.from, u.to
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn hashing_words(h: flux_core::profile::PasswordHashing) -> String {
+    match h {
+        flux_core::profile::PasswordHashing::Custom {
+            memory_mib,
+            passes,
+            threads,
+        } => format!("custom ({memory_mib} MiB, {passes} passes, {threads} threads)"),
+        h => h.label().to_owned(),
+    }
+}
+
+/// The Vault password for a key change: `FLUX_PASSWORD`, the profile's source, or typed.
+fn cli_password(
+    id: &flux_core::ProfileId,
+    p: &flux_core::Profile,
+) -> anyhow::Result<password::Secret> {
+    password::obtain(id, p, password::Purpose::Open, Some(crate::backup_cmd::ASK))
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

@@ -25,7 +25,14 @@ jiff.workspace = true
 toml.workspace = true
 rustix.workspace = true
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
-zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+zbus = { version = "6", default-features = false, features = ["default-rt"] }
+# Snapshot export: tar.zst and ZIP, and checksum manifests.
+zstd.workspace = true
+flate2 = "1"
+crc32fast = "1"
+sha2 = "0.11"
+blake3.workspace = true
+hex = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

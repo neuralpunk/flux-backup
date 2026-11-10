@@ -365,13 +365,16 @@ impl Sftp {
     }
 
     pub fn open(&mut self, path: &str, flags: u32, mode: u32) -> io::Result<Vec<u8>> {
+        self.open_bytes(path.as_bytes(), flags, mode)
+    }
+
+    /// [`Sftp::open`] for a path as the server has it: file names on Linux are bytes, not
+    /// necessarily UTF-8, and SFTP sends them as they are.
+    pub fn open_bytes(&mut self, path: &[u8], flags: u32, mode: u32) -> io::Result<Vec<u8>> {
         let id = self.send(OPEN, |b| {
-            b.bytes(path.as_bytes())
-                .u32(flags)
-                .u32(ATTR_PERMISSIONS)
-                .u32(mode);
+            b.bytes(path).u32(flags).u32(ATTR_PERMISSIONS).u32(mode);
         })?;
-        self.expect_handle(id, path)
+        self.expect_handle(id, &String::from_utf8_lossy(path))
     }
 
     pub fn close(&mut self, h: &[u8]) -> io::Result<()> {
@@ -552,9 +555,20 @@ impl Sftp {
         path: &str,
         offset: u64,
         len: u64,
+        sink: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<u64> {
+        self.read_range_bytes(path.as_bytes(), offset, len, sink)
+    }
+
+    /// [`Sftp::read_range`] for a path given as bytes (see [`Sftp::open_bytes`]).
+    pub fn read_range_bytes(
+        &mut self,
+        path: &[u8],
+        offset: u64,
+        len: u64,
         mut sink: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<u64> {
-        let h = self.open(path, OPEN_READ, 0)?;
+        let h = self.open_bytes(path, OPEN_READ, 0)?;
         let result = self.read_handle(&h, offset, len, &mut sink);
         let _ = self.close(&h);
         result

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "flux-backup",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "identifier": "io.github.neuralpunk.FluxBackup",
   "build": {
     "frontendDist": "../build",
@@ -67,6 +67,7 @@
         "files": {
           "/usr/bin/flux": "../../target/dist/flux",
           "/usr/libexec/flux-backup/flux-helper": "../../target/dist/flux-helper",
+          "/usr/libexec/flux-backup/flux-vault-recover": "../../target/dist/flux-vault-recover",
           "/usr/share/polkit-1/actions/io.github.neuralpunk.FluxBackup.helper.policy": "../../packaging/polkit/io.github.neuralpunk.FluxBackup.helper.policy",
           "/usr/share/metainfo/io.github.neuralpunk.FluxBackup.metainfo.xml": "../../packaging/linux/io.github.neuralpunk.FluxBackup.metainfo.xml",
           "/usr/share/man/man1": "../../target/dist/man",
@@ -94,6 +95,7 @@
         "files": {
           "/usr/bin/flux": "../../target/dist/flux",
           "/usr/libexec/flux-backup/flux-helper": "../../target/dist/flux-helper",
+          "/usr/libexec/flux-backup/flux-vault-recover": "../../target/dist/flux-vault-recover",
           "/usr/share/polkit-1/actions/io.github.neuralpunk.FluxBackup.helper.policy": "../../packaging/polkit/io.github.neuralpunk.FluxBackup.helper.policy",
           "/usr/share/metainfo/io.github.neuralpunk.FluxBackup.metainfo.xml": "../../packaging/linux/io.github.neuralpunk.FluxBackup.metainfo.xml",
           "/usr/share/man/man1": "../../target/dist/man",

@@ -33,9 +33,12 @@ command-line tool (`flux`), the system-backup helper and its polkit policy, man 
 shell completions.
 
 The AppImage contains the app and `flux`, but not the system-backup helper: root can't run
-programs from inside an AppImage. Install a package if you need system backups.
+programs from inside an AppImage. Install a package if you need system backups. So that
+scheduled backups run when the app is closed, the AppImage keeps a copy of `flux` in
+`~/.local/share/flux-backup/bin` (updated when you start a newer AppImage) and timers run
+that copy.
 
-**From source.** You need Rust 1.91 or newer. The app also needs Node.js 20+ and WebKitGTK
+**From source.** You need Rust 1.99 or newer. The app also needs Node.js 26 (LTS) and WebKitGTK
 4.1 (Fedora: `webkit2gtk4.1-devel libsoup3-devel`; Debian/Ubuntu:
 `libwebkit2gtk-4.1-dev libsoup-3.0-dev`).
 
@@ -62,8 +65,27 @@ system backups. Each is only needed for the feature that uses it.
 
 ## Your first backup
 
-**In the app:** click **New backup** in the sidebar. A short guide asks one question per
-step: **What** to back up (your home folder by default), **Where** to keep it (a
+**In the app:** click **New backup** in the sidebar and choose where to start:
+
+| Template | Backs up | Leaves out | When | Keeps |
+|---|---|---|---|---|
+| **Home folder** | your home folder | caches, the trash (your usual exclusions) | daily | the usual |
+| **Documents** | `~/Documents` and `~/Desktop` | Office lock files, `*.tmp` | every hour | 24 hourly, 14 daily, 8 weekly, 12 monthly |
+| **Photos** | `~/Pictures` | thumbnails, `*.tmp` | daily | 7 daily, 4 weekly, 24 monthly, 10 yearly |
+| **Development** | `~/Projects` (or `~/src`, `~/code`…) | `node_modules`, `target`, `build`, `dist`, `.venv`, `__pycache__`, object files… | every hour | 24 hourly, 14 daily, 8 weekly, 6 monthly |
+| **System settings** (system backups) | `/etc`, `/root`, `/usr/local`, `/opt`, `/srv` | `/root/.cache` | daily | the usual |
+| **Start from nothing** | | | | |
+
+Everything a template fills in can be changed in the next steps. To make your own, open a
+backup's **⋯** menu › **Save as a template…**: new backups can then start from its
+folders, exclusions, schedule, what to keep and how it's stored (not where it goes, the
+other places it's copied to, or its webhooks). Your templates are listed under the
+built-in ones, with a button to remove them. In a terminal: `flux profile templates`,
+`flux profile create … --template development` (`-s` and `-x` replace the folders and add
+exclusions), `flux profile save-template <profile> "<name>"`, `flux profile
+delete-template "<name>"`.
+
+A short guide then asks one question per step: **What** to back up (your home folder by default), **Where** to keep it (a
 connected drive, each with a meter of how full it is; a folder; or an SSH server), **Protection** (plain folders, encrypted, or
 written by rsync or Borg so the backups never depend on Flux; an encrypted one asks for
 its password right there), and **When**. **Review** shows every answer with a way back to
@@ -269,6 +291,76 @@ Mirror over SSH needs `rsync` on the server and keeps hard-linked snapshots ther
 Vault over SSH only needs SFTP; the server never sees your data unencrypted.
 `target.bandwidth_limit` (e.g. `"5MB"`) caps the upload rate.
 
+### Networks and upload speed
+
+For backups to a server, *Settings › More › Network* (shown when the backup or one of its
+places is on a server) has two kinds of rules:
+
+- **Wi-Fi networks.** Scheduled backups to a server run *only on these networks* (say,
+  your home and office Wi-Fi), and/or *never on these* (a phone's hotspot). A skipped run
+  says which network it saw. On a wired connection the rules don't apply, and backing up
+  by hand always works. When only one of several places is on a server, only that place
+  is skipped. The network's name comes from NetworkManager.
+- **Upload limits by time of day.** For example *Weekdays from 09:00 to 18:00, at most
+  2 MB/s*, and nothing the rest of the time. A window can run past midnight (22:00 to
+  06:00). Outside every window, the connection's own limit applies (or full speed). Vault
+  backups follow a change of limit as they run; rsync and Borg use the limit in force
+  when they start.
+
+```toml
+[network]
+wifi_only = ["Home WiFi", "Office"]
+wifi_never = ["Phone hotspot"]
+bandwidth = [
+  { days = "Mon..Fri", from = "09:00", to = "18:00", limit = "2MB" },
+  { days = "*", from = "22:00", to = "06:00" },        # no limit overnight
+]
+```
+
+### Several places at once
+
+One backup can go to more than one place: the drive at home and a USB stick that lives in
+a drawer elsewhere, say, or a server at the office. In Settings, **Also keep copies
+elsewhere › Add another place…** asks where, how it's stored (each place has its own:
+an encrypted Vault on the stick, plain folders on the drive) and, for an encrypted one,
+its password, and saves it at once. Mark a place **kept somewhere else** (offsite) when
+it isn't in this building.
+
+Every backup then goes to every place, one after the other, each read from your files
+again, so the copies are independent: a fault in one never reaches another. If one place
+fails (the stick isn't plugged in, the server is down), the others are still backed up,
+the Overview's *Where it's kept* says which failed, and a warning stays until it works
+again. The command line exits with status 4 (partial) in that case.
+
+Each place is browsed and restored on its own: the Snapshots tab has a switch (*Snapshots
+on BackupDisk · USB stick · Office NAS*), and on the command line a place is the profile
+id with `+` and its name:
+
+```sh
+flux profile destination add home usb --target /run/media/$USER/STICK --engine vault
+flux profile destination add home office --target me@office-nas:/srv/flux --engine rsync --offsite
+flux profile destination list home
+flux backup home                   # all three, one after the other
+flux backup home+usb               # just the stick
+flux snapshots home+office
+flux restore home+usb ~/Documents/report.odt --to /tmp/back
+flux profile destination remove home usb   # its backups stay on the stick
+```
+
+What to back up, when, and what to keep are shared by all places.
+
+**Copying the first backup instead.** When adding a place, *How the copy is made* offers
+**Copy the first backup**: your files are read once, for the first place, and the new
+snapshots are then copied over. The copy holds exactly the same snapshots, stored the same
+way, and a Vault copy opens with the same password (it is the same Vault). Snapshots
+removed from the first place are removed from the copy too. Copying is faster and puts
+less load on your disks; reading the files again for each place (the default) keeps the
+copies independent, so a fault in the first backup can't reach the second. A Vault can be
+copied anywhere (a drive or a server); plain-folder backups (Mirror, rsync) between drives
+on this computer; Borg repositories can't be copied. If the first backup fails, the copy
+waits for the next run. On the command line: `flux profile destination add home usb
+--target /run/media/$USER/STICK --replicate`.
+
 ## Choosing what to back up
 
 `sources.paths` lists files and folders. Exclusions use gitignore syntax, matched against
@@ -289,6 +381,56 @@ contain a marker file (`exclude_if_present = [".nobackup"]`), skip big files
 In the app, *What to back up* › **Leave some things out** suggests common exclusions
 (caches, trash, build output) with how much space each takes in your sources; the ones
 you've added are shown in green.
+
+### Checking the rules
+
+At the bottom of *Settings › Exclusions*, **Check the rules** uses the rules as they are in
+the editor, before you save:
+
+- **Test a path**: type one (`~/Downloads/film.mkv`, or a folder, even one that doesn't
+  exist yet) and Flux says whether it's backed up, and what decides it: the pattern that
+  leaves it out (or the folder it's in that a pattern leaves out), a `!pattern` that brings
+  it back, the size limit, a cache folder or marker file, another disk, the backup's own
+  storage, or that it isn't in any folder the backup takes.
+- **Browse what's backed up…**: your folders, each item marked ✓ or ✗ with the reason, and
+  how much below each folder is backed up and left out (counted for up to 10 seconds a
+  folder).
+
+In a terminal:
+
+```sh
+flux explain home ~/Downloads/film.mkv ~/Projects/app/node_modules
+flux explain home ~/Projects --list         # each item, with what's in and out below it
+```
+
+These are the rules Flux's own scan uses (for rsync and Borg backups, Flux turns the same
+rules into theirs).
+
+### Folders on an external drive
+
+Say you back up an external disk mounted at `/mnt/photos`. Unplugged, `/mnt/photos` is an
+empty folder (or isn't there at all), and a backup that took it at face value would record
+every photo as deleted. Flux doesn't: when you save a backup whose folder is on a drive of
+its own (under `/run/media`, `/media` or `/mnt`), it records that drive's filesystem UUID,
+and before each backup it checks the drive is there. A folder under those places that's
+missing, or that turns out to be an empty folder on the system disk, also counts as an
+unconnected drive. (A backup made while the drive is connected records it for profiles
+from before 1.0.)
+
+What happens when the drive isn't there is chosen per folder, under the folder list
+(*If it isn't connected*), or as `when_missing`:
+
+- **Back up the rest** (`skip`, the default). Mirror and Vault keep that folder's files
+  in the new snapshot exactly as they were in the last one, without reading anything;
+  rsync and Borg leave it out of that snapshot (earlier ones still have it). The run says
+  so, the Activity log lists the folder, and when it happens several times in a row the
+  Overview and All backups say *The drive with photos wasn't connected for the last 3
+  backups*. If every folder's drive is missing, nothing is backed up and the run is
+  marked skipped.
+- **Wait for it** (`wait`). The backup shows *Waiting* and starts as soon as the drive is
+  connected, or fails after `wait_for` (1 hour by default). It can be stopped while it
+  waits.
+- **Fail the backup** (`fail`), so you notice.
 
 ## Automatic backups
 
@@ -386,6 +528,11 @@ just that: every file and folder has its own **Restore** button (it shows when y
 at the row), or tick several, even in different folders, and click **Restore N items**.
 **Restore this whole folder** brings back everything in the folder you're in.
 
+**Calendar**, above the list, shows a month at a time: days with a snapshot are marked
+(green, or amber when files were skipped), and a red dot marks a day a backup failed.
+Click a day to list only its snapshots (the first is opened); click it again, or the ✕ next
+to the date, to see them all.
+
 Items that aren't on your computer any more are marked **Deleted**. When a folder has
 some, **Only deleted** shows just those, and **Restore N deleted items** brings back exactly
 what's missing and nothing else. Restoring something that was deleted goes back to its own
@@ -408,7 +555,11 @@ what would be removed first. Removed items are moved out of the way as
 `name.flux-<snapshot>` (deleted only when you also choose to replace your current
 versions, or turned off *Keep files on restore*). What the backup never takes is never
 removed: excluded files, files over the size limit, cache folders, the backup drive, other
-mounted drives, and copies kept by earlier restores. In a terminal:
+mounted drives, and copies kept by earlier restores. Nor is anything the backup never
+covered: restore the folder *above* the ones you back up, and what else is in it stays
+(only the backed-up folders are made exact); files the backup couldn't read stay too, and
+if a snapshot doesn't list every file it couldn't read, nothing is removed and the restore
+says so. In a terminal:
 `flux restore home ~/Documents --exact` (with `--dry-run` to list what it would remove).
 
 Before you restore, the dialog shows what would happen: how many items are added, which
@@ -487,6 +638,106 @@ open old files with any program or compare folders with your usual tools. Press 
 (or run `fusermount3 -u ~/snapshots`) to unmount. `--snapshot <spec>` shows just one
 snapshot at the mount point.
 
+### As an archive: Export
+
+To keep a copy somewhere else, or to send files to someone, save them out of a snapshot
+as one archive file. In *Snapshots*, a snapshot's **⋯ › Export…** saves all of it; in the
+file list, right-click a file or folder (or a selection) › **Export…**. Choose:
+
+- **Everything kept (.tar.zst)**: a standard tar archive compressed with zstd. It keeps
+  owners, permissions, times (to the nanosecond), symbolic and hard links, device files,
+  extended attributes and ACLs, as pax records that GNU tar (`tar --xattrs --acls`) and
+  bsdtar read. Unpack it with `tar --zstd -xf home.tar.zst` (or most archive managers).
+- **For sharing (.zip)**: opens anywhere. It keeps files, folders, their times and basic
+  permissions, but not owners, symbolic links, special files, extended attributes or
+  ACLs; hard links become separate copies. What was left out is listed after the export.
+
+A **checksums file** can be saved next to the archive: SHA-256 (`ARCHIVE.sha256`, checked
+with `sha256sum -c`) or BLAKE3 (`ARCHIVE.b3`, `b3sum -c`). Run the check in the folder you
+unpacked into. Files keep their full paths in the archive (`home/me/Documents/…`), so the
+check and the archive line up. The app names the archive after the backup, the snapshot's
+date and the item exported, and never replaces an existing file.
+
+While exporting, the files are restored into a hidden folder next to the archive and
+removed afterwards, so that drive needs room for them and the archive.
+
+```sh
+flux export home ~/home.tar.zst                               # the newest snapshot
+flux export home ~/photos.zip ~/Pictures/2025 --snapshot 3f2a91
+flux export home /mnt/usb/docs.tar.zst ~/Documents --checksums sha256
+```
+
+### On a new computer
+
+After each backup, Flux keeps a copy of the backup's settings with it: the folders,
+exclusions, rules and schedule, without passwords, hooks or webhooks. In a Vault the copy
+is encrypted like everything else; Mirror, rsync and Borg backups have it as
+`flux-profile.toml` in their folder. It's written again only when the settings change.
+
+On a new computer (or after reinstalling), install Flux Backup and choose **Recover an
+existing backup…** on the welcome screen (or **+** › *Recover a backup…*). Pick the drive,
+a folder, or a server; Flux lists the backups there, with the computer and user that made
+them, the folders they protect, and how many snapshots they have. An encrypted Vault's
+backups are listed once you type its password. Pick one, then:
+
+- **Get files back**: the backup is set up with nothing scheduled. The Snapshots tab
+  opens: restore everything or only what you need.
+- **Carry on backing up from this computer**: on the saved schedule. New snapshots join
+  the same backups, so the history carries on where the old computer left it.
+
+Either way, the recovered backup remembers whose backups they are (`[origin]` in its
+profile): Flux keeps them under the old computer's name and user, and finds them however
+this computer is called. Places it was also copied to aren't set up again (they may be
+somewhere else now): add them in its settings.
+
+Backups made before 1.0 have no settings kept with them. They're found too, and recovered
+with the folders of their newest snapshot and Flux's usual rules: check the exclusions and
+the schedule in the backup's settings before carrying on.
+
+In a terminal:
+
+```sh
+flux recover /run/media/me/Backup                        # list the backups there
+flux recover nas:/srv/backup --pick 2                    # set up the second one
+flux recover /run/media/me/Backup --pick 1 --carry-on --id home
+```
+
+`FLUX_PASSWORD` gives an encrypted Vault's password (otherwise it's asked on a terminal).
+
+**Ready for it?** At the bottom of a backup's Overview, *Could you recover it on another
+computer?* opens a short checklist: whether its settings are kept with the backups (and
+current), whether a restore test has passed, whether a copy is kept somewhere else, and,
+for encrypted backups, whether the password is kept somewhere other than this computer
+(Flux can't know: tick it when it is). For Borg, whether the key was exported
+(`borg key export`).
+
+### Without Flux: `flux-vault-recover`
+
+A Vault is Flux's own format, so Flux comes with a second program that reads it:
+`flux-vault-recover`. It's small, needs nothing installed (on 64-bit Linux it's a single
+static file), has no settings, and only reads, so it can't harm the backups. It's written
+separately from Flux's Vault engine, and Flux's tests check that the two read every Vault
+the same way.
+
+For a Vault on a drive, Flux keeps a copy of it next to the `flux-vault` folder, with
+`FLUX-VAULT-RECOVERY.txt` explaining how to use it (*Keep the recovery tool on the drive*
+in the backup's Storage settings, on by default). It's also attached to every release on
+its own, and installed with Flux in `/usr/libexec/flux-backup/`.
+
+```sh
+cd /run/media/me/Backup
+./flux-vault-recover flux-vault snapshots                 # asks the password if encrypted
+./flux-vault-recover flux-vault files latest home/me/Documents
+./flux-vault-recover flux-vault restore latest ~/Restored                    # everything
+./flux-vault-recover flux-vault restore 3f2a91 ~/Restored home/me/Documents  # one folder
+./flux-vault-recover flux-vault verify                    # read every stored piece back
+```
+
+A restore goes into an empty folder (nothing is overwritten), under the files' full paths,
+with their permissions and times (and owners, when run as root); sparse files stay
+sparse. Named pipes and device files are skipped. The password can also come from
+`FLUX_PASSWORD` or `--password-file`; a Vault with an unlock file needs `--unlock-file`.
+
 ## What to keep
 
 ```toml
@@ -511,11 +762,57 @@ years. Pruning runs after every backup. Run it yourself with a preview:
 flux prune home --dry-run
 ```
 
-In the app (*What to keep* › **Keep and remove snapshots**), the retention editor shows which of your current snapshots each rule would
-keep or remove, and why.
+In the app (*What to keep* › **Keep and remove snapshots**), pick *Recommended* (the
+defaults above), *Save space*, *Keep longer*, or *Custom* for the numbers themselves.
+*Your snapshots with these rules* says how many of your current snapshots would go; open it
+to see which each rule keeps or removes, and why.
+
+**Safety.** Two rules protect against removing too much:
+
+- **Always keep at least** N complete snapshots (1 by default): whatever the rules say,
+  pruning never leaves fewer snapshots that finished without files left out
+  (`safety_floor`). Raise it if you want more good snapshots guaranteed.
+- **After a backup with problems, keep everything** (on by default, `after_problems =
+  "hold"`): when a backup fails, leaves files out, misses a source's drive or can't reach
+  one of its places, the next backups remove nothing until one runs cleanly. A run of bad
+  backups can't push your good snapshots out. `flux prune` by hand still prunes.
+
+**Unusual changes.** After each backup, Flux compares what changed with what usually
+changes in this backup, and looks for the marks ransomware leaves: many more files changed
+or deleted than usual; files renamed to a new extension (`report.odt` →
+`report.odt.locked`) or many new files with extensions ransomware uses; text files
+(`.txt`, `.csv`…) whose contents now look encrypted (a sample is read); ransom notes
+(`HOW_TO_DECRYPT.txt`). When a backup stands out:
+
+- its snapshot is tagged *unusual changes*, and **the snapshot before it is pinned**, with
+  a note saying why, so it can't be removed;
+- old snapshots aren't removed until it's settled, and a notification says what was seen;
+- the Overview says what was found and where, with **Show the files**, **Browse the
+  snapshot before** (to restore from it) and **This was me** (when you made the changes:
+  the warning goes, the pin and the tag are removed).
+
+If you didn't make the changes, don't delete or change anything: disconnect the computer
+from the network and restore from the snapshot before. *Watch for unusual changes*
+(*What to keep › Safety*: normally, closely, or not at all; `unusual_changes = "high"`)
+sets how readily changes count. While it's on, the snapshot before the newest always
+survives one more backup, so there is one to keep.
+
+**Activity history** is kept separately from snapshots: the last 1000 backups by default,
+or only those of the last 30 days, 3 months or a year (`keep_history_days`, or
+`keep_history_runs` for a count). Removing history never removes backups.
 
 To keep a snapshot forever, **pin** it (`flux pin home <snapshot>`). To mark one, **name**
 it (`flux name home <snapshot> before-upgrade`). By default, named snapshots are kept too.
+
+To find a snapshot again later without changing what's kept, give it a **note** or
+**tags**: in Snapshots, *⋯ › Note and tags…*, or `flux note home <snapshot> Before the
+upgrade to Fedora 46` and `flux tag home <snapshot> taxes paperwork` (`--remove` takes
+tags off; `flux note … --clear` removes the note). Tagged snapshots show a ✎ in the list,
+the tags in use appear as buttons above it to show only those snapshots, and
+`flux snapshots home --tag taxes` lists them on the command line. Notes and tags are
+stored with the snapshot (for Borg, in the archive's comment), so they travel with the
+backups, and retention ignores them: a tagged snapshot goes when the rules say so. Pin or
+name it to keep it.
 
 ## Vault passwords
 
@@ -555,6 +852,56 @@ flux key remove docs <key-id>
 **There is no way to recover a Vault whose passwords are all lost.** Keep a second password
 somewhere safe.
 
+### Security settings
+
+An encrypted Vault backup has a **Security** row in its settings, under the encryption
+switch. The everyday choices are already made for you; these are for when you want more.
+
+- **Password hashing.** Before the password can open the Vault, it's put through Argon2id,
+  which is slow on purpose so that guessing passwords for a stolen drive is slow too.
+  *Standard* (64 MiB, 3 passes) unlocks in a fraction of a second; *Strong* (256 MiB, 4
+  passes) and *Maximum* (1 GiB, 6 passes) make every guess, and every unlock, slower. The
+  page says how long unlocking takes on your computer. Choosing one sets it for the Vault's
+  new passwords; **Apply to the password** rehashes the password in use at once (only its
+  key changes; no backup data is rewritten). A long password does more than any setting.
+  On the command line: `flux key strengthen <profile> --level strong` (or `--memory MiB
+  --passes N --threads N`).
+- **Unlock file.** *Set up…* makes a small file in a folder you choose (a USB stick, for
+  example). From then on the password opens the Vault only together with that file:
+  backups and unlocking need it to be there, and say where they expect it when it isn't.
+  Keep a copy somewhere safe; losing every copy is like losing the password. Other
+  passwords of the Vault still open it without the file until you remove them (the page
+  lists them). *Stop requiring it* goes back to the password alone. On the command line:
+  `flux key unlock-file <profile> create /run/media/$USER/STICK/backup.flux-unlock`,
+  `… use PATH` for an existing file, `… remove`.
+- **Hide file sizes.** Someone holding the drive can't read anything in a Vault, but the
+  size of each stored file is visible, and a backup that changed one small file stores
+  something about that size. This pads what's stored so only a rough size shows. It costs
+  up to a few percent more space and applies to backups from then on.
+- **Lock it again in the app.** After you unlock a Vault in the app, the app keeps its
+  password in memory until it closes. Choose 5 minutes to an hour to have it forgotten
+  sooner when unused. Scheduled backups get the password from their own source and aren't
+  affected.
+
+The encryption itself (XChaCha20-Poly1305 with 256-bit keys, and keyed BLAKE3) isn't a
+setting: neither has a stronger alternative worth choosing.
+
+Sparse files (disk images, some databases: files with *holes*, ranges that take no disk
+space) keep their holes in a Vault: only their data is read and stored, and a restored
+copy is sparse again, as with Mirror. A Vault created before Flux 1.0 stores them whole
+until you upgrade it: *Upgrade the Vault* in the Overview's Maintenance (shown only for
+such a Vault), or `flux vault upgrade <profile>`. Upgrade once every computer that uses
+the Vault runs Flux 1.0: older versions can't open it afterwards. The snapshots already
+there stay as they are.
+
+**Backups and profiles from older versions.** Flux 1.0 reads everything Flux 0.1, 0.2 and
+0.3 wrote, and carries on backing up into it. A profile file written before 1.0 is read
+as it is; the first time Flux rewrites it, the original is kept next to it as
+`<id>.toml.pre-1.0.bak`. Something written by a *newer* Flux (a Vault, a snapshot, a
+profile with a setting this version doesn't know) is refused with a message saying so,
+never misread: update Flux. Every format is described in
+[FORMATS.md](FORMATS.md).
+
 A Borg repository has one passphrase; `flux key store <profile>` saves it in the keyring
 for scheduled backups. Borg keeps the encryption key inside the repository, so also keep
 a copy of it: `borg key export <repository> ~/borg-key.txt` (the recovery guide has the
@@ -569,6 +916,44 @@ flux check home --read-data  # also read and verify every byte (slow)
 
 The app has the same under *Maintenance* on a profile's overview. Vault data is
 authenticated, so any corruption or tampering is detected.
+
+### Restore tests
+
+A check reads what's stored; a **restore test** goes all the way: it restores some files
+of the newest snapshot into a private temporary folder, as a real restore would, and checks
+each against the backup's own record (its size, and its checksum when the profile records
+checksums; a Vault checks every piece of data it reads anyway). A file that can't be
+restored, or comes back with the wrong size or contents, fails the test. Permissions or
+times not as recorded, a test stopped at a limit, and (if asked) files that differ from
+your copy now are notes: the test passes with a warning. The temporary folder is removed.
+
+On a backup's Overview, **Test a restore now** runs one; *Settings › What to keep ›
+Restore tests* runs them by themselves, after a backup once due: **after every backup**,
+**weekly** or **monthly** (off by default). Which files: **some at random** (10), **a share
+of the backup** (a percentage of its size), **every file once a month** (a different part
+each time, so every file is tested within 30 days), or **everything**. Limits on time and
+data read keep big tests in check. A failed test is notified and stays on the Overview and
+All backups until one passes; a test that's overdue (no pass within the interval and a
+bit) is a warning.
+
+```sh
+flux restore-test home                 # the profile's settings (10 random files)
+flux restore-test home --files 50 --compare-source
+flux restore-test home --full
+flux restore-test home --history
+```
+
+```toml
+[restore_test]
+every = "month"                        # off | backup | week | month
+mode = "rolling"                       # random_files | percent | full | rolling
+files = 10
+# percent = 5
+# window = "30days"                    # rolling: every file within this long
+# max_runtime = "1h"
+# max_read = "5GB"
+# compare_with_source = true
+```
 
 ## System backups
 
@@ -631,6 +1016,12 @@ couldn't be read, red: failed, blue: running), live progress for every backup ho
 was started, and an *Activity* tab with the full log of each run. *Problems* in Activity
 shows only the runs that failed or skipped files.
 
+With more than one backup, *All backups* can show only some of them: **Missed** (overdue,
+or the drive wasn't there), **Failed** (the last backup, or a place it's copied to),
+**Unverified** (no restore test passed recently), **Offsite** (a copy is kept elsewhere) and
+**Low space**. Each says how many backups it matches; click it again, or *All*, to see
+every one.
+
 The *Overview* tells you in words when something needs you: the drive hasn't been
 connected for a while, the last few backups failed, no backup has succeeded for longer
 than its schedule suggests (3 days for a daily backup, 30 for a manual one), or the
@@ -641,20 +1032,83 @@ the backup's menu or `flux profile duplicate home`: the copy is called "… (cop
 in Settings.
 
 **Space.** For a backup on a connected drive, the Overview has a meter of how full the
-drive is now (free space, size and percent; amber from 85% full, red from 95%). Below it,
-how full it has been over the last weeks and, once there are a few backups to go on, when
-it fills up at that rate
-("full in about 3 months"), with the projection dashed on the chart. Hover the chart or
+drive is now (free space, size and percent; amber from 85% full, red from 95%) and, once
+there are a few backups to go on, when it fills up at that rate ("full in about 3 months").
+*History and forecast* opens a chart of the last weeks with the projection dashed (open by
+itself when the drive fills within two months). Hover the chart or
 use the arrow keys for exact values, or open *Show as a table*. Under a month left, it's
 also a warning at the top. Steady use (old snapshots removed as fast as new ones are added)
 says so.
+
+**Storage.** Under the space meter (or on its own when the space isn't shown), a line says how much the newest snapshot holds,
+what all the snapshots would take as full copies, and what they take: the difference is
+what storing each piece once (deduplication) and compression save. For a Vault it's
+measured from its index (for the whole Vault when other backups share it), for Borg it's
+`borg info`'s own numbers, and for plain folders (Mirror, rsync) it's an estimate from
+what each snapshot copied, the rest being shared with the snapshot before.
+
+**Where the time went.** In *Activity*, a run's *Where the time went* (folded) shows how
+long each phase took (scanning, comparing, copying, finalizing, and a restore test or the
+unusual-change check after it), the rate while copying, and for Vaults the time spent
+reading, cutting files into chunks, finding what's already stored, compressing and
+encrypting, and writing or uploading, with how many writes the storage took and how long
+one took on average. That's where to look when a backup is slower than it should be: a
+slow drive or link shows in *Writing and uploading*, a busy computer in *Compressing*.
+The numbers are kept in the run log (`flux log --json`).
 
 **Asking for help.** *Copy diagnostics* (in Activity) or `flux diagnostics home` gives a
 report to paste into a bug report: versions, the profile with password commands and hooks
 hidden, and the latest runs and their messages.
 
+**Which version do I have?** The main menu (☰ in the title bar) › *About Flux Backup*
+shows the version, with links to this guide, what's new and bug reports. Its *Technical
+details* list the version of the `flux` command and of the administrator helper; if they
+differ from the app's (after a partial upgrade), it says so, since scheduled backups run
+the `flux` command. *Copy version info* copies it all. The version is also at the foot of
+Preferences, and `flux --version` prints it.
+
 An interrupted backup (power cut, Ctrl-C, unplugged drive) doesn't damage anything. The
 unfinished snapshot is never shown, and the next run continues it.
+
+### Webhooks: notifications off this computer
+
+A desktop notification only helps while you're at the computer. A **webhook** tells
+something else how backups go: your phone through [ntfy](https://ntfy.sh), a Gotify
+server, a chat, or a monitoring service that raises the alarm when the pings stop.
+
+*Preferences › Notifications › Webhooks* holds the ones told about every backup;
+a backup can add its own in *Settings › More › Notify elsewhere*. For each, choose:
+
+- **Kind**, which shapes the message:
+  - *ntfy*: the address of your topic (`https://ntfy.sh/my-backups-x7k2`); the message as
+    text, high priority for failures.
+  - *Gotify*: `https://gotify.example.org/message?token=…`.
+  - *Slack-style* (`{"text": …}`, also Mattermost and Rocket.Chat) and *Discord*
+    (`{"content": …}`): the channel's webhook address.
+  - *healthchecks.io-style pings*: the check's ping address. Flux pings `…/start` when a
+    backup starts, the address itself when it succeeds and `…/fail` when it fails or
+    finishes with problems, so the service also notices when backups stop happening.
+  - *JSON*: anything else (Home Assistant, n8n, your own script). Flux POSTs:
+    ```json
+    { "event": "failed", "profile": "home", "name": "Home folder", "host": "laptop",
+      "message": "Backup of “Home folder” failed: …", "time": "2026-11-09T10:00:00Z",
+      "status": "failed", "snapshot": null, "error": "…" }
+    ```
+    `event` is one of `started`, `succeeded`, `warning`, `failed`, `skipped`,
+    `restore_test_failed`, `unusual_changes`, `low_space` and `test`; `status`,
+    `snapshot` and `error` are there when they apply.
+- **When**: failed, finished with problems (files left out, a drive or another place
+  missing), unusual changes and failed restore tests, unless you choose others: little
+  space left (under 5% or 1 GiB after a backup), a scheduled backup skipped (paused, on
+  battery, a refused network), succeeded, started.
+- **Extra headers**, one per line (`Authorization: Bearer …`).
+
+*Send a test* sends a test message at once and says what the other end answered.
+
+Webhooks are sent with `curl`, after the backup is done; one that fails (no network, a
+wrong address) is a warning in that run's log and doesn't fail the backup. Addresses and
+headers can be secrets: they're kept in the profile and in `settings.toml`, both readable
+only by you, and left out of profile exports and diagnostics.
 
 ## Exporting and importing profiles
 
@@ -724,6 +1178,23 @@ exclude_caches = true
 exclude_if_present = [".nobackup"]
 one_file_system = false
 
+[[sources.volumes]]               # a folder on a drive of its own (recorded when saved)
+path = "/mnt/photos"              # one of sources.paths
+fs_uuid = "6F2A-91C3"             # the drive it must be on
+when_missing = "skip"             # skip | wait | fail ("Folders on an external drive")
+# wait_for = "1h"                 # with wait: how long at most
+
+# offsite = true                  # the main target is kept somewhere else
+
+[[destinations]]                  # more places ("Several places at once")
+name = "usb"                      # its id is home+usb
+label = "USB stick"
+engine = "vault"
+offsite = false
+target = { kind = "local", path = "/run/media/me/STICK" }
+vault = { password_source = { from = "keyring" } }
+# mode = "replicate"              # copy the main backup instead of reading the sources
+
 [retention]                       # see "What to keep"
 enabled = true
 keep_last = 1
@@ -733,6 +1204,9 @@ keep_weekly = 4
 keep_monthly = 12
 keep_yearly = 5
 keep_named = true
+safety_floor = 1                  # never fewer complete snapshots than this
+after_problems = "hold"           # hold | prune: after a backup with problems
+# keep_history_days = 90          # Activity history (default: the last 1000 runs)
 
 [schedule]                        # see "Automatic backups"
 trigger = "calendar"              # "manual", "calendar" or "interval"
@@ -750,6 +1224,7 @@ free_space_weekly = true          # Vault: delete data no snapshot uses about on
 preserve_acl = true
 preserve_xattr = true
 symlinks = "preserve"             # "preserve", "follow_unsafe" (copy targets outside the sources), "follow"
+                                  # (a Mirror on an SSH server only takes "preserve")
 change_detection = "metadata"     # or "checksum": also compare contents (slow)
 continue_on_errors = true         # finish even if some files can't be read
 snapshot_if_unchanged = false
@@ -763,6 +1238,7 @@ threads = 0                       # 0 = automatic
 compression_level = 3             # 0 (off) to 22
 encryption = true                 # fixed when the Vault is created
 password_source = { from = "keyring" }
+# keep_recovery_tool = false      # don't keep flux-vault-recover next to it on a drive
 
 [rsync]                           # rsync (compatibility mode) profiles only
 extra_args = ["--compress"]       # added to every backup command
@@ -775,6 +1251,18 @@ password_source = { from = "keyring" }
 # extra_args = ["--checkpoint-interval=600"]
 
 [hooks]                           # see "Hooks"
+
+# [origin]                        # set by a recovery: whose backups these are
+# host = "old-laptop"             # the computer that made them
+# user = "me"
+# profile = "home"                # its profile id there
+
+[[webhooks]]                      # see "Webhooks"; as many as you like
+url = "https://ntfy.sh/my-backups-x7k2"
+preset = "ntfy"                   # json, ntfy, gotify, slack, discord, healthchecks
+# events = ["failed", "warning", "unusual_changes", "low_space"]
+# headers = ["Authorization: Bearer …"]
+# enabled = false
 ```
 
 Durations are written like `90s`, `15min`, `4h`, `1day`, `2weeks`; sizes like `500MB` or
@@ -794,6 +1282,8 @@ Durations are written like `90s`, `15min`, `4h`, `1day`, `2weeks`; sizes like `5
 | `FLUX_RSYNC` | `rsync` program to use |
 | `FLUX_SECRET_TOOL` | `secret-tool` program to use |
 | `FLUX_SYSTEMCTL`, `FLUX_SYSTEMD_UNIT_DIR` | where timers are written and how systemd is called |
+| `FLUX_CURL` | `curl` program webhooks are sent with |
+| `FLUX_VAULT_RECOVER` | the `flux-vault-recover` program kept next to Vaults on drives |
 | `FLUX_CRONTAB`, `FLUX_CRON_DIR` | the `crontab` program and the `/etc/cron.d` folder used with cron |
 
 ## Troubleshooting
@@ -813,6 +1303,13 @@ is marked *completed with problems*. Exclude them, or back them up with a
 
 **SSH: "Host key verification failed" or a password prompt.** Run `flux ssh test <id>` in
 a terminal once to accept the host key, and `flux ssh copy-id <id>` to install a key.
+
+**"another Flux job is using the Vault".** A backup, check or prune is using it, here or
+on another computer; the message says who and since when. If that job died (the computer
+was switched off, the connection dropped), its lock lapses after 30 minutes, or right
+away when it was on this computer. `flux unlock <profile>` removes lapsed locks now, and
+`flux unlock <profile> --force` removes them all: only when you're sure nothing is
+using the backup.
 
 **`flux mount`: "cannot mount".** Install `fuse3` (it provides `fusermount3`), and mount on
 an empty folder you own.

@@ -15,11 +15,11 @@ use serde_json::Value;
 
 use crate::watch::Notice;
 use crate::{
-    ApiError, Result, Service, actions, edit, extras, filediff, find, prefs, space, views,
+    ApiError, Result, Service, actions, edit, extras, filediff, find, prefs, security, space, views,
 };
 
 /// Bumped on incompatible changes; the app refuses a helper that speaks another version.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Longest accepted line (a profile, a list of restore paths…).
 pub const MAX_LINE: usize = 4 << 20;
 
@@ -144,6 +144,14 @@ pub enum Call {
         name: Option<String>,
         set_name: bool,
         pinned: Option<bool>,
+        /// With `set_note`: the new note (`None` or empty removes it).
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        set_note: bool,
+        /// The snapshot's tags, all of them (`None`: unchanged).
+        #[serde(default)]
+        tags: Option<Vec<String>>,
     },
     DeleteSnapshot {
         id: String,
@@ -233,6 +241,132 @@ pub enum Call {
     SetScheduler {
         scheduler: String,
     },
+    /// A Vault's passwords, their hashing and unlock file.
+    VaultSecurity {
+        id: String,
+    },
+    /// Hash the password in use again with this strength.
+    StrengthenKey {
+        id: String,
+        hashing: flux_core::profile::PasswordHashing,
+    },
+    /// Require an unlock file (a new one Flux creates, or an existing one), or stop.
+    SetUnlockFile {
+        id: String,
+        path: Option<String>,
+        #[serde(default)]
+        create: bool,
+    },
+    /// How long hashing a password with this strength takes here (ms).
+    TimeHashing {
+        hashing: flux_core::profile::PasswordHashing,
+    },
+    /// Forget the password the app was given (lock the backup again).
+    Lock {
+        id: String,
+    },
+    /// Add a destination to a profile (saved at once; password set up if encrypted).
+    AddDestination {
+        id: String,
+        destination: serde_json::Value,
+        #[serde(default)]
+        password: Option<String>,
+    },
+    RemoveDestination {
+        id: String,
+        name: String,
+    },
+    /// Test a restore now, with the profile's restore test settings.
+    RestoreTest {
+        id: String,
+    },
+    /// The latest restore tests.
+    RestoreTests {
+        id: String,
+    },
+    /// "This was me": the unusual changes in `snapshot` were the person's own.
+    DismissUnusual {
+        id: String,
+        snapshot: String,
+    },
+    /// The webhooks told about every backup (Preferences).
+    SetWebhooks {
+        webhooks: serde_json::Value,
+    },
+    /// Send a test message to a webhook.
+    TestWebhook {
+        webhook: serde_json::Value,
+    },
+    /// What the snapshots hold and take, and what dedup and compression save.
+    Storage {
+        id: String,
+    },
+    /// A Vault's format, and the newest one.
+    VaultFormat {
+        id: String,
+    },
+    /// Move a Vault to the newest format.
+    UpgradeVault {
+        id: String,
+    },
+    /// The templates a new backup can start from.
+    Templates,
+    /// A new backup from a template.
+    NewFromTemplate {
+        template: String,
+    },
+    /// Save a backup's settings as a template.
+    SaveTemplate {
+        id: String,
+        name: String,
+    },
+    /// Remove one of your templates.
+    DeleteTemplate {
+        template: String,
+    },
+    /// Is a path backed up by a profile (an editor's draft), and why?
+    Explain {
+        profile: serde_json::Value,
+        path: String,
+    },
+    /// A folder's items, each backed up or left out, with totals.
+    Coverage {
+        profile: serde_json::Value,
+        dir: String,
+    },
+    /// Save files of a snapshot as an archive in a folder.
+    ExportSnapshot {
+        id: String,
+        snapshot: String,
+        paths: Vec<String>,
+        format: flux_runner::archive::Format,
+        dir: String,
+        checksums: Option<flux_runner::archive::Checksums>,
+    },
+    /// The Flux backups on a drive or a server.
+    FindBackups {
+        target: serde_json::Value,
+        password: Option<String>,
+    },
+    /// Set up a backup found there on this computer.
+    Recover {
+        target: serde_json::Value,
+        engine: flux_core::Engine,
+        kept: flux_core::profile::KeptAs,
+        then: flux_runner::recover::Then,
+        id: Option<String>,
+        password: Option<String>,
+    },
+    /// Could this backup be recovered on another computer?
+    Readiness {
+        id: String,
+    },
+    /// Answer one of the readiness questions.
+    SetReadiness {
+        id: String,
+        key: String,
+        yes: bool,
+    },
 }
 
 impl Call {
@@ -270,7 +404,23 @@ impl Call {
             | Diagnostics { id }
             | Find { id, .. }
             | Versions { id, .. }
-            | RestorePreview { id, .. } => Some(id),
+            | RestorePreview { id, .. }
+            | VaultSecurity { id }
+            | StrengthenKey { id, .. }
+            | SetUnlockFile { id, .. }
+            | Lock { id }
+            | AddDestination { id, .. }
+            | RemoveDestination { id, .. }
+            | RestoreTest { id }
+            | RestoreTests { id }
+            | DismissUnusual { id, .. }
+            | Readiness { id }
+            | SaveTemplate { id, .. }
+            | Storage { id }
+            | VaultFormat { id }
+            | UpgradeVault { id }
+            | ExportSnapshot { id, .. }
+            | SetReadiness { id, .. } => Some(id),
             Profiles
             | NewProfile
             | BackInTime
@@ -289,7 +439,17 @@ impl Call {
             | SetScheduler { .. }
             | CancelShutdown
             | DiffTool
-            | SetDiffTool { .. } => None,
+            | SetDiffTool { .. }
+            | TimeHashing { .. }
+            | SetWebhooks { .. }
+            | TestWebhook { .. }
+            | FindBackups { .. }
+            | Recover { .. }
+            | Explain { .. }
+            | Coverage { .. }
+            | Templates
+            | NewFromTemplate { .. }
+            | DeleteTemplate { .. } => None,
         }
     }
 
@@ -302,6 +462,32 @@ impl Call {
             Snapshots { .. } => "snapshots",
             ListDir { .. } => "list_dir",
             Unlock { .. } => "unlock",
+            VaultSecurity { .. } => "vault_security",
+            StrengthenKey { .. } => "strengthen_key",
+            SetUnlockFile { .. } => "set_unlock_file",
+            TimeHashing { .. } => "time_hashing",
+            Lock { .. } => "lock",
+            AddDestination { .. } => "add_destination",
+            RemoveDestination { .. } => "remove_destination",
+            RestoreTest { .. } => "restore_test",
+            RestoreTests { .. } => "restore_tests",
+            DismissUnusual { .. } => "dismiss_unusual",
+            SetWebhooks { .. } => "set_webhooks",
+            TestWebhook { .. } => "test_webhook",
+            FindBackups { .. } => "find_backups",
+            ExportSnapshot { .. } => "export_snapshot",
+            Explain { .. } => "explain",
+            Templates => "templates",
+            Storage { .. } => "storage",
+            VaultFormat { .. } => "vault_format",
+            UpgradeVault { .. } => "upgrade_vault",
+            NewFromTemplate { .. } => "new_from_template",
+            SaveTemplate { .. } => "save_template",
+            DeleteTemplate { .. } => "delete_template",
+            Coverage { .. } => "coverage",
+            Recover { .. } => "recover",
+            Readiness { .. } => "readiness",
+            SetReadiness { .. } => "set_readiness",
             SetPassword { .. } => "set_password",
             SaveKeyFile { .. } => "save_key_file",
             BackupNow { .. } => "backup_now",
@@ -391,6 +577,43 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             create,
         } => json(views::unlock_impl(s, id, password, create)?),
         Call::SetPassword { id, password } => json(views::set_password_impl(s, id, password)?),
+        Call::VaultSecurity { id } => json(security::vault_security_impl(s, id)?),
+        Call::StrengthenKey { id, hashing } => json(security::strengthen_impl(s, id, hashing)?),
+        Call::SetUnlockFile { id, path, create } => {
+            json(security::set_unlock_file_impl(s, id, path, create)?)
+        }
+        Call::TimeHashing { hashing } => json(security::time_hashing_impl(hashing)?),
+        Call::Lock { id } => json(security::lock_impl(s, id)?),
+        Call::AddDestination {
+            id,
+            destination,
+            password,
+        } => json(edit::add_destination_impl(s, id, destination, password)?),
+        Call::RemoveDestination { id, name } => json(edit::remove_destination_impl(s, id, name)?),
+        Call::RestoreTest { id } => json(actions::restore_test_impl(s, id)?),
+        Call::RestoreTests { id } => json(actions::restore_tests_impl(s, id)?),
+        Call::SetWebhooks { webhooks } => json(prefs::set_webhooks_impl(s, webhooks)?),
+        Call::TestWebhook { webhook } => json(prefs::test_webhook_impl(webhook)?),
+        Call::FindBackups { target, password } => {
+            json(crate::recover::find_backups_impl(s, target, password)?)
+        }
+        Call::Recover {
+            target,
+            engine,
+            kept,
+            then,
+            id,
+            password,
+        } => json(crate::recover::recover_impl(
+            s, target, engine, kept, then, id, password,
+        )?),
+        Call::Readiness { id } => json(crate::recover::readiness_impl(s, id)?),
+        Call::SetReadiness { id, key, yes } => {
+            json(crate::recover::set_readiness_impl(s, id, key, yes)?)
+        }
+        Call::DismissUnusual { id, snapshot } => {
+            json(actions::dismiss_unusual_impl(s, id, snapshot)?)
+        }
         Call::SaveKeyFile { id } => json(edit::save_key_file_impl(s, id)?),
         Call::BackupNow { id, shutdown } => json(views::start_backup(s, id, shutdown)?),
         Call::ShutdownAfter { id, on } => json(views::shutdown_after_impl(s, id, on)?),
@@ -420,6 +643,34 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
                 s, id, snapshot, paths, to, overwrite, exact, &progress,
             )?)
         }
+        Call::ExportSnapshot {
+            id,
+            snapshot,
+            paths,
+            format,
+            dir,
+            checksums,
+        } => {
+            let profile = id.clone();
+            let progress = move |progress| {
+                notify(Notice::Restore {
+                    profile: profile.clone(),
+                    progress,
+                })
+            };
+            json(actions::export_snapshot_impl(
+                s, id, snapshot, paths, format, dir, checksums, &progress,
+            )?)
+        }
+        Call::Explain { profile, path } => json(edit::explain_impl(profile, path)?),
+        Call::Templates => json(edit::templates_impl(s)),
+        Call::Storage { id } => json(views::storage_impl(s, id)?),
+        Call::VaultFormat { id } => json(views::vault_format_impl(s, id)?),
+        Call::UpgradeVault { id } => json(views::upgrade_vault_impl(s, id)?),
+        Call::NewFromTemplate { template } => json(edit::new_from_template_impl(s, template)?),
+        Call::SaveTemplate { id, name } => json(edit::save_template_impl(s, id, name)?),
+        Call::DeleteTemplate { template } => json(edit::delete_template_impl(s, template)?),
+        Call::Coverage { profile, dir } => json(edit::coverage_impl(profile, dir)?),
         Call::GetProfile { id } => json(edit::get_profile_impl(s, id)?),
         Call::NewProfile => json(edit::new_profile_impl(s)?),
         Call::BackInTime => json(edit::backintime_impl(s)?),
@@ -443,8 +694,19 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             name,
             set_name,
             pinned,
+            note,
+            set_note,
+            tags,
         } => json(actions::update_snapshot_impl(
-            s, id, snapshot, name, set_name, pinned,
+            s,
+            id,
+            snapshot,
+            flux_fs::snapshot::SnapshotChange {
+                name: set_name.then_some(name),
+                pinned,
+                note: set_note.then_some(note),
+                tags,
+            },
         )?),
         Call::DeleteSnapshot { id, snapshot } => {
             json(actions::delete_snapshot_impl(s, id, snapshot)?)

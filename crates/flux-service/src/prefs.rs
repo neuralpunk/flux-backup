@@ -32,6 +32,8 @@ pub struct Preferences {
     /// The one used now (`[command, name]`), and the known ones installed.
     pub diff_tool_used: Option<(String, String)>,
     pub diff_tools: Vec<(String, String)>,
+    /// Webhooks told about every backup.
+    pub webhooks: Vec<flux_core::webhook::Webhook>,
 }
 
 pub fn preferences_impl(state: &Service) -> Result<Preferences> {
@@ -53,7 +55,45 @@ pub fn preferences_impl(state: &Service) -> Result<Preferences> {
             .into_iter()
             .map(|(c, n)| (c.to_owned(), n.to_owned()))
             .collect(),
+        webhooks: s.webhooks,
     })
+}
+
+/// The webhooks told about every backup (all of them, replacing the list).
+pub fn set_webhooks_impl(state: &Service, webhooks: serde_json::Value) -> Result<Preferences> {
+    let hooks: Vec<flux_core::webhook::Webhook> = serde_json::from_value(webhooks)
+        .map_err(|e| ApiError::new("invalid", format!("webhooks: {e}")))?;
+    if let Some(msg) = hooks.iter().flat_map(|w| w.problems()).next() {
+        return Err(ApiError::new("invalid", msg));
+    }
+    let mut s = Settings::load(&state.paths);
+    s.webhooks = hooks;
+    s.save(&state.paths)
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    preferences_impl(state)
+}
+
+/// Send a test message to a webhook (not saved). The HTTP status it answered.
+pub fn test_webhook_impl(webhook: serde_json::Value) -> Result<u16> {
+    let mut w: flux_core::webhook::Webhook = serde_json::from_value(webhook)
+        .map_err(|e| ApiError::new("invalid", format!("webhook: {e}")))?;
+    if let Some(msg) = w.problems().into_iter().next() {
+        return Err(ApiError::new("invalid", msg));
+    }
+    w.enabled = true;
+    let host = flux_core::sys::hostname();
+    let m = flux_core::webhook::Message {
+        event: flux_core::webhook::HookEvent::Test,
+        profile: "test".into(),
+        name: "Test".into(),
+        host: host.clone(),
+        message: format!("A test from Flux Backup on {host}: this webhook works."),
+        time: Timestamp::now(),
+        status: None,
+        snapshot: None,
+        error: None,
+    };
+    flux_runner::webhooks::deliver(&w, &m).map_err(|e| ApiError::new("webhook", e))
 }
 
 /// Choose the program that compares file versions: a command, `""` for none, `None` for

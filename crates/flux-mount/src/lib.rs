@@ -704,6 +704,9 @@ mod tests {
             errors: Vec::new(),
             errors_total: 0,
             flux_version: "0".into(),
+            sources_missing: Vec::new(),
+            note: None,
+            tags: Vec::new(),
         }
     }
 }

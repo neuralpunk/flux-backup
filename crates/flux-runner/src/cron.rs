@@ -205,7 +205,7 @@ pub fn lines_for(id: &ProfileId, p: &Profile, env: &UnitEnv) -> Result<Vec<Strin
                 format!("*/{mins} * * * *")
             });
         }
-        Trigger::Manual => unreachable!(),
+        Trigger::Manual => unreachable!("manual backups returned above"),
     }
     Ok(times
         .into_iter()

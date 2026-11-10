@@ -463,7 +463,7 @@ pub fn units_for(
                     systemd_span(check_period(every))
                 );
             }
-            Trigger::Manual => unreachable!(),
+            Trigger::Manual => unreachable!("inside `if s.trigger != Trigger::Manual`"),
         }
         let _ = writeln!(
             t,

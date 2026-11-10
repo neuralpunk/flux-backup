@@ -32,6 +32,40 @@ Status legend: ☐ not started · ◐ in progress · ☑ done
 | 40 | 0.3: Setup wizard and settings polish | ☑ | see `git log` |
 | 41 | 0.3: Import from Back In Time | ☑ | see `git log` |
 | 42 | Release 0.3 | ☑ | see `git log` |
+| 43 | Unplugged drive and stuck "Backing up" | ☑ | see `git log` |
+| 44 | cron: backend and CLI | ☑ | see `git log` |
+| 45 | cron: the app | ☑ | see `git log` |
+| 46 | Back In Time's rsync options; one at a time | ☑ | see `git log` |
+| 47 | Exact restore | ☑ | see `git log` |
+| 48 | Shut down when done | ☑ | see `git log` |
+| 49 | Compare file versions | ☑ | see `git log` |
+| 50 | Storage meters | ☑ | see `git log` |
+| 51 | Restored files no longer marked Deleted | ☑ | see `git log` |
+| 52 | Style polish | ☑ | see `git log` |
+| 53 | 1.0: Version in the app | ☑ | see `git log` |
+| 54 | 1.0: Vault: one lock everywhere, holes kept | ☑ | see `git log` |
+| 55 | 1.0: Vault security settings | ☑ | see `git log` |
+| 56 | 1.0: Source drives: protection and availability rules | ☑ | see `git log` |
+| 57 | 1.0: Notes and tags on snapshots | ☑ | see `git log` |
+| 58 | 1.0: Several destinations I: independent | ☑ | see `git log` |
+| 59 | 1.0: Several destinations II: replication | ☑ | see `git log` |
+| 60 | 1.0: Retention safety | ☑ | see `git log` |
+| 61 | 1.0: Network rules and bandwidth schedules | ☑ | see `git log` |
+| 62 | 1.0: Restore tests | ☑ | see `git log` |
+| 63 | 1.0: Unusual-change detection | ☑ | see `git log` |
+| 64 | 1.0: Webhooks | ☑ | see `git log` |
+| 65 | 1.0: Recovery on a new computer | ☑ | see `git log` |
+| 66 | 1.0: Standalone Vault recovery tool | ☑ | see `git log` |
+| 67 | 1.0: Snapshot export | ☑ | see `git log` |
+| 68 | 1.0: Rule tester and coverage | ☑ | see `git log` |
+| 69 | 1.0: Backup templates | ☑ | see `git log` |
+| 70 | 1.0: Calendar and status filters | ☑ | see `git log` |
+| 71 | 1.0: Storage view and performance inspector | ☑ | see `git log` |
+| 72 | 1.0: The formats, frozen | ☑ | see `git log` |
+| 73 | 1.0: Property tests for filter translation | ☑ | see `git log` |
+| 74 | 1.0: Fuzzing | ☑ | see `git log` |
+| 75 | 1.0: Panic audit | ☑ | see `git log` |
+| 76 | Release 1.0 | ☑ | see `git log` |
 
 ## Log
 
@@ -1426,3 +1460,753 @@ and the Adwaita palette.
       test reads both and prints systemd's output if it still can't. Checked locally with
       CI's own steps (fmt, clippy -D warnings, tests); synced as a follow-up commit and
       `v0.3.0` moved to it (no release had been made from the first tag)
+
+### Phase 53 — 1.0: Version in the app (2026-11-09)
+- [x] `flux_service::extras::about_impl`: the app's version, the `flux` command's and the
+      helper's (each run with `--version`; `None` when it doesn't run), a `mismatch` flag,
+      the system and kernel. Tests: version lines parsed; a fake `flux` reporting 9.9.9, a
+      failing one and a missing one (`flux_transport::testing::executable`, new: writes a
+      test script without "Text file busy", for the fake commands later phases need)
+- [x] Tauri commands `about` (adds the WebKitGTK version) and `open_link`, which opens one
+      of the project's pages by name (website, guide, issues, source, changes): the page
+      never passes a URL
+- [x] **About Flux Backup** dialog: logo, version (known at build time through Vite's
+      `__APP_VERSION__` from package.json, so it shows at once and in the demo), a warning
+      in words when the parts are different versions, links, *Technical details* (closed),
+      *Copy version info*, the license
+- [x] GNOME main menu (☰) in the title bar replaces the **?** button: Preferences,
+      Keyboard shortcuts (`?` still works), User guide, About. Preferences ends with
+      "Flux Backup 0.3.0 · About"
+- [x] Diagnostics list the `flux` command's and the helper's versions and paths
+- [x] CHANGELOG *Unreleased*, USER_GUIDE ("Which version do I have?")
+- [x] svelte-check, build, clippy `-D warnings` (service, transport, GUI), tests; demo
+      screenshots of the menu, the dialog and Preferences reviewed in both themes
+
+### Phase 54 — 1.0: Vault: one lock everywhere, holes kept (2026-11-09)
+- [x] `flux_transport::lock` works over a `LockStore` (SFTP, or `LocalStore` on a disk):
+      the same JSON lock files in `locks/` both ways. `acquire_in` returns the locks in
+      the way; `holders`, `list`, `clear(force)`. A lock is stale after 30 minutes
+      unrefreshed, or at once when it names this computer and a process that's gone
+- [x] Vault `LocalBackend::lock`: `flock` (as before; releases itself when a process
+      dies, and is what 0.3 uses) plus a lock file; `Backend::lock_holders`/`clear_locks`
+      for both backends. `VaultError::Locked` says who holds it and points to
+      `flux unlock`
+- [x] `flux unlock <profile> [--force]` (Vault; no password needed)
+- [x] Vault format 2: file nodes gain `holes` (offset, len); `Content` (blobs + holes)
+      with the offset arithmetic (`span_at`, `data_runs`, `holes_between`); trees decode
+      and encode per format (`NodeV1` for format 1); snapshot records carry `tree_format`
+      (left out when 1, so format 1 records are byte-for-byte what 0.3 wrote)
+- [x] Backup: `flux_fs::fsops::data_segments` (`SEEK_DATA`/`SEEK_HOLE`, only for files
+      with fewer blocks than their size) and a `Segments` reader: only data is chunked,
+      holes recorded, progress counts holes as done. Format 1 Vaults read densely as
+      before. The cached file list became `flat2-…` (old caches are ignored, never
+      misread)
+- [x] Restore writes data at its offsets and leaves holes unwritten (`set_len` keeps a
+      trailing hole); `flux mount` reads through holes (`Span`); `check` validates hole
+      lists and walks both formats; prune walks both
+- [x] Format 1 Vaults are read and written as format 1 until `flux vault upgrade`
+      (only `config` changes, under the exclusive lock, no password); a newer format is
+      refused with "update Flux Backup"
+- [x] Tests (all simulated in temporary folders; sparse files on tmpfs): lock files seen
+      across local and the SFTP stand-in both ways; dead local process; clear/force;
+      span/run arithmetic; both tree encodings; hole-list validation; sparse round trip
+      (restored file sparse, `check --read-data` clean); a format 1 Vault written densely,
+      upgraded, both snapshots restoring, delete across formats; newer format refused;
+      the Locked message; mount reads at hole/data edges; CLI `unlock`/`vault upgrade`
+- [x] VAULT_FORMAT.md (format 2, locks), THREAT_MODEL, README, USER_GUIDE, CHANGELOG
+
+Notes / follow-ups:
+- The app doesn't offer the format upgrade yet: Phase 72 (formats and migration checks)
+  adds it with the other format checks. Until then it's `flux vault upgrade`.
+- Mirror over SSH and the compatibility engines keep their own locks (unchanged).
+
+### Phase 55 — 1.0: Vault security settings (2026-11-09)
+Decided: hashing strength and the unlock file belong to the Vault's key slots (which other
+computers may share), so they change by an action on the Vault that needs its password,
+not by saving the profile; the profile follows. Hiding sizes and locking again are profile
+settings. The cipher and id hash are explained, not offered (no stronger alternative).
+- [x] Profile `[vault]`: `hashing` (standard/strong/maximum/custom, validated ranges),
+      `hide_sizes`, `lock_after_minutes`, `unlock_file` (absolute path); all left out
+      when default, so existing profiles are unchanged
+- [x] Key slots: `unlock_file` flag; `slot_input` mixes in a derived hash of the file;
+      `open_with`/`init_with` take the file's secret; `UnlockFileNeeded` when only
+      file-needing slots could match; `rewrap` (same password, new hashing and/or file:
+      new slot written, then the old removed); `list_keys` without a password;
+      `KeyInfo` gains hashing and unlock file; new passwords need the file if the one in
+      use did; the in-process unlock cache keys on the full input
+- [x] Hide sizes: packs padded to their Padmé length with random bytes before the header
+      (backup and prune's repacking). No format change: readers locate everything from
+      the end, so any Flux reads padded packs
+- [x] Runner: Vaults open with the profile's unlock file (`open_vault_with`, also used
+      by the app's unlock and `flux key init`'s check; the app's unlock ignored the file
+      before: found by the service test), `UnlockFileMissing` names the file;
+      `create_unlock_file` (64 random bytes, 0600, never overwrites); new Vaults use the
+      profile's hashing
+- [x] Service `security`: `vault_security`, `strengthen_key`, `set_unlock_file` (the
+      profile learns the path before the Vault needs the file), `time_hashing`, `lock`;
+      passwords remember when they were last used; `expire_idle`. Error codes
+      `unlock_file` and `wrong_password` for Vault errors. Helper protocol 3
+- [x] App: a thread locks idle Vaults every 30 s and tells the window ("… is locked
+      again"); *Security* page (`VaultSecurity.svelte`) under Protection for encrypted
+      Vaults: hashing choices with unlock time here (one measured standard hash, scaled),
+      custom inputs, *Apply to the password* (asks for the password when locked), unlock
+      file set up / stop / connected, hide sizes, lock again, the encryption explained
+      with the Vault's passwords listed. Changes made on the Vault are taken as saved in
+      the editor (`syncSaved`), so Save never puts old values back
+- [x] CLI: `flux key strengthen`, `flux key unlock-file create|use|remove`, `key list`
+      columns
+- [x] Tests (simulated: temporary folders, small custom hashing): unlock-file inputs;
+      preset round trip; Padmé lengths; padded packs restore and check; strengthen,
+      unlock file on/refused without it/off, spare passwords reported; idle locking and
+      its clock; CLI strengthen and unlock-file with a backup refused while the file is
+      away
+- [x] VAULT_FORMAT, THREAT_MODEL, USER_GUIDE ("Security settings"), README, CHANGELOG;
+      demo data and screenshots of the page reviewed in both themes
+
+### Phase 56 — 1.0: Source drives: protection and availability rules (2026-11-09)
+- [x] Profile `[[sources.volumes]]`: path, fs_uuid, `when_missing` (skip, the default;
+      wait; fail), `wait_for`; validated (must be a source, needs a UUID, wait_for only
+      with wait)
+- [x] `flux_core::source_check`: a source is missing when its recorded drive isn't
+      mounted there, or (unrecorded) when it's under `/run/media`, `/media` or `/mnt`
+      and doesn't exist or is on the system disk. `record_volumes` notes the drive of
+      every source on an extra drive; `ProfileStore::save` calls it (app, CLI, imports),
+      and the runner at a backup's start (profiles from before 1.0)
+- [x] `sys::Mounts`: the real mount table, or a fake one from `FLUX_FAKE_MOUNTS` (a file
+      of "UUID FOLDER" lines) so tests plug and unplug drives; target checks use it too
+- [x] Runner `sources_ready`: waits (Waiting phase, stoppable, polls up to every 15 s)
+      for `wait` sources; `fail` or waiting in vain fails the run (`SourceMissing`, in
+      words); the rest are left out of the profile the engine sees, with a warning each;
+      nothing left: the run is skipped. Runs record `sources_missing`
+- [x] `flux_fs::scan::carry_over`: Mirror (local) and Vault keep a missing source's
+      entries (and parent folders) from the previous snapshot: hard-linked / content
+      reused, nothing read, nothing counted as deleted. Snapshot meta
+      `sources_missing` (path, kept_from); `sources` still lists them. rsync, Borg and
+      Mirror over SSH leave the source out and say so
+- [x] Health in words: "The drive with photos wasn't connected for the last N backups"
+      (danger from 3), on the Overview and All backups
+- [x] App: under the folder list, a row per folder on its own drive with *Back up the
+      rest / Wait for it / Fail the backup* and what that means for this engine; demo
+      data; All backups now names the most serious problem first (found while checking
+      the demo: a warning led over a failed backup)
+- [x] Tests (simulated: fake mount tables, temporary folders): missing/recorded/other
+      drive/wait limit/forgetting; unrecorded removable paths; a real missing
+      `/run/media` folder; carry-over merge; Mirror keeps files hard-linked with 0
+      deleted; Vault keeps without reading and restores the kept file; health text;
+      CLI end to end: recorded on create, skip keeps, fail refuses, wait in vain, wait
+      then plugged in, nothing to back up, rsync leaves out
+- [x] USER_GUIDE ("Folders on an external drive", profile reference), CHANGELOG
+
+### Phase 57 — 1.0: Notes and tags on snapshots (2026-11-09)
+- [x] `SnapshotMeta.note` and `.tags` (left out when empty); `clean_note` (trimmed, at
+      most 2000 characters) and `clean_tags` (whitespace collapsed, at most 40
+      characters each and 20 in all, no duplicates ignoring case, first spelling wins)
+- [x] `SnapshotChange` (name, pinned, note, tags) and `AnyRepo::change`: one path for
+      every engine (Mirror and rsync `meta.json`, Mirror over SSH, Vault's snapshot
+      record, Borg's archive comment gains `note` and `tags`). Retention never reads them
+- [x] CLI: `flux note PROFILE SNAPSHOT TEXT… | --clear`, `flux tag PROFILE SNAPSHOT
+      TAG… [--remove]` (no tags: lists them), `flux snapshots --tag`, a TAGS / NOTE
+      column when any snapshot has them, `flux info` lines
+- [x] Service/app: `update_snapshot` takes a `SnapshotChange` (note, set_note, tags over
+      IPC). Snapshots: *Note and tags…* in the snapshot menu (an editor in the header),
+      tags as chips beside the date, the note below, a ✎ in the list (tooltip has both),
+      tag buttons that filter the list; also says when a source's drive was missing for
+      that snapshot (Phase 56). Demo data; reviewed in both themes
+- [x] Tests: cleaning rules; service round trip (cleaned, read back from a fresh
+      listing); CLI on Mirror, Vault, rsync and Borg: note, tag/remove, info, `--tag`
+      filter, the list column, a tagged snapshot pruned by `keep_last = 1`, clearing
+- [x] USER_GUIDE, README, CHANGELOG
+
+### Phase 58 — 1.0: Several destinations I: the model and independent backups (2026-11-09)
+Decided: the main destination stays `target` (existing profiles and repositories don't
+change); extra places are `[[destinations]]`, and each is a profile of its own under the
+id `<profile>+<name>` (`+` can't appear in a profile you create). Every repository path,
+log, lock and keyring entry is keyed by that id, so browsing, restoring and passwords work
+for a destination with no special cases.
+- [x] Profile: `offsite`, `destinations` (name, label, engine, target, offsite, engine
+      options); `Profile::for_destination`; validation (names, no two in the same place,
+      each destination valid as the profile it becomes)
+- [x] `ProfileId` accepts one `+` (`with_destination`, `split_destination`);
+      `ProfileStore::load("home+usb")` derives it; create/save of such an id is refused
+- [x] Runner: one run backs up every destination in turn after the main one (hooks once
+      around all), with the same sources (a missing source drive is kept or left out per
+      engine); a failing destination is reported, notified, and doesn't stop the others;
+      `RunRecord.destinations` (name, status, snapshot, error, stats); `engine_backup`
+      extracted
+- [x] CLI: `flux profile destination add|remove|list`; `flux backup` prints each place
+      and exits 4 when one failed; every command takes `home+usb`
+- [x] Service: summaries carry `offsite` and `destinations`; health "The copy on Office
+      NAS failed in the last 2 backups (…)" as a warning (the main copy decides
+      protection); `add_destination` (saved at once; password set up as at creation) and
+      `remove_destination` (backups stay); exports to other tools note that only the main
+      destination is exported
+- [x] App: *Also keep copies elsewhere* in Settings (rows with Remove, *Add another
+      place…* dialog: where, how stored, password, name, offsite); *Where it's kept* on
+      the Overview with each place's last result and Browse; a destination switch on
+      Snapshots; unlocking a destination's Vault names it ("Home folder → USB stick").
+      Found while checking the demo: a failed extra copy first turned the whole backup red
+      ("isn't protecting you"); it's a warning now. Reviewed in light and dark
+- [x] Tests: CLI with Mirror + Vault + rsync places (each has its snapshots, the run
+      record lists them, a missing stick fails only its copy with exit 4, restore from a
+      place, back up one place, remove keeps its backups, same place/name refused, no
+      `+` profiles); service add/remove of an encrypted Vault place (created at once,
+      key file written); health text and level
+- [x] USER_GUIDE ("Several places at once", profile reference), README, CHANGELOG
+
+Notes / follow-ups:
+- A test changed a file to the same size within the same second, which rsync rightly
+  calls unchanged; tests now change the size.
+
+### Phase 59 — 1.0: Several destinations II: replication (2026-11-09)
+- [x] Destination `mode = "replicate"` (`CopyMode`): copied from the main destination after
+      each run. Validation: same engine; never Borg; Mirror/rsync only between local
+      drives. A replica's profile carries the main engine's options (`Profile::replica`)
+- [x] `flux_fs::replicate::copy_snapshot`: copies a snapshot folder, hard-linking files
+      that are the same inode as in the previous snapshot (exactly the unchanged ones) to
+      the copy's previous snapshot, keeping links inside the snapshot, metadata and times
+- [x] `flux_mirror::replicate`: plain-folder repositories (Mirror and rsync): the marker
+      with the copy's id, new snapshots copied into `.replica-partial` and renamed, gone
+      ones removed, `latest`, other top-level files; rsync copies get their own recovery
+      guide (their own paths)
+- [x] `flux_vault::replicate`: file-level, never decrypted: packs, index, changed snapshot
+      records, keys, config last; removals in prune's order; source shared lock, copy
+      exclusive lock; refuses a place holding another Vault
+- [x] Runner: replicate destinations copy after the main backup (skipped, with a reason,
+      when it didn't finish); a copy's snapshots belong to the main profile
+      (`owner_of`); the keyring lookup for `home+usb` falls back to `home`
+- [x] CLI `flux profile destination add --replicate` (engine follows the main one), the
+      list says "copy of main"; app: *How the copy is made* (from your files / copy the
+      first backup, with why not when it can't), "Copy" on the Overview, "copy of the
+      first backup" in Settings
+- [x] Tests (simulated, temporary folders, a fake `secret-tool`): tree copy links and
+      copies; folder replication (marker, links, nothing to do, prune follows); Vault
+      replication (same password, restore, only the change copied, notes follow, deletion
+      follows, check clean, another Vault refused); CLI: Vault copy with the same
+      snapshots opened through the keyring fallback, restore from the copy, Mirror copy
+      sharing an unchanged file, refusals
+- [x] USER_GUIDE, VAULT_FORMAT ("Copies"), CHANGELOG
+
+Notes / follow-ups:
+- Found by the CLI test: a Vault copy opened as `home+usb` listed no snapshots (Vault
+  snapshots are kept per owner, and a copy's owner is the main profile). Fixed.
+
+### Phase 60 — 1.0: Retention safety (2026-11-09)
+- [x] `retention.safety_floor` (default 1): `evaluate` keeps the newest complete snapshots
+      the rules would remove until enough complete ones stay (reason "safety floor"),
+      even past `max_age`. Every engine's prune and the app's preview use it
+- [x] `retention.after_problems` (hold by default, or prune): the runner looks at the last
+      run that ran (not skipped or stopped); if it failed, left files out, missed a
+      source's drive or had a place fail, this backup prunes nothing, and says why.
+      `flux prune` by hand is unaffected
+- [x] `keep_history_days` / `keep_history_runs`: `runlog::trim` removes older runs and
+      their event files after each run; snapshots untouched
+- [x] App: *Safety* (always keep at least …; after problems, keep everything) and
+      *Activity history* on the *Keep and remove snapshots* page
+- [x] Tests: floor (unhealthy newest, beats max_age, 0 = none); runner: clean history
+      prunes, a failed run (target "unplugged") holds the next, a clean run resumes,
+      `prune` mode doesn't hold, history trimmed to 2 runs with their events; trim by
+      age and count
+- [x] USER_GUIDE, profile reference, CHANGELOG
+
+Notes / follow-ups:
+- `watch::waker_tests::wakes_when_a_job_file_appears` failed once under the full parallel
+  test load (late inotify events from an atomic write); it passes alone. The test now
+  drains until the folder is quiet.
+
+### Phase 61 — 1.0: Network rules and bandwidth schedules (2026-11-09)
+Decided: a `[network]` section on the profile, not fields on the SSH target: it applies
+to every server place of the backup, and the target's shape stays as it was.
+- [x] `flux_core::network`: `wifi_only`, `wifi_never` (`wifi_refuses`, in words; wired
+      connections are exempt), `bandwidth` windows (days `*`, `Mon..Fri`, `Sat,Sun`,
+      wrapping ranges; `HH:MM`; windows past midnight belong to the day they start;
+      `limit_at`, with the target's own limit outside them); validation in words; the
+      Wi-Fi name from `nmcli -t` (`FLUX_NMCLI` for tests), escaped colons handled
+- [x] Runner: a scheduled backup to a server is skipped on a refused network (the main
+      target in `quick_skip`; a server place among several only for itself); engines get
+      the limit in force when they start (`with_bandwidth_now`); the Vault SFTP limiter
+      asks for the limit as it runs (`RateNow`) and restarts its average on a change
+- [x] App: *Network* page under *More* when the backup or a place is on a server (Wi-Fi
+      lists, limits by time of day). Found while checking it: creating `[network]` from
+      the template crashed the editor (state changed while rendering); now written
+      through a setter. Reviewed in the demo
+- [x] Tests (simulated: a fake `nmcli`, `ssh` replaced by `false`): windows by day and
+      time, past midnight, validation, Wi-Fi rules, nmcli parsing; the limit engines
+      get; CLI: skipped on a café and a hotspot, runs at home and by hand, only the
+      server place skipped among several
+- [x] USER_GUIDE ("Networks and upload speed"), CHANGELOG
+
+### Phase 62 — 1.0: Restore tests (2026-11-09)
+After Duplicati's restore test policies (docs.duplicati.com, read for this phase).
+- [x] `[restore_test]`: `every` (off, the default; backup; week; month), `mode`
+      (random_files 10, percent 5, full, rolling over `window` 30 days), `max_runtime`,
+      `max_read`, `compare_with_source`
+- [x] `flux_runner::restore_test`: picks files (rolling keeps one position in FNV-1a
+      hash order and moves it by the share of the window that has passed: every file
+      once per window); restores them in batches of different names (each lands at
+      `<batch>/<its name>`; 25 files, 5 with limits) into a private temporary folder
+      (removed after); checks each: couldn't restore, size, recorded checksum
+      (failures), permissions/time, differs from the file now (notes); passed / warning
+      / failed; history of 30 reports and `last_passed` in the state folder; due and
+      overdue (interval plus a quarter; a week for "after every backup")
+- [x] Runner: a due test runs after a backup that kept a copy; its result in the run's
+      log; a failure is a warning and notified
+- [x] CLI `flux restore-test PROFILE [--files N | --percent P | --full | --rolling]
+      [--compare-source] [--history]`, exit 0 / 4 / 1
+- [x] Service: `restore_test`, `restore_tests`; health "The last restore test failed: …"
+      (danger) and "No restore test has passed for N days" (warning); `Status.unverified`
+      (for Phase 70's filters); the Overview carries the setting and the latest report
+- [x] App: a restore test row on the Overview (latest result, *Test a restore now*);
+      *Restore tests* settings page under *What to keep*. Reviewed in the demo
+- [x] Tests: picking (counts, percent, rolling covers every file exactly once in three
+      tests), overdue; runner: due after a backup and logged, a Mirror file changed in
+      place (same size) caught by its checksum, a source changed since as a note, a
+      data limit stops early with a warning, not due again within a week, a damaged Vault
+      pack fails; CLI by hand (same file name in two folders), `--full`, history
+- [x] USER_GUIDE ("Restore tests"), CHANGELOG
+
+### Phase 63 — 1.0: Unusual-change detection (2026-11-09)
+Rubrik's product page refused automated reading; the signals are the standard ones for
+ransomware detection, judged against each backup's own history.
+- [x] `flux_runner::unusual::analyze` (pure: entries before and after, the history, a
+      sample reader): mass change against the usual share (median of the last 10
+      backups; 30% and 5x usual, at least 100 files, normally; 15%/3x/30 closely);
+      renamed to a new extension (20 / 8); ransomware extensions (10 / 3); ransom note
+      names (3 / 1); changed text files that look encrypted (Shannon entropy of the first
+      64 KiB ≥ 7.5 bits/byte; 10 / 4, and half of those sampled); affected files with
+      their folders and extensions
+- [x] Runner: analysed after a backup that made a snapshot; on a finding the snapshot is
+      tagged *unusual changes*, the one before pinned with a note, warnings and a critical
+      notification; `RunRecord.unusual`; pruning holds after it (Phase 60's rule) until
+      dismissed. Found by the test: with `keep_last = 1` the snapshot before was pruned
+      before it could be pinned; with detection on, `keep_last` is at least 2
+- [x] Setting `unusual_changes` (off, normal, high); *Watch for unusual changes* in the
+      app's Safety section
+- [x] Service: health (danger) and `Overview.unusual` while not dismissed;
+      `dismiss_unusual` ("This was me": unpins the snapshot Flux pinned, removes the tag)
+- [x] App: an Unusual changes card under the headline (signals, where, Show the files,
+      Browse the snapshot before, This was me), a files dialog with *Copy the list*;
+      Snapshots can be opened on a given snapshot (`app.showSnapshot`). Demo; reviewed
+- [x] Tests: ordinary change and off not flagged; mass change against the usual (and a
+      backup that always changes a lot); renames to .locked with notes; text that looks
+      encrypted vs plain; runner end to end (flagged, tagged, pinned with note, the next
+      backup holds, dismissal resumes pruning); service dismissal unpins and untags.
+      Tests that check exact pruning turn detection off
+- [x] USER_GUIDE, CHANGELOG
+
+### Phase 64 — 1.0: Webhooks (2026-11-09)
+- [x] `flux_core::webhook`: `Webhook` (url, preset, events, headers, enabled), presets
+      JSON (documented body), ntfy, Gotify, Slack, Discord, healthchecks (`/start`, the
+      address, `/fail`; those three always sent); default events: failed, warning,
+      unusual changes, restore test failed; `request()` builds method, URL, headers, body
+- [x] Profile `[[webhooks]]` and `webhooks` in `settings.toml` (for every backup);
+      validation (http/https, `Name: value` headers)
+- [x] `flux_runner::webhooks`: sent with `curl` (`FLUX_CURL`), 15 s limit, after the run
+      is recorded: started, the outcome (succeeded/warning/failed), unusual changes, low
+      space (under 5% or 1 GiB free after the backup), skipped scheduled runs (not "not
+      due"), failed restore tests. Delivery failures are warnings in the run's log
+- [x] Secrets: the plan said headers would be stored like passwords; they stay in the
+      profile (already 0600) and `settings.toml`, which is now 0600 when it has webhooks.
+      Left out of `flux export` (with a note) and redacted in diagnostics
+- [x] Service and helper: `set_webhooks`, `test_webhook` (answers the HTTP status);
+      protocol messages; Tauri commands
+- [x] App: `WebhookList` (kinds with hints and placeholder addresses, event chips,
+      headers, Send a test) in Preferences (saved at once) and *Settings › More › Notify
+      elsewhere*. Demo; reviewed
+- [x] Tests: presets and event choice; settings round trip and file mode; runner end to
+      end against a local HTTP listener (JSON body, healthchecks pings, a failed backup,
+      an unreachable webhook only warns); redaction in diagnostics; export drops them
+- [x] USER_GUIDE ("Webhooks", profile reference, `FLUX_CURL`), CHANGELOG
+
+### Phase 65 — 1.0: Recovery on a new computer (2026-11-09)
+- [x] `Profile.origin` (host, user, profile id) and `Profile::kept_as`: every place that
+      finds a repository (Vault owner, Mirror local and remote, rsync, Borg, the recovery
+      kit's text) uses the names the backups were made under, so a recovered backup is
+      listed and continued as the old computer's. A destination keeps its `+name`
+- [x] The settings copy (`flux_compat::export::recovery_copy`): the Flux profile without
+      webhooks, hooks or password commands, with `made-on`/`made-by`/`kept-as` lines;
+      kept after each backup that made or confirmed a snapshot, from the profile as saved
+      (not the run's reduced one). Vault: encrypted in `profiles/` (`save_profile`,
+      `saved_profiles`; copied by replication); others: `flux-profile.toml` in the
+      backup's folder, locally or over SFTP. Rewritten only when it changes (digest in
+      `state/recovery/<id>.json`)
+- [x] `flux_runner::recover`: `find` (Flux's folders at a drive, folder or server; the
+      picked folder may be `flux-vault` itself; an encrypted Vault reports locked or a
+      wrong password), `recover` (saved settings or ones made from the backups, the
+      target where they were found, destinations cleared, *Get files back* = manual
+      schedule, ids made unique), `readiness` and `set_answer`
+- [x] CLI `flux recover <where> [--pick N] [--carry-on] [--id]` (password from
+      `FLUX_PASSWORD` or the terminal; kept as the profile says; timer for carry-on)
+- [x] Service and helper: `find_backups`, `recover`, `readiness`, `set_readiness`;
+      Tauri commands
+- [x] App: *Recover an existing backup…* on the welcome screen and in the **+** menu; the
+      dialog (where, an encrypted Vault's password, which backup, then); *Could you
+      recover it on another computer?* folded at the bottom of the Overview (plan: "under
+      Advanced"; the Overview has no Advanced section, so it's a closed disclosure).
+      Demo (`?open=recover`, `?empty=1`); reviewed
+- [x] Tests, simulated (the old computer is a profile whose origin names another computer
+      and user; the new one another Flux home): Mirror found from the drive or its
+      `flux-backup` folder, recovered, carried on into the same backups, a second recovery
+      gets `-2`; encrypted Vault locked / wrong password / found, recovered under another
+      id and carried on; an rsync backup without saved settings (folders from its newest
+      snapshot); readiness before and
+      after a backup, answers, changed settings; CLI end to end with restore; service
+- [x] USER_GUIDE ("On a new computer", `[origin]` in the reference), CHANGELOG
+
+### Phase 66 — 1.0: Standalone Vault recovery tool (2026-11-09)
+- [x] `crates/flux-vault-recover`: a second, independent reader of the Vault format (no
+      flux crates): config, key slots (Argon2id, XChaCha20-Poly1305, unlock files),
+      indexes (superseded ones skipped), packs, blobs (zstd through the pure-Rust ruzstd,
+      checked against their keyed BLAKE3 id), trees in formats 1 and 2, snapshot records.
+      Commands: `snapshots`, `files SNAPSHOT [PATH]`, `restore SNAPSHOT TO [PATH…]`
+      (into an empty folder; modes, times, owners as root, symlinks, holes; pipes and
+      devices skipped; unsafe paths refused), `verify [SNAPSHOT]` (exit 3 on damage).
+      Snapshot by `latest`, id, id prefix or name; password from `FLUX_PASSWORD`,
+      `--password-file` or the terminal. Static-PIE with musl: about 1 MB
+- [x] Found while writing it: `Crypto::open` accepted a plain-tagged object in an
+      encrypted Vault, so a forged unencrypted record would have been trusted. Refused now
+      (engine and tool), with tests on both sides
+- [x] Kept next to Vaults on drives with `FLUX-VAULT-RECOVERY.txt` after each backup
+      (`[vault] keep_recovery_tool`, default on; copied again when the tool changes),
+      found through `FLUX_VAULT_RECOVER`, next to `flux`, or in libexec. Toggle in the
+      editor's Storage page; the Vault card's text mentions it
+- [x] Packaging: `prepare-dist.sh` builds it static when the musl target is installed
+      (dynamic otherwise, with a note); `install.sh`, deb and rpm put it in
+      `/usr/libexec/flux-backup/`; the release workflow installs the musl target and
+      attaches `flux-vault-recover-<version>-x86_64-linux` on its own (in SHA256SUMS)
+- [x] Tests: Vaults written by real backups (runner) read by the tool: encrypted (no,
+      wrong and right password; the same snapshots as Flux; files under a folder; full
+      restore equal to the source with modes, times, symlink, unicode, empty, multi-chunk
+      and sparse files; restore by id prefix and path; never into a non-empty folder;
+      verify, then a damaged pack found), unencrypted format 1 opened from the drive's
+      folder, an unlock file, a forged unencrypted record refused; keeping the tool
+      (copied, left alone, replaced, off, not for other engines); the `flux` command
+      keeps it through `FLUX_VAULT_RECOVER`
+- [x] USER_GUIDE ("Without Flux: flux-vault-recover", reference, `FLUX_VAULT_RECOVER`),
+      CHANGELOG (Added, Security). The note links docs/FORMATS.md, written in Phase 72
+
+### Phase 67 — 1.0: Snapshot export (2026-11-09)
+- [x] `flux_runner::archive`: the selection (or the snapshot's sources) restored into a
+      private staging folder next to the archive through the engine's own restore (so
+      every engine works), removed whatever happens; metadata from the snapshot's entries,
+      so owners are right without root. Written to `.NAME.partial`, renamed when done;
+      never over an existing file
+- [x] Own pax tar writer (the `tar` crate has no pax records): path, linkpath and
+      nanosecond mtime records, large uid/gid/size, `SCHILY.xattr.*`, POSIX ACLs decoded
+      from `system.posix_acl_*` to `SCHILY.acl.access/default` text with numeric ids;
+      hard links (by device and inode, within the selection), symlinks, char/block
+      devices, FIFOs; sockets left out. zstd level 3 with a frame checksum
+- [x] Own ZIP writer (flate2 deflate, crc32fast): UTF-8 names, Unix modes in external
+      attributes, DOS and extended timestamps, ZIP64 sizes for files from 4 GB and ZIP64
+      end records past 65,535 entries or 4 GB (ZIP64 isn't exercised by the tests: it
+      needs 4 GB of data); symlinks, special files and hard links reported in `left_out`
+- [x] Checksums: `ARCHIVE.sha256` / `ARCHIVE.b3`, names escaped as coreutils does
+- [x] CLI `flux export <profile> <archive> [paths…] [--snapshot] [--checksums]` (kind
+      from the name; exit 4 when files couldn't be read). Service `export_snapshot`
+      (named `<id>-<date>[-<item>].<ext>` in a chosen folder, `-2`… when taken); protocol
+      and Tauri
+- [x] App: *Export…* in a snapshot's ⋯ menu and on a file, folder or selection in the
+      file list; the dialog (kind, checksums, where) and its result (path, sizes, what was
+      left out, how to check). Demo; reviewed
+- [x] Tests: Mirror and Vault snapshots as .tar.zst unpacked by GNU tar with
+      `--xattrs --acls` (contents, mode, nanosecond times, symlink, hard link, a user
+      xattr, an ACL), checked by `sha256sum -c` and read by Python's tarfile (owners); a
+      folder as ZIP with BLAKE3 sums, unpacked by unzip and tested by Python's zipfile;
+      refusals (not in the snapshot, an existing archive, nothing left behind); pax
+      record lengths, ACL text, manifest escaping; CLI; service naming
+- [x] USER_GUIDE ("As an archive: Export"), CHANGELOG
+
+### Phase 68 — 1.0: Rule tester and coverage (2026-11-09)
+- [x] `Filter::rule_for` (the deciding pattern as written, `~` and all, and whether it
+      leaves out or brings back), `marker_in`, `size_limit`, `is_hard_excluded`;
+      `skip_dir_by_marker` uses `marker_in`
+- [x] `flux_fs::coverage`: `explain` walks from the source down to the path with the
+      scanner's checks in its order (storage, pattern, size, marker, other disk); a path
+      that doesn't exist is judged by the rules (a trailing `/`: a folder). `list`: a
+      folder's items with verdicts, reasons in words and in/out totals, under a time
+      limit (`partial`). `storage_of` matches each engine's `never` paths. A cache folder
+      or mount point counts as left out (the scanner keeps it empty)
+- [x] Tested against the scanner itself: every file under a tree with patterns,
+      `!pattern`, a folder pattern, the size limit, a CACHEDIR.TAG, a marker file and the
+      backup's storage is "backed up" exactly when the scan takes it
+- [x] CLI `flux explain <profile> <paths…> [--list] [--json]`; service `explain` and
+      `coverage` on the editor's draft (routed like validation: user side; a system
+      backup's root-only folders can't be listed from the app)
+- [x] App: *Check the rules* on the exclusions page (Test a path, asked again as the path
+      or the rules change) and the *What's backed up* browser (breadcrumbs, ✓/✗ with the
+      reason, totals). Found while reviewing: rows in a scrolling list shrank and
+      overlapped; `shrink-0`. Demo with a small fake home; reviewed
+- [x] USER_GUIDE ("Checking the rules"), CHANGELOG
+
+### Phase 69 — 1.0: Backup templates (2026-11-09)
+- [x] `flux_runner::templates`: built in for your backups (Home, Documents, Photos,
+      Development) and system backups (System settings, with `/opt` and `/srv` when
+      there), and Blank; each with a line saying what it does. Applied on top of a new
+      backup's defaults (your usual exclusions for Home). Development picks the first of
+      `~/Projects`, `~/src`, `~/code`, `~/dev`, `~/git` that exists
+- [x] Your own: `templates/<name>.toml` in the config folder (0600), the profile without
+      its target, destinations, origin, webhooks, offsite flag or unlock file; listed with
+      their folders and schedule; removable
+- [x] Service: `templates`, `new_from_template`, `save_template`, `delete_template` (new
+      calls; `new_profile` unchanged, so the helper protocol only grows). Tauri
+- [x] CLI: `flux profile templates`, `create --template` (by id or your template's name;
+      `-s` replaces the folders, `-x` adds exclusions; sources required only without a
+      template), `save-template`, `delete-template`
+- [x] App: *New backup* starts with the template picker (built-in cards, then yours with
+      Remove); the editor opens filled from it (Cancel goes back to the picker); the Back
+      In Time offer only for Home and Blank; *Save as a template…* in a backup's ⋯ menu.
+      Demo; reviewed
+- [x] Tests: each built-in template's folders, schedule, retention and validity; the
+      system scope's list; your own saved, listed, applied (keeping the new backup's
+      destination), leaving no target or webhook behind, removed; service; CLI end to end
+- [x] USER_GUIDE ("Your first backup": the templates table), CHANGELOG
+
+### Phase 70 — 1.0: Calendar and status filters (2026-11-09)
+- [x] `Health.kind` on every notice (`overdue`, `failing`, `low_space`, `unplugged`,
+      `source_missing`, `destination_failing`, `restore_test_failed`, `unverified`,
+      `unusual`); asserted in the health tests
+- [x] All backups: filter chips (with more than one backup) with counts; zero-count ones
+      disabled; the pressed one in the accent colour (the grey of tag chips was hard to
+      see in the dark theme). Missed = overdue, unplugged or a source's drive missing;
+      Failed = last run failed, repeated failures or a place failing; Unverified = the
+      status flag or a failed/overdue restore test; Offsite = the main place or another
+      one kept elsewhere; Low space = the space notice. "Set up another backup" hidden
+      while filtering
+- [x] Snapshots: *Calendar* toggle above the list; `SnapshotCalendar` (weeks from Monday,
+      locale names, months between the oldest snapshot and now, today outlined, dots:
+      green/amber for snapshots, red for failed runs from the run history, fetched when
+      opened); a day filters the list (with a removable date chip) and opens its first
+      snapshot. Demo; reviewed
+- [x] USER_GUIDE (Snapshots calendar, All backups filters), CHANGELOG
+
+### Phase 71 — 1.0: Storage view and performance inspector (2026-11-09)
+- [x] `Progress::timings`: per-stage nanoseconds summed over threads (read, chunk,
+      dedup, compress+encrypt, write), storage writes and bytes, and wall-clock phase
+      durations recorded by `set_phase` (the clock restarts only on a change)
+- [x] Vault instrumented: reading (and, for big files, reading while cutting), chunking,
+      blob ids (deduplication), `encode_blob` (compress and encrypt), pack writes
+      (`Packer::timed`, which also counts writes). Mirror, rsync and Borg: phases only
+      (their copying is one step: a syscall or an external tool)
+- [x] `RunRecord.performance` (`runlog::Performance`: phases, stages, writes, bytes,
+      average write ms, throughput while copying); the runner times the restore test and
+      the unusual-change check as phases of their own, and keeps the restore test's own
+      scan and copy out of the backup's phases
+- [x] `AnyRepo::storage`: Vault from the index (unique raw vs stored data, pack sizes on
+      disk; whole-Vault numbers with how many other backups share it), Borg from
+      `BorgRepo::repo_stats` (`borg info`), Mirror/rsync estimated from each snapshot's
+      copied bytes. Service `storage`; protocol; Tauri
+- [x] App: Storage card on the Overview (sentence, stacked bar: taken / saved by storing
+      once / saved by compression, how it was measured); *Where the time went* folded in
+      a run's details (phase bar and list, stages with bars, writes and average write
+      time). Demo; reviewed
+- [x] Found by clippy: service functions added after test modules in earlier phases;
+      moved above them
+- [x] Tests: a Mirror run records Scanning and Copying; a Vault run records every stage,
+      writes, write time, throughput, a "Testing a restore" phase and only one Scanning;
+      kept in the run log. Storage: a Vault with a file twice and compressible text
+      (dedup and compression savings, stored far below the files), a Mirror with two
+      snapshots sharing a big file
+- [x] USER_GUIDE (Storage, Where the time went), CHANGELOG
+
+### Phase 72 — 1.0: The formats, frozen (2026-11-09)
+- [x] `docs/FORMATS.md`: every format a backup depends on with its version and what a
+      newer one does: Vault (VAULT_FORMAT.md, updated with `profiles/` and the plaintext
+      refusal), Mirror repository and manifest (byte layout, Entry fields), snapshot
+      `meta.json`, rsync and Borg layouts (the archive comment), profiles (schema 1), the
+      settings kept with the backups, the recovery kit; and what isn't frozen (run log,
+      caches, settings). Linked from the README and the guide
+- [x] Refusals with a clear message: Vault config (existing), Mirror and rsync markers
+      (existing), profile schema (existing), and new: snapshot `meta.json`
+      (`SnapshotMeta::check_format`; Mirror listings skip such a snapshot, reading it
+      says why; rsync leaves a newer `meta.json` aside), the manifest (`Newer` instead of
+      "not a Flux manifest")
+- [x] Profiles: files Flux writes say `# schema 1, written by Flux Backup …`; a file
+      without that line (from before 1.0, or by hand) is kept as
+      `<id>.toml.pre-1.0.bak` the first time Flux rewrites it (once; not listed as a
+      profile)
+- [x] Fixtures written by the releases themselves: 0.1.0 (87a7b95), 0.2.0 (dbaa8d8) and
+      0.3.0 (25ec953) built from git worktrees, and today's build as `v1.0` (regenerate
+      at the release, Phase 76). Made in a user namespace (`unshare -rUmu`: computer
+      `fixture-host`, user `root`, files under `/srv`) so they carry nothing of this
+      computer; checked for leaks. 2.5 MB. `fixtures/README.md` and `generate.py` say how
+- [x] `backups_from_every_release_are_read` (through the `flux` command, so Borg runs
+      with its own `BORG_BASE_DIR`): each release's profile files validate (with paths
+      moved and an `[origin]`), both snapshots are listed, the newest restored file for
+      file against the recorded SHA-256 (with the symlink and the sparse file), the first
+      one's changed file too, and a new backup carries on into the old repository (a 0.x
+      Vault stays format 1)
+- [x] `newer_formats_are_refused_with_a_clear_message`: a Vault of format 3, a
+      `meta.json` of format 2, a manifest of version 2, a Mirror marker of format 2, a
+      profile of schema 2
+- [x] App: *Upgrade the Vault* in the Overview's Maintenance for a format 1 Vault, with a
+      confirmation saying what it means for older Flux; service `vault_format` (reads only
+      `config`, no password) and `upgrade_vault`; tested on the 0.3 fixture's Vault.
+      Demo; reviewed
+- [x] USER_GUIDE (older versions, the upgrade), README, CHANGELOG
+
+### Phase 73 — 1.0: Property tests for filter translation (2026-11-09)
+- [x] `crates/flux-compat/tests/filter_props.rs` (proptest): random trees (names with a
+      space, dots, `node_modules`, `build`…) and random rule lists, under a folder named so
+      no rule can match its parents
+- [x] Flux patterns (`*.ext`, bare names, `name/`, `!name`, `!name/`, absolute paths,
+      `**/a/b`, `**/n/**`, `{src}/**/n`, `?`, `[xy]`, `*`) through `RuleSet` into an
+      rsync rules file: the files real `rsync --relative --dry-run --exclude-from` would
+      copy are exactly the files Flux's scanner takes
+- [x] Back In Time patterns (`*.ext`, names, `a/b`, `a/*/b`, `/abs`, `**/n`, `n/***`,
+      `{src}/**/n`, `?`, `[xy]`) as `--exclude` to real rsync vs the converted Flux
+      patterns in Flux's scanner
+- [x] Found a real bug: rsync's `/**/` needs at least one folder, gitignore's also matches
+      none, so `/home/me/**/build` imported from Back In Time also left out
+      `/home/me/build`. `backintime::pattern` now writes `/*/**/`; unit test added; the
+      failing case is kept in `filter_props.proptest-regressions` and replayed every run
+- [x] 96 cases each by default (~5 s); `FLUX_PROP_CASES` raises it: 3000 each with the
+      first grammar and 2000 each with the wider one, all passing after the fix.
+      Skipped when rsync isn't installed. Borg patterns aren't covered (a Borg dry run
+      needs a repository); they're tested by the existing Borg tests
+- [x] CHANGELOG (the Back In Time fix)
+
+### Phase 74 — 1.0: Fuzzing (2026-11-09)
+- [x] `fuzz/` in cargo-fuzz's layout (outside the workspace), eight targets: Vault pack
+      (header and blobs, unencrypted and encrypted), index, tree (formats 1 and 2, with
+      the sparse-file arithmetic), JSON (config, key slots with tiny Argon2 parameters
+      only, snapshot records), Mirror manifest (raw, or records wrapped in a stored zstd
+      frame so the fuzzer gets past decompression), `meta.json`, profiles (plus exported
+      profiles and the settings kept with backups), the helper's request lines
+- [x] Built without cargo-fuzz (`fuzz/build.sh`: nightly, libFuzzer, AddressSanitizer,
+      debug assertions and overflow checks); `fuzz/run.sh` runs all in parallel. Seeds
+      from the fixtures and an unencrypted Vault; only seeds and regressions are in git
+- [x] Found: a tree with holes out of order made `Content::span_at` subtract past zero
+      (would wrap in release and restore wrong data). `holes_are_sound` checked when a
+      format 2 tree is decoded, so such a tree is "damaged"; the same check in
+      `flux-vault-recover`. The input is in `fuzz/regressions/vault_tree/`, replayed by a
+      unit test in flux-vault, with direct cases (out of order, empty, overflowing,
+      past the end)
+- [x] Runs: 5 min each (found the crash), then 10 min each after the fix (84 M inputs,
+      no crash; index and tree coverage flat for the last fifth, pack and manifest
+      nearly flat), then 15 more min for the four still growing (83 M inputs, no crash;
+      `meta.json` flat; the JSON, profile and protocol targets still slowly reach new
+      paths, mostly inside serde_json and toml across the many request shapes). Worth
+      another long run before each release
+- [x] fuzz/README.md, CHANGELOG
+
+### Phase 75 — 1.0: Panic audit (2026-11-09)
+- [x] `#![deny(clippy::unwrap_used)]` in flux-core, flux-fs, flux-vault, flux-mirror,
+      flux-compat, flux-transport, flux-runner, flux-service (the helper's code, run as
+      root) and flux-helper; `clippy.toml`: `allow-unwrap-in-tests`
+- [x] What it found outside tests (the counts before were mostly test modules): 37
+      sites, all in flux-fs, flux-mirror and flux-compat. Mutex locks and `into_inner`
+      (`flux_core::sync::Locked`: `locked()`, `into_value()`, which carry on after a
+      poisoned lock: the data they guard is whole after every push; tested); items taken
+      right after `peek` (`expect("peeked")`); a match count of one
+- [x] The 91 `expect`s outside tests read through: fixed-size slice conversions, pipes
+      just requested, targets already matched as SSH, values just inserted, serializing
+      plain structs. About 30 `lock().expect(…)` became `locked()` too
+- [x] `unreachable!`s: each with a message saying why (manual backups return early in
+      `cron::lines_for`; the systemd match is inside `if trigger != Manual`; `target_of`
+      only returns SSH targets); no `todo!`/`unimplemented!`/`panic!` outside tests
+- [x] Not covered by the lint: flux-cli, flux-mount and the GUI (they report errors to a
+      person and exit) and flux-vault-recover (no `unwrap()`; its errors are messages)
+- [x] CHANGELOG
+
+### Phase 76 — Release 1.0 (2026-11-09)
+- [x] Version 1.0.0: workspace (every crate, the `flux` command, the helper,
+      flux-vault-recover), the app's package.json and lock file, tauri.conf.json
+- [x] CHANGELOG: *Unreleased* is now **1.0.0 — 2026-11-09**, with a summary; compare link
+- [x] AppStream: 1.0.0 release notes, a screenshot of recovering a backup;
+      `appstreamcli validate` passes
+- [x] README: status 1.0 (no beta caution), *What 1.0 adds*, FORMATS.md linked, the
+      Vault row says it reads without Flux, six new screenshots in the gallery
+- [x] Website: "Version 1.0 · recover anywhere", a *New in 1.0* section (six cards and four
+      screenshots, in the nav), the caution card replaced by *Readable for years*. The
+      guide page is now built from docs/USER_GUIDE.md by `site/build-guide.py` (it was a
+      hand-made copy from 0.3 without any 1.0 section): same shell, intro and section ids,
+      both tables of contents rebuilt, every in-page link checked
+- [x] Screenshots: the 16 retaken at 1200×780 with the demo clock at 4 PM, and six new
+      (recover, templates, rules, calendar, storage and readiness, archive export), in
+      docs/screenshots and site/assets/screenshots; reviewed one by one (a click on the
+      sidebar instead of a template card, a search with no results, a toast: retaken)
+- [x] The `v1.0` fixture regenerated with the 1.0.0 build; every release's fixture still
+      read, restored and carried on
+- [x] Checks: fmt, clippy (workspace and GUI), 312 tests, svelte-check, Vite build;
+      `packaging/prepare-dist.sh` builds flux 1.0.0, the helper and a static
+      flux-vault-recover 1.0.0
+- [x] UX pass after 1.0.0 (three commits, before publishing): every screen reviewed at
+      1200×780 for too much or too little. Overview shortened (space, forecast and storage
+      in one card; readiness and maintenance folded), duplicate times gone from All
+      backups, Settings' drive list collapsed to the chosen drive, retention presets with
+      the numbers under Custom, Preferences' advanced options folded, the size-limit
+      banner a one-line note, shorter texts throughout. The screenshots, the guide and the
+      CHANGELOG updated; `site/build-guide.py` now runs again on a page it built
+- [x] Release check (bugs, wording, visual polish): every screen and dialog rendered at
+      900×600 and 1200×780, dark and light, checked for console errors and overflowing
+      text; codespell over the code and docs. Fixed: the empty-destination message, the
+      cut-off Restore button and crushed lists in small windows, "Next running now",
+      a few wordings. 313 tests
+- [x] Website for 1.0 (site/index.html, site/guide.html), "Titanium": chosen by the owner
+      from five directions and then five variations of the one they picked (prototypes in
+      .impeccable/mocks/site-directions, not in git). Graphite and brushed metal, Geist,
+      the app rising and flattening as the page scrolls, a counting spec sheet, chapters,
+      a detail mosaic, a speed race, formats and a terminal; the guide in the same style;
+      fits every width from 320 to 1920. Design recorded in docs/SITE_DESIGN.md
+- [x] Node.js 26 (LTS) and every dependency at its latest stable release (Rust 1.99
+      minimum; sha2 0.11, similar 3, ruzstd 0.9, zbus 6; TypeScript 6; Actions v7). Checked
+      top to bottom on the owner's Node 26: fmt, clippy, 313 tests, svelte-check, Vite build,
+      prepare-dist (static flux-vault-recover, 74 man pages, completions), the .deb and .rpm
+      (contents and a rendered man page), an 85-step end-to-end run of the release binary
+      over Mirror, Vault, rsync and Borg (backup, find, history, diff, restore, export with
+      checksums, check, prune, restore test, flux-vault-recover, flux recover), all 67 app
+      screens in both themes and at 900x600, and the website at six widths with its links
+- [ ] Publishing, by the owner's word only: sync to the public repository, tag `v1.0.0`
+      (the release workflow then builds the packages and attaches flux-vault-recover)
+
+### Phase 77 — Pre-release bug check: the fixes (2026-11-09)
+A full pass over every crate and the app before publishing found 3 critical and 23 high
+issues. Fixed in rounds, each with its tests and a commit.
+- [x] Round 1, critical: an exact restore only removes from folders the backup covered
+      (not above a source, not in a mount point it didn't enter, not what it couldn't
+      read); Vault gc reads every snapshot record or deletes nothing, `check` reports an
+      unreadable record, a damaged one is deleted with `--force`; a backup set to be
+      encrypted refuses a Vault that says it isn't. 317 tests
+- [x] Round 2, Vault integrity: a pack that can't be written ends the backup (no snapshot
+      missing other files' data); a sparse file cut short mid-read is left out, not
+      written as an undecodable tree (and `Tree::encode` refuses what `decode` would);
+      locks carry a machine token, so a namesake computer's lock isn't taken for a dead
+      local process; a backup checks its packs and starting index files are still there
+      before committing; replication re-reads the source's config before removing and
+      lists index and snapshots before packs. New tests/faults.rs (a backend that fails
+      on cue). 321 tests
+- [x] Round 3, the runner: weekly Vault upkeep only collects unused data (`gc::collect`,
+      `AnyRepo::free_unused`) and never forgets a snapshot, so the hold after problems and
+      the keep-one-more of unusual-change detection can't be bypassed; cron with
+      catch-up off runs what is due now even when an older time was missed
+      (`calendar_due`, unit-tested). 323 tests
+- [x] Round 4, Mirror over SSH: `--checksum` when changes are detected by checksum; SFTP
+      reads take paths as bytes (`open_bytes`, `read_range_bytes`), so names that aren't
+      UTF-8 restore and mount; following links is refused in validation and at run time
+      (rsync stores them as links there). CLI test against the SSH stand-in. 324 tests
+- [x] Round 5, Borg and rsync: a restore from Borg compares every extracted file with the
+      archive's listing (short or missing: not restored, reported, exit 4) and treats
+      borg's warnings as problems; folders above the archive's own are `path_only` in
+      the restore (created when missing, otherwise untouched); `check` of an rsync
+      backup lists afresh (`entries_now`) and compares file counts. Tests with real borg
+      (a `ulimit -f` wrapper for the failed write) and rsync. 325 tests
+- [x] Round 6, backups that didn't run: a backup started from the app writes its messages
+      to a file (`state/started/<id>.log`), not a pipe the app or helper holds; from an
+      AppImage, `flux` is copied to `~/.local/share/flux-backup/bin` and that copy goes
+      into timers and starts backups (`lasting_cli`); `profile create --template`,
+      `import` and `backintime` set up the timer; the editor reads the whole stored
+      interval (`app/src/lib/interval.ts`) and writes it only when changed. 326 tests;
+      the interval parser was checked with node (the app has no test runner)
+- [x] Round 7, security: settings read from a drive are a description only
+      (`description_only`: no hooks, webhooks, password commands, ssh options, extra
+      arguments); `flux-vault-recover` walks to each destination through real folders
+      and creates files new; sources are opened with `SourceOpener` (openat2 below the
+      source, no symlinks, non-blocking, regular files only) in Mirror, Vault and the
+      scan's hashing; an empty new password is refused (runner and `VaultRepo`);
+      diagnostics scrub events and run errors. 331 tests
+- [x] Round 8, the app: Snapshots refreshes in place (a running restore's dialog is no
+      longer unmounted by another backup or an idle lock), a modal is locked while its
+      restore runs, an outcome that outlives its dialog becomes a toast; no finished
+      backup means not protected. Checked in a headless Chrome against the mock: a stored
+      `1h 30m` opens as 90 minutes with Save disabled, changing it writes `95min`
+- [x] After all rounds: fmt, clippy -D warnings, 331 tests, svelte-check, vite build; the
+      guide page rebuilt from docs/USER_GUIDE.md

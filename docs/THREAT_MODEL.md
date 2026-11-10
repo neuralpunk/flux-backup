@@ -36,8 +36,14 @@ metadata confidential and tamper-evident**:
 - Every object (data chunks, directory trees, snapshot records, indexes, pack headers) is
   sealed with XChaCha20-Poly1305 under a random 256-bit key. Random 192-bit nonces make
   reuse a non-issue.
-- That key is stored only wrapped by your password(s) with Argon2id (64 MiB, 3 passes) and
-  bound to the repository's id, so a key slot can't be moved to another Vault.
+- That key is stored only wrapped by your password(s) with Argon2id (64 MiB and 3 passes by
+  default; *strong* is 256 MiB and 4 passes, *maximum* 1 GiB and 6) and bound to the
+  repository's id, so a key slot can't be moved to another Vault.
+- A password can be made to need an **unlock file** too (kept on a USB stick, say): its
+  key slot is then wrapped with the password and a hash of the file, so the password alone
+  is useless to someone who learned it. Other passwords of the same Vault keep working
+  without the file unless they're removed or given it; the app and `flux key unlock-file`
+  say which.
 - Blob ids are keyed BLAKE3 MACs, and chunk boundaries come from a secretly seeded
   chunker. Ids and boundaries therefore don't reveal whether the Vault contains a known
   file.
@@ -46,13 +52,21 @@ metadata confidential and tamper-evident**:
   what they read).
 
 What it does **not** hide: the number and approximate sizes of packs and snapshots, when
-backups happened, and roughly how much changed each time. It can't stop someone with write
+backups happened, and roughly how much changed each time. A pack's exact size can tell the
+size of a single small file a backup stored; *hide file sizes* pads every pack to a Padmé
+length (at most about 12% bigger), so only a coarse size is left. The number of blobs in a
+pack (its header's length) stays visible. It can't stop someone with write
 access from deleting or corrupting the backups; it only detects that. Keep a second backup
 somewhere else if that matters.
 
 Security rests on the password. Argon2id makes each guess expensive, but a short or reused
 password can still be guessed. Losing every password makes the Vault unreadable, and
 there is deliberately no recovery.
+
+Whether a Vault is encrypted is recorded in its `config`, which is not secret and not
+authenticated before the key is known. A profile with `encryption = true` therefore refuses
+a Vault whose `config` says it isn't encrypted (someone with write access to the target
+could otherwise turn encryption off and have the next backup stored in the clear).
 
 Unencrypted Vaults (`encryption = false`) keep integrity checking and dedup, but not
 confidentiality.
@@ -105,8 +119,9 @@ A Vault on an SSH server is encrypted before it leaves the machine; the server s
 opaque packs. Mirror over SSH stores plain files on the server (see above), so the server
 must be trusted with the contents.
 
-Remote lock files coordinate concurrent clients; a malicious server can ignore them, and
-the result is detected corruption, not silent corruption, for Vaults.
+Lock files (in the Vault's `locks/`, written on local disks and over SFTP alike)
+coordinate concurrent clients; a malicious server can ignore or forge them, and the
+result is detected corruption (or a refused backup), not silent corruption, for Vaults.
 
 ## On the machine
 
@@ -121,7 +136,8 @@ Hooks are shell commands *you* configure. They run as you, with your environment
 
 ### Passwords
 
-- The app keeps passwords you type in memory only (zeroized when dropped) until it quits.
+- The app keeps passwords you type in memory only (zeroized when dropped) until it quits,
+  or, with *lock it again in the app*, until the Vault has gone unused that long.
   It passes them to the background `flux backup` process in its environment
   (`FLUX_PASSWORD`). Only you and root can read that, via `/proc/<pid>/environ`.
 - The `keyring` source stores the password in the desktop keyring (Secret Service), which
@@ -191,7 +207,13 @@ ordinary way:
   old, perhaps vulnerable, program, or a raw disk device.
 
 **Backups as root** read the source tree. The scanner doesn't follow symlinks (unless the
-profile asks for it), and nothing read from sources is executed.
+profile asks for it), and nothing read from sources is executed. Files are read some time
+after they were scanned, so each is opened below its source folder with every symlink on
+the way refused by the kernel (`openat2` with `RESOLVE_NO_SYMLINKS` and `RESOLVE_BENEATH`;
+on kernels without it, the file itself is opened with `O_NOFOLLOW`), without blocking, and
+read only if it is a regular file. A user can't swap a file of theirs for a link to
+someone else's between the scan and the read, and a named pipe put in its place isn't
+waited on. Links to and above a source folder are followed, as given.
 
 ## Malicious backup content
 
@@ -201,6 +223,13 @@ profile asks for it), and nothing read from sources is executed.
   skip such entries before reading or writing anything, and report them; mounts don't show
   them.
 - **Symlinks**: restored as symlinks, never followed while restoring (see above).
+  `flux-vault-recover` does the same: every folder on the way to a file must be a real
+  folder, a file is always created new, and only folders have anything below them.
+- **Saved settings**: the copy of a profile kept with its backups (`flux-profile.toml`)
+  is read as a description, not as instructions. Hooks, webhooks, password commands, ssh
+  options (`ProxyCommand`) and extra rsync/borg arguments in it are dropped when a backup
+  is recovered: a drive anyone could write to must not be able to run a program on the
+  computer recovering from it.
 - **Hard links**: recreated with `linkat` between two destinations of the same restore,
   both reached through held descriptors.
 - **Special files**: FIFOs are recreated; device nodes only as root, and never into

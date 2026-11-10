@@ -1,0 +1,8 @@
+# This folder holds backups made by Flux Backup in rsync compatibility mode.
+# Read FLUX-RECOVERY.txt to use them without Flux.
+format = 1
+engine = "rsync"
+profile = "rsync"
+host = "fixture-host"
+user = "root"
+created = "2026-11-09T16:31:32.731639593Z"

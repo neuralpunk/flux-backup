@@ -1,0 +1,8 @@
+# Flux Backup: exclusion patterns for “borg” (borg)
+# Borg patterns (borg create --patterns-from). The first pattern that matches a path
+# decides: "! " leaves it out (and doesn't look inside), "+ " keeps it.
+# Paths have no leading slash. "P sh": shell-style, ** matches across folders.
+P sh
+
+# The backup folders themselves:
+! pp:srv/tgt/flux-borg

@@ -1,0 +1,133 @@
+FLUX BACKUP — RECOVERY GUIDE (rsync compatibility mode)
+==============================================================
+
+These are backups of “rsync”, made by Flux Backup in rsync compatibility mode.
+Every snapshot is a plain folder written by rsync, a standard Linux copying tool.
+You don't need Flux to get your files back or to keep making backups.
+
+  Profile:   rsync (rsync)
+  Computer:  fixture-host, user root
+  Stored in: /srv/tgt/flux-rsync/fixture-host/root/rsync
+  Written by Flux Backup 1.0.0 with rsync 3.5.2-ga8306e06
+  Backed up:
+  /srv/src
+
+Never used rsync or a terminal? Read IN SHORT and NEW TO RSYNC, then use the
+commands below as they are. Know rsync well? Skip to FOR RSYNC USERS at the end.
+
+IN SHORT
+--------
+  Your files are ordinary files and folders. To get one back, open
+    /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data
+  in your file manager, go to the file's usual place (for example
+  /srv/src/path/to), and copy it out. That's all: no program, no password.
+  The commands below do the same from a terminal, for many files at once.
+
+NEW TO RSYNC
+------------
+  rsync copies files and folders. Check that it's installed by typing
+  rsync --version in a terminal; if it isn't, install the “rsync” package
+  (sudo apt install rsync, sudo dnf install rsync, sudo pacman -S rsync).
+
+  Each command below is one line: copy the whole line into a terminal and press
+  Enter. Three things are worth knowing:
+    * A slash at the end of a folder (folder/) means “what's inside this folder”.
+      The commands below already have the slashes they need.
+    * -aHAX keeps everything about the files: permissions, dates, links and
+      attributes.
+    * --dry-run only shows what would happen. Add it first when you're unsure.
+
+WHERE YOUR FILES ARE
+--------------------
+  snapshots/<date and time>/data/<the file's usual path>
+  for example
+    snapshots/2026-11-09_11-30-55/data/srv/src/path/to/file
+
+  latest points to the newest snapshot. Every snapshot is complete on its own.
+  Files that didn't change are shared with the snapshot before (hard links), so
+  they take space only once, and deleting one snapshot never damages another.
+
+LIST THE SNAPSHOTS
+------------------
+  ls -1 /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots
+
+BROWSE
+------
+  Open /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data in any file manager.
+
+RESTORE ONE FILE
+----------------
+  rsync -aHAX /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data/srv/src/path/to/file /srv/src/path/to/
+
+RESTORE A FOLDER (to where it was)
+----------------------------------
+  rsync -aHAX --numeric-ids /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data/srv/src/ /srv/src/
+
+  rsync replaces files that differ. To keep your current versions too, add
+  --backup --suffix=.before-restore (they're renamed instead of replaced).
+  rsync never deletes files that aren't in the backup unless you add --delete.
+
+RESTORE EVERYTHING (every backed-up path to where it was)
+--------------------------------------------------------
+  Look first with --dry-run, then run it for real:
+  rsync -aHAX --numeric-ids --dry-run /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data/ /
+  rsync -aHAX --numeric-ids /srv/tgt/flux-rsync/fixture-host/root/rsync/latest/data/ /
+  Put sudo in front to restore other users' files and file owners.
+
+RESTORE AN OLDER VERSION, OR INTO ANOTHER FOLDER
+------------------------------------------------
+  Use snapshots/<date and time> instead of latest, and any destination:
+  rsync -aHAX /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/2026-11-09_11-30-55/data/srv/src ~/restored/
+
+MAKE A NEW BACKUP WITHOUT FLUX
+------------------------------
+  sh /srv/tgt/flux-rsync/fixture-host/root/rsync/flux-backup.sh            (or add --dry-run to only show what would change)
+  It needs nothing but rsync. It does what Flux does: unchanged files are
+  shared with the newest snapshot, an interrupted backup continues next
+  time, and the new snapshot is named after the date and time.
+
+WHAT IS LEFT OUT
+----------------
+  Exclusions from the profile:
+  (none)
+  Folders containing CACHEDIR.TAG are left out (their contents; the folder stays).
+  rsync can't do this by itself, so Flux (and the script, with find) looks for
+  them first and adds them to the rules.
+
+DELETE OLD SNAPSHOTS
+--------------------
+  chmod -R u+w /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/2025-01-31_18-00-00 && rm -rf /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/2025-01-31_18-00-00
+  (Snapshot folders can be read-only; chmod makes them deletable.) If you delete
+  the newest snapshot, latest points nowhere until the next backup.
+
+THE FILES HERE
+--------------
+  FLUX-RECOVERY.txt   this guide (Flux rewrites it after every backup)
+  flux-backup.sh       the backup, with rsync only
+  flux-repo.toml       marks this folder as Flux's
+  snapshots/           the backups; latest points to the newest
+  In each snapshot: data/ (your files), rsync-command.txt (the exact command that
+  wrote it), rsync-filter.txt (the exclusion rules it used) and meta.json (Flux's
+  notes: statistics, names, pins; never needed to restore).
+
+FOR RSYNC USERS
+---------------
+  Each backup is one rsync run into snapshots/.partial, renamed to the date and time
+  (local time, %Y-%m-%d_%H-%M-%S, _2, _3 within one second) when rsync exits 0, 23
+  or 24, after which latest is repointed. An interrupted run leaves .partial in place
+  and the next run continues into it. The command (Flux adds --info=progress2 --stats
+  --no-human-readable to follow it):
+
+  rsync --archive --hard-links --numeric-ids --relative --delete --delete-excluded --acls --xattrs --exclude-from=/srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/.partial/rsync-filter.txt '--link-dest=../../<previous snapshot>/data' /srv/src/ /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/.partial/data/
+
+  * --relative with absolute sources: data/ mirrors /, so restores map 1:1.
+  * rsync-filter.txt is first-match-wins. Flux translates the profile's gitignore-style
+    patterns (last match wins) by reversing them; anchored patterns stay anchored
+    to /, patterns with an inner slash are anchored, **/x becomes x.
+  * Marker folders (CACHEDIR.TAG, exclude_if_present) are found before each run and
+    written as “- /path/*” rules (the folder itself is kept).
+  * Nothing else is Flux-specific: meta.json is optional, snapshots without it
+    (made by the script or by hand) are listed by Flux, which adds a meta.json the
+    next time it backs up. Flux restores from these folders with its own restore
+    (identical files skipped, differing ones kept aside); the rsync commands above
+    are the equivalent.

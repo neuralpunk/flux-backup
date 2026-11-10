@@ -27,18 +27,44 @@ pub struct ProfileId(String);
 )]
 pub struct InvalidProfileId(pub String);
 
+/// Joins a profile's id and one of its extra destinations: `home+nas`.
+pub const DESTINATION_SEP: char = '+';
+
 impl ProfileId {
+    /// A profile id (`home`), or a destination of one (`home+nas`): lowercase letters,
+    /// digits, `-` and `_`, starting with a letter or digit, joined by one `+` for a
+    /// destination.
     pub fn new(s: impl Into<String>) -> Result<Self, InvalidProfileId> {
         let s = s.into();
-        let ok = (1..=64).contains(&s.len())
-            && s.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-            && s.as_bytes()[0].is_ascii_alphanumeric();
+        let part = |p: &str| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                && p.as_bytes()[0].is_ascii_alphanumeric()
+        };
+        let ok = (1..=129).contains(&s.len())
+            && match s.split_once(DESTINATION_SEP) {
+                None => s.len() <= 64 && part(&s),
+                Some((base, dest)) => {
+                    base.len() <= 64 && dest.len() <= 64 && part(base) && part(dest)
+                }
+            };
         if ok {
             Ok(ProfileId(s))
         } else {
             Err(InvalidProfileId(s))
         }
+    }
+
+    /// The id of destination `dest` of this profile: `home` + `nas` → `home+nas`.
+    pub fn with_destination(&self, dest: &str) -> Result<Self, InvalidProfileId> {
+        ProfileId::new(format!("{}{DESTINATION_SEP}{dest}", self.0))
+    }
+
+    /// For a destination's id: the profile's id and the destination's name.
+    pub fn split_destination(&self) -> Option<(ProfileId, &str)> {
+        let (base, dest) = self.0.split_once(DESTINATION_SEP)?;
+        Some((ProfileId(base.to_owned()), dest))
     }
 
     pub fn as_str(&self) -> &str {
@@ -154,6 +180,231 @@ pub struct Profile {
     /// Upkeep done after scheduled backups when it's due.
     #[serde(default, skip_serializing_if = "Maintenance::is_default")]
     pub maintenance: Maintenance,
+    /// The main destination (`target`) is away from this computer's building: a server or
+    /// a drive kept elsewhere. Shown, and used by the "offsite" filter.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub offsite: bool,
+    /// More places the same backup goes, each with its own way of storing it. Every
+    /// backup run goes to all of them, one after the other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<Destination>,
+    /// Set (never stored) on the profile of a destination that is a copy of the main
+    /// one ([`CopyMode::Replicate`]): its snapshots are the main profile's.
+    #[serde(skip)]
+    pub replica: bool,
+    /// Wi-Fi rules and upload limits by time of day, for backups to a server.
+    #[serde(default, skip_serializing_if = "crate::network::Network::is_default")]
+    pub network: crate::network::Network,
+    /// Restore tests: now and then, restore a sample and check it.
+    #[serde(default, skip_serializing_if = "RestoreTest::is_default")]
+    pub restore_test: RestoreTest,
+    /// How readily a backup's changes count as unusual (a sign of ransomware, or of a
+    /// mistake): many more files changed than usual, files renamed to a new extension,
+    /// text that now looks encrypted, ransom notes.
+    #[serde(default, skip_serializing_if = "Sensitivity::is_normal")]
+    pub unusual_changes: Sensitivity,
+    /// Where to tell how this backup goes, off this computer (besides the ones in
+    /// Preferences, for every backup).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<crate::webhook::Webhook>,
+    /// The backups were made on another computer (or as another user, or under another
+    /// id), and this profile carries them on: they're found, listed and continued as that
+    /// computer's. Set when a backup is recovered on a new computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+}
+
+/// Where a recovered backup was made: its backups are kept under these names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Origin {
+    pub host: String,
+    pub user: String,
+    /// The profile id there.
+    pub profile: String,
+}
+
+/// The names a profile's backups are kept under at its target: computer, user, profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptAs {
+    pub host: String,
+    pub user: String,
+    pub profile: String,
+}
+
+/// How readily changes count as unusual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sensitivity {
+    Off,
+    #[default]
+    Normal,
+    High,
+}
+
+impl Sensitivity {
+    pub fn is_normal(&self) -> bool {
+        *self == Sensitivity::Normal
+    }
+}
+
+/// `[restore_test]`: how often a sample of the newest snapshot is restored into a
+/// temporary folder and checked, and which sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreTest {
+    #[serde(default)]
+    pub every: TestEvery,
+    #[serde(default)]
+    pub mode: TestMode,
+    /// `random_files`: how many.
+    #[serde(default = "ten")]
+    pub files: u32,
+    /// `percent`: of the snapshot's size.
+    #[serde(default = "five")]
+    pub percent: u8,
+    /// `rolling`: every file is tested once in this long (default 30 days).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<HumanDuration>,
+    /// Stop after this long (the test then ends with a warning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime: Option<HumanDuration>,
+    /// Stop after reading this much.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_read: Option<ByteSize>,
+    /// Also compare each restored file with the file on disk now (differences are notes,
+    /// not failures: files change).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compare_with_source: bool,
+}
+
+impl Default for RestoreTest {
+    fn default() -> Self {
+        Self {
+            every: TestEvery::Off,
+            mode: TestMode::RandomFiles,
+            files: 10,
+            percent: 5,
+            window: None,
+            max_runtime: None,
+            max_read: None,
+            compare_with_source: false,
+        }
+    }
+}
+
+impl RestoreTest {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn ten() -> u32 {
+    10
+}
+
+fn five() -> u8 {
+    5
+}
+
+/// How often a restore test runs (after a backup, once it's due).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestEvery {
+    /// Only by hand.
+    #[default]
+    Off,
+    /// After every backup.
+    Backup,
+    Week,
+    Month,
+}
+
+/// Which files a restore test takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestMode {
+    #[default]
+    RandomFiles,
+    Percent,
+    Full,
+    Rolling,
+}
+
+/// One more place a profile's backups go: same sources, schedule and retention, its own
+/// target and engine. Its snapshots are those of profile id `<profile>+<name>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Destination {
+    /// Short id, unique in the profile (`nas`, `usb`): lowercase letters, digits, `-`, `_`.
+    pub name: String,
+    /// Shown in the app ("NAS in the office"); defaults to the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub engine: Engine,
+    pub target: Target,
+    /// Kept away from this computer's building.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub offsite: bool,
+    /// How its copy is made: from the sources (independent), or copied from the main
+    /// destination's backup (replicate: the sources are read once).
+    #[serde(default, skip_serializing_if = "CopyMode::is_independent")]
+    pub mode: CopyMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsync: Option<RsyncOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borg: Option<BorgOptions>,
+}
+
+/// How a destination's copy is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyMode {
+    /// Backed up from the sources, like the main destination: a fault in one copy never
+    /// reaches another.
+    #[default]
+    Independent,
+    /// The main destination's backup copied over after each run (the same snapshots, the
+    /// same Vault and password): the sources are read once. Vault anywhere; Mirror and
+    /// rsync between drives on this computer; never Borg.
+    Replicate,
+}
+
+impl CopyMode {
+    pub fn is_independent(&self) -> bool {
+        *self == CopyMode::Independent
+    }
+}
+
+impl Destination {
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+}
+
+impl Profile {
+    /// The profile as seen by destination `name`: its target, engine and engine options,
+    /// everything else the same, no further destinations, and the name "Home → nas".
+    pub fn for_destination(&self, name: &str) -> Option<Profile> {
+        let d = self.destinations.iter().find(|d| d.name == name)?;
+        let mut p = self.clone();
+        p.name = format!("{} → {}", self.name, d.label());
+        p.engine = d.engine;
+        p.target = d.target.clone();
+        p.offsite = d.offsite;
+        if d.mode == CopyMode::Independent {
+            p.vault = d.vault.clone();
+            p.rsync = d.rsync.clone();
+            p.borg = d.borg.clone();
+        }
+        // A replica is the main destination's backup, engine options and password and all.
+        p.replica = d.mode == CopyMode::Replicate;
+        p.destinations = Vec::new();
+        Some(p)
+    }
 }
 
 /// Upkeep after scheduled backups: a full verification now and then, and reclaiming the
@@ -242,6 +493,50 @@ pub struct Sources {
     /// Do not cross filesystem boundaries below each source path.
     #[serde(default)]
     pub one_file_system: bool,
+    /// Sources on a drive of their own (an external disk at `/mnt/photos`), recognised by
+    /// filesystem UUID, and what to do when that drive isn't there. Recorded when such a
+    /// source is added. A missing drive is never read as "everything was deleted".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<SourceVolume>,
+}
+
+/// A source on a drive of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceVolume {
+    /// The source (one of `sources.paths`).
+    pub path: PathBuf,
+    /// The filesystem it must be on.
+    pub fs_uuid: String,
+    #[serde(default)]
+    pub when_missing: WhenMissing,
+    /// With `wait`: how long to wait at most (default 1 hour), then fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for: Option<HumanDuration>,
+}
+
+/// What a backup does when a source's drive isn't there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenMissing {
+    /// Back up the rest. Mirror and Vault keep the source's files from the previous
+    /// snapshot; rsync and Borg leave it out of this one. Either way it's said.
+    #[default]
+    Skip,
+    /// Wait for the drive (up to `wait_for`), then fail.
+    Wait,
+    /// Fail the backup.
+    Fail,
+}
+
+impl WhenMissing {
+    pub fn label(self) -> &'static str {
+        match self {
+            WhenMissing::Skip => "skip",
+            WhenMissing::Wait => "wait",
+            WhenMissing::Fail => "fail",
+        }
+    }
 }
 
 /// Which snapshots survive pruning. A snapshot is kept if *any* rule keeps it.
@@ -282,6 +577,47 @@ pub struct Retention {
     /// Same, for free inodes, as a percentage (0–100) of the target filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_free_inodes_percent: Option<u8>,
+    /// Pruning never leaves fewer than this many complete snapshots (no per-file
+    /// problems), whatever the rules above say. 0: no floor.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub safety_floor: u32,
+    /// What pruning does after a backup with problems (failed, files skipped, a source's
+    /// drive missing, a destination failing).
+    #[serde(default, skip_serializing_if = "AfterProblems::is_hold")]
+    pub after_problems: AfterProblems,
+    /// Run history (Activity) older than this many days is removed. `None`: kept up to
+    /// the last 1000 runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_history_days: Option<u32>,
+    /// At most this many runs of history are kept (at most 1000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_history_runs: Option<u32>,
+}
+
+/// What scheduled pruning does after a backup with problems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterProblems {
+    /// Keep every snapshot until a backup runs cleanly, so a bad run can't push good
+    /// snapshots out.
+    #[default]
+    Hold,
+    /// Prune as usual.
+    Prune,
+}
+
+impl AfterProblems {
+    pub fn is_hold(&self) -> bool {
+        *self == AfterProblems::Hold
+    }
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(n: &u32) -> bool {
+    *n == 1
 }
 
 impl Default for Retention {
@@ -301,6 +637,10 @@ impl Default for Retention {
             keep_named: true,
             min_free_space: None,
             min_free_inodes_percent: None,
+            safety_floor: 1,
+            after_problems: AfterProblems::Hold,
+            keep_history_days: None,
+            keep_history_runs: None,
         }
     }
 }
@@ -489,6 +829,27 @@ pub struct VaultOptions {
     /// Where the repository password comes from.
     #[serde(default)]
     pub password_source: PasswordSource,
+    /// How hard the password is hashed (Argon2id) for this Vault's new passwords: when it's
+    /// created, and passwords added or changed. Existing passwords change with
+    /// `flux key strengthen`.
+    #[serde(default, skip_serializing_if = "PasswordHashing::is_standard")]
+    pub hashing: PasswordHashing,
+    /// Pad the files the Vault stores so their sizes say less about the files backed up.
+    /// Costs a little space; applies to what's written from then on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_sizes: bool,
+    /// The app locks the Vault again after this many minutes without use (forgets the
+    /// password it was given). `None`: unlocked until the app closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_after_minutes: Option<u32>,
+    /// An unlock file: the Vault's password works only together with this file (kept on a
+    /// USB stick, for example). Set up with `flux key unlock-file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock_file: Option<PathBuf>,
+    /// Keep `flux-vault-recover` (a small program that reads Vaults without Flux) and a
+    /// note on using it next to the Vault, on drives.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub keep_recovery_tool: bool,
 }
 
 impl Default for VaultOptions {
@@ -497,6 +858,75 @@ impl Default for VaultOptions {
             compression_level: default_zstd(),
             encryption: true,
             password_source: PasswordSource::default(),
+            hashing: PasswordHashing::default(),
+            hide_sizes: false,
+            lock_after_minutes: None,
+            unlock_file: None,
+            keep_recovery_tool: true,
+        }
+    }
+}
+
+/// How hard a Vault password is hashed (Argon2id): harder makes guessing a stolen drive's
+/// password slower, and unlocking slower by the same factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "level")]
+pub enum PasswordHashing {
+    /// 64 MiB, 3 passes, 4 threads (Flux's default).
+    #[default]
+    Standard,
+    /// 256 MiB, 4 passes, 4 threads.
+    Strong,
+    /// 1 GiB, 6 passes, 4 threads.
+    Maximum,
+    Custom {
+        memory_mib: u32,
+        passes: u32,
+        threads: u32,
+    },
+}
+
+impl PasswordHashing {
+    pub const MEMORY_MIB: std::ops::RangeInclusive<u32> = 8..=4096;
+    pub const PASSES: std::ops::RangeInclusive<u32> = 1..=20;
+    pub const THREADS: std::ops::RangeInclusive<u32> = 1..=16;
+
+    pub fn is_standard(&self) -> bool {
+        *self == PasswordHashing::Standard
+    }
+
+    /// (memory in KiB, passes, threads).
+    pub fn params(self) -> (u32, u32, u32) {
+        match self {
+            PasswordHashing::Standard => (64 * 1024, 3, 4),
+            PasswordHashing::Strong => (256 * 1024, 4, 4),
+            PasswordHashing::Maximum => (1024 * 1024, 6, 4),
+            PasswordHashing::Custom {
+                memory_mib,
+                passes,
+                threads,
+            } => (memory_mib.saturating_mul(1024), passes, threads),
+        }
+    }
+
+    /// The preset with these parameters, or `Custom`.
+    pub fn from_params(m_kib: u32, t: u32, p: u32) -> Self {
+        [Self::Standard, Self::Strong, Self::Maximum]
+            .into_iter()
+            .find(|h| h.params() == (m_kib, t, p))
+            .unwrap_or(Self::Custom {
+                memory_mib: m_kib / 1024,
+                passes: t,
+                threads: p,
+            })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PasswordHashing::Standard => "standard",
+            PasswordHashing::Strong => "strong",
+            PasswordHashing::Maximum => "maximum",
+            PasswordHashing::Custom { .. } => "custom",
         }
     }
 }
@@ -639,6 +1069,10 @@ pub enum PasswordSource {
     Command { command: String },
 }
 
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 fn yes() -> bool {
     true
 }
@@ -658,6 +1092,7 @@ impl Profile {
                 exclude_caches: true,
                 exclude_if_present: Vec::new(),
                 one_file_system: false,
+                volumes: Vec::new(),
             },
             retention: Retention::default(),
             schedule: Schedule::default(),
@@ -667,6 +1102,36 @@ impl Profile {
             rsync: None,
             borg: None,
             maintenance: Maintenance::default(),
+            offsite: false,
+            destinations: Vec::new(),
+            replica: false,
+            network: Default::default(),
+            restore_test: RestoreTest::default(),
+            unusual_changes: Sensitivity::Normal,
+            webhooks: Vec::new(),
+            origin: None,
+        }
+    }
+
+    /// The names this profile's backups are kept under: this computer, user and id, or
+    /// the [`Origin`] they were made as (a place added to it keeps its `+name`).
+    pub fn kept_as(&self, id: &ProfileId) -> KeptAs {
+        match &self.origin {
+            None => KeptAs {
+                host: crate::sys::hostname(),
+                user: crate::sys::username(),
+                profile: id.to_string(),
+            },
+            Some(o) => KeptAs {
+                host: o.host.clone(),
+                user: o.user.clone(),
+                profile: match id.split_destination() {
+                    Some((_, dest)) if !o.profile.contains(DESTINATION_SEP) => {
+                        format!("{}{DESTINATION_SEP}{dest}", o.profile)
+                    }
+                    _ => o.profile.clone(),
+                },
+            },
         }
     }
 
@@ -739,7 +1204,10 @@ impl Profile {
 
         match &self.target {
             Target::Local { path, fs_uuid } => {
-                if !path.is_absolute() {
+                if path.as_os_str().is_empty() {
+                    // A new profile starts without one; the app shows this as "To continue: …".
+                    err("target.path", "choose a drive or folder".into());
+                } else if !path.is_absolute() {
                     err(
                         "target.path",
                         format!("{} is not an absolute path", path.display()),
@@ -778,6 +1246,19 @@ impl Profile {
                     err("target.path", "remote path must not be empty".into());
                 }
             }
+        }
+
+        // Mirror over SSH sends files with rsync, which there stores a link as a link
+        // whatever this says: the snapshot would list a file and hold a link to a path on
+        // this computer, and a restore would find nothing.
+        if self.engine == Engine::Mirror
+            && matches!(self.target, Target::Ssh { .. })
+            && self.options.symlinks != SymlinkMode::Preserve
+        {
+            err(
+                "options.symlinks",
+                "a Mirror on an SSH server stores links as links; to copy what links point to, choose the Vault or rsync format, or a Mirror on a drive".into(),
+            );
         }
 
         if self.sources.paths.is_empty() {
@@ -872,16 +1353,116 @@ impl Profile {
             ));
         }
 
+        if let Some(o) = &self.origin
+            && [&o.host, &o.user, &o.profile]
+                .iter()
+                .any(|s| s.is_empty() || s.contains('/') || s.starts_with('.'))
+        {
+            v.push(Issue::error(
+                "origin",
+                "the computer, user and profile a backup was made as are plain names".into(),
+            ));
+        }
+        for (i, w) in self.webhooks.iter().enumerate() {
+            for msg in w.problems() {
+                v.push(Issue::error(&format!("webhooks[{i}]"), msg));
+            }
+        }
+        if self.restore_test.percent == 0 || self.restore_test.percent > 100 {
+            v.push(Issue::error(
+                "restore_test.percent",
+                "a restore test takes 1–100 percent".into(),
+            ));
+        }
+        for (i, msg) in self.network.problems() {
+            v.push(Issue::error(&format!("network.bandwidth[{i}]"), msg));
+        }
+        for vol in &self.sources.volumes {
+            if !self.sources.paths.contains(&vol.path) {
+                v.push(Issue::warning(
+                    "sources.volumes",
+                    format!(
+                        "{} has a drive recorded but isn't a source; the record is ignored",
+                        vol.path.display()
+                    ),
+                ));
+            }
+            if vol.fs_uuid.trim().is_empty() {
+                v.push(Issue::error(
+                    "sources.volumes",
+                    format!(
+                        "the drive of {} needs its filesystem UUID",
+                        vol.path.display()
+                    ),
+                ));
+            }
+            if vol.wait_for.is_some() && vol.when_missing != WhenMissing::Wait {
+                v.push(Issue::warning(
+                    "sources.volumes",
+                    format!(
+                        "wait_for only applies with when_missing = \"wait\" ({})",
+                        vol.path.display()
+                    ),
+                ));
+            }
+        }
         if self.options.nice > 19 {
             v.push(Issue::error("options.nice", "nice must be 0-19".into()));
         }
 
         match (self.engine, &self.vault) {
-            (Engine::Vault, Some(vo)) if vo.compression_level > 22 => {
-                v.push(Issue::error(
-                    "vault.compression_level",
-                    "zstd level must be 0-22".into(),
-                ));
+            (Engine::Vault, Some(vo)) => {
+                if vo.compression_level > 22 {
+                    v.push(Issue::error(
+                        "vault.compression_level",
+                        "zstd level must be 0-22".into(),
+                    ));
+                }
+                if let PasswordHashing::Custom {
+                    memory_mib,
+                    passes,
+                    threads,
+                } = vo.hashing
+                {
+                    use PasswordHashing as H;
+                    if !H::MEMORY_MIB.contains(&memory_mib)
+                        || !H::PASSES.contains(&passes)
+                        || !H::THREADS.contains(&threads)
+                    {
+                        v.push(Issue::error(
+                            "vault.hashing",
+                            format!(
+                                "password hashing: memory {}-{} MiB, {}-{} passes, {}-{} threads",
+                                H::MEMORY_MIB.start(),
+                                H::MEMORY_MIB.end(),
+                                H::PASSES.start(),
+                                H::PASSES.end(),
+                                H::THREADS.start(),
+                                H::THREADS.end()
+                            ),
+                        ));
+                    }
+                }
+                if !vo.encryption && (vo.hide_sizes || vo.unlock_file.is_some()) {
+                    v.push(Issue::warning(
+                        "vault.encryption",
+                        "hiding sizes and unlock files only apply to encrypted Vaults".into(),
+                    ));
+                }
+                if let Some(f) = &vo.unlock_file
+                    && !f.is_absolute()
+                {
+                    v.push(Issue::error(
+                        "vault.unlock_file",
+                        "the unlock file needs a full path".into(),
+                    ));
+                }
+                if vo.lock_after_minutes == Some(0) {
+                    v.push(Issue::error(
+                        "vault.lock_after_minutes",
+                        "lock again after at least 1 minute".into(),
+                    ));
+                }
             }
             (Engine::Mirror | Engine::Rsync | Engine::Borg, Some(_)) => v.push(Issue::warning(
                 "vault",
@@ -971,6 +1552,91 @@ impl Profile {
                         &format!("rsync.extra_args[{i}]"),
                         format!("{arg:?} is not an option (options start with -)"),
                     ));
+                }
+            }
+        }
+
+        // More destinations: valid, distinct names; somewhere other than the others; and
+        // each fine as the profile it becomes.
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, d) in self.destinations.iter().enumerate() {
+            let field = format!("destinations[{i}]");
+            if ProfileId::new(format!("x{DESTINATION_SEP}{}", d.name)).is_err() {
+                v.push(Issue::error(
+                    &format!("{field}.name"),
+                    format!(
+                        "destination name {:?}: use lowercase letters, digits, - and _",
+                        d.name
+                    ),
+                ));
+            } else if seen.contains(&d.name.as_str()) {
+                v.push(Issue::error(
+                    &format!("{field}.name"),
+                    format!("two destinations are named {:?}", d.name),
+                ));
+            }
+            seen.push(&d.name);
+            let same_place = |t: &Target| match (t, &d.target) {
+                (Target::Local { path: a, .. }, Target::Local { path: b, .. }) => a == b,
+                (
+                    Target::Ssh {
+                        host: h1, path: p1, ..
+                    },
+                    Target::Ssh {
+                        host: h2, path: p2, ..
+                    },
+                ) => h1 == h2 && p1 == p2,
+                _ => false,
+            };
+            if (same_place(&self.target) && self.engine == d.engine)
+                || self.destinations[..i]
+                    .iter()
+                    .any(|o| same_place(&o.target) && o.engine == d.engine)
+            {
+                v.push(Issue::error(
+                    &format!("{field}.target"),
+                    format!(
+                        "{} goes to the same place as another destination",
+                        d.label()
+                    ),
+                ));
+            }
+            if d.mode == CopyMode::Replicate {
+                let why = if d.engine != self.engine {
+                    Some(format!(
+                        "a copy of the main backup is stored the same way ({})",
+                        self.engine.label()
+                    ))
+                } else if self.engine == Engine::Borg {
+                    Some("Borg repositories can't be copied safely; back up to it from the sources (independent)".into())
+                } else if self.engine != Engine::Vault
+                    && !(matches!(self.target, Target::Local { .. })
+                        && matches!(d.target, Target::Local { .. }))
+                {
+                    Some("plain-folder backups are copied between drives on this computer only; use a Vault, or back up from the sources".into())
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    v.push(Issue::error(
+                        &format!("{field}.mode"),
+                        format!("{}: {why}", d.label()),
+                    ));
+                }
+            }
+            if let Some(as_profile) = self.for_destination(&d.name) {
+                for issue in as_profile.validate() {
+                    let f = issue.field.clone();
+                    if ["engine", "target", "vault", "rsync", "borg"]
+                        .iter()
+                        .any(|k| f == *k || f.starts_with(&format!("{k}.")))
+                    {
+                        v.push(Issue {
+                            field: format!("{field}.{f}"),
+                            message: format!("{}: {}", d.label(), issue.message),
+                            ..issue
+                        });
+                    }
                 }
             }
         }
@@ -1082,6 +1748,22 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_destination_says_what_to_do() {
+        let mut p = sample();
+        p.target = Target::Local {
+            path: PathBuf::new(),
+            fs_uuid: None,
+        };
+        let issues = p.validate();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "target.path" && i.message == "choose a drive or folder"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
     fn default_profile_is_valid_and_round_trips() {
         let p = sample();
         assert!(p.validate().is_empty(), "{:?}", p.validate());
@@ -1153,6 +1835,10 @@ mod tests {
             keep_named: false,
             min_free_space: None,
             min_free_inodes_percent: None,
+            safety_floor: 0,
+            after_problems: crate::profile::AfterProblems::Hold,
+            keep_history_days: None,
+            keep_history_runs: None,
         };
         let fields: Vec<_> = p.validate().into_iter().map(|i| i.field).collect();
         for f in [

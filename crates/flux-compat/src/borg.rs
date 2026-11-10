@@ -48,6 +48,15 @@ const SFTP_SESSIONS: usize = 2;
 /// Seconds to wait for Borg's repository lock in commands that change the repository.
 const LOCK_WAIT: &str = "30";
 
+/// A Borg repository's statistics, from `borg info`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoStats {
+    pub total_size: u64,
+    pub total_csize: u64,
+    pub unique_size: u64,
+    pub unique_csize: u64,
+}
+
 /// The folder holding a profile's repository and recovery kit, on a local target.
 pub fn locate_local(target: &Path, host: &str, user: &str, profile: &str) -> PathBuf {
     target.join(ROOT_DIR).join(host).join(user).join(profile)
@@ -63,12 +72,12 @@ pub fn locate_remote(remote_path: &Path, host: &str, user: &str, profile: &str) 
 
 /// The folder (local path, or path on the server) holding a profile's repository.
 pub fn folder_location(id: &ProfileId, profile: &Profile) -> String {
-    let (host, user) = (sys::hostname(), sys::username());
+    let k = profile.kept_as(id);
     match &profile.target {
-        Target::Local { path, .. } => locate_local(path, &host, &user, id.as_str())
+        Target::Local { path, .. } => locate_local(path, &k.host, &k.user, &k.profile)
             .display()
             .to_string(),
-        Target::Ssh { path, .. } => locate_remote(path, &host, &user, id.as_str()),
+        Target::Ssh { path, .. } => locate_remote(path, &k.host, &k.user, &k.profile),
     }
 }
 
@@ -106,6 +115,10 @@ pub struct FluxComment {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl FluxComment {
@@ -221,15 +234,13 @@ impl BorgRepo {
         passphrase: Option<Zeroizing<String>>,
         batch: bool,
     ) -> Result<Self, CompatError> {
-        let (host, user) = (sys::hostname(), sys::username());
+        let k = profile.kept_as(id);
+        let (host, user, kept) = (k.host, k.user, k.profile);
         let opts = profile.borg.clone().unwrap_or_default();
         let (store, rsh) = match &profile.target {
             Target::Local { path, fs_uuid } => {
                 target_check::check_local_target(path, fs_uuid.as_deref())?;
-                (
-                    Store::local(locate_local(path, &host, &user, id.as_str())),
-                    None,
-                )
+                (Store::local(locate_local(path, &host, &user, &kept)), None)
             }
             Target::Ssh { path, .. } => {
                 let t = SshTarget::from_target(&profile.target, &paths.runtime_dir, batch)
@@ -238,7 +249,7 @@ impl BorgRepo {
                 (
                     Store::remote(
                         Arc::new(SftpPool::new(t, SFTP_SESSIONS)),
-                        locate_remote(path, &host, &user, id.as_str()),
+                        locate_remote(path, &host, &user, &kept),
                     ),
                     Some(rsh),
                 )
@@ -401,6 +412,22 @@ impl BorgRepo {
             code: status.code(),
             stdout,
             messages,
+        })
+    }
+
+    /// The repository's own statistics (`borg info`): the size of every archive's files,
+    /// compressed, deduplicated, and deduplicated and compressed (what it takes).
+    pub fn repo_stats(&self) -> Result<RepoStats, CompatError> {
+        let r = self.run_simple(&["info".into(), "--json".into(), self.arg(None)], "info")?;
+        let v: Value = serde_json::from_slice(&r.stdout)
+            .map_err(|e| CompatError::Tool(format!("borg info: {e}")))?;
+        let s = &v["cache"]["stats"];
+        let n = |k: &str| s[k].as_u64().unwrap_or(0);
+        Ok(RepoStats {
+            total_size: n("total_size"),
+            total_csize: n("total_csize"),
+            unique_size: n("unique_size"),
+            unique_csize: n("unique_csize"),
         })
     }
 
@@ -589,6 +616,9 @@ impl BorgRepo {
             } else {
                 String::new()
             },
+            sources_missing: Vec::new(),
+            note: comment.note,
+            tags: comment.tags,
         })
     }
 
@@ -634,6 +664,8 @@ impl BorgRepo {
             flux: 1,
             name: m.name.clone(),
             pinned: m.pinned,
+            note: m.note.clone(),
+            tags: m.tags.clone(),
         };
         self.run_simple(
             &[
@@ -959,7 +991,8 @@ pub fn parse_listing(raw: &[u8]) -> Result<Vec<Entry>, CompatError> {
                     path: p.to_vec(),
                     kind: Kind::Dir,
                     mode: 0o755,
-                    nlink: 2,
+                    // The mark of a folder added here (see `is_implied_parent`).
+                    nlink: IMPLIED_PARENT_NLINK,
                     size: 0,
                     ino: u64::from_str_radix(&fnv(p), 16).unwrap_or(0),
                     link: None,
@@ -977,6 +1010,16 @@ pub fn parse_listing(raw: &[u8]) -> Result<Vec<Entry>, CompatError> {
     Ok(out)
 }
 
+/// The link count [`parse_listing`] gives the folders it adds above the archive's own
+/// (every folder that is in the archive gets 1).
+const IMPLIED_PARENT_NLINK: u64 = 2;
+
+/// A folder that isn't in the archive itself: only the way down to what is. Nothing is
+/// known about it but its name.
+fn is_implied_parent(e: &Entry) -> bool {
+    e.kind == Kind::Dir && e.nlink == IMPLIED_PARENT_NLINK
+}
+
 /// An archive as a restore source: the requested paths are extracted into a staging
 /// folder with `borg extract`, then restored from there by the generic restore (so the
 /// same rules apply as everywhere: identical files skipped, differing ones kept aside,
@@ -984,6 +1027,11 @@ pub fn parse_listing(raw: &[u8]) -> Result<Vec<Entry>, CompatError> {
 pub struct BorgSource {
     staging: Option<PathBuf>,
     entries: Vec<Entry>,
+    /// Folders above the archive's own (see [`is_implied_parent`]).
+    implied: std::collections::HashSet<Vec<u8>>,
+    /// What `borg extract` didn't bring out whole: left out of `entries`, and to be
+    /// reported with the restore's own errors.
+    pub errors: Vec<FileError>,
 }
 
 impl BorgSource {
@@ -998,10 +1046,18 @@ impl BorgSource {
         progress: &Progress,
         report: Reporter<'_>,
     ) -> Result<Self, CompatError> {
+        let listed = repo.entries(snap)?;
+        let implied: std::collections::HashSet<Vec<u8>> = listed
+            .iter()
+            .filter(|e| is_implied_parent(e))
+            .map(|e| e.path.clone())
+            .collect();
         if dry_run {
             return Ok(Self {
                 staging: None,
-                entries: repo.entries(snap)?,
+                entries: listed,
+                implied,
+                errors: Vec::new(),
             });
         }
         std::fs::create_dir_all(staging_parent).map_err(|e| CompatError::io(staging_parent, e))?;
@@ -1014,21 +1070,29 @@ impl BorgSource {
         let mut this = Self {
             staging: Some(staging.clone()),
             entries: Vec::new(),
+            implied,
+            errors: Vec::new(),
         };
         report(Event::Info {
             message: format!("extracting from archive {} with borg", snap.id),
         });
         progress.set_phase(Phase::Transferring);
+        // borg ends "with warnings" when it couldn't write a file out whole (no room
+        // left, say): what it says is a problem of this restore, not a remark.
         for w in repo.extract(&snap.id, paths, &staging, progress)? {
             if !w.contains("never matched") {
                 report(Event::Warning {
                     path: String::new(),
-                    message: w,
+                    message: w.clone(),
+                });
+                this.errors.push(FileError {
+                    path: String::new(),
+                    message: format!("borg: {w}"),
                 });
             }
         }
         progress.bytes_done.store(0, Relaxed);
-        this.entries = scan_local(
+        let staged = scan_local(
             &staging,
             XattrPolicy {
                 acl: true,
@@ -1036,7 +1100,81 @@ impl BorgSource {
             },
         )
         .map_err(|e| CompatError::io(&staging, e))?;
+        this.entries = this.only_whole(staged, &listed, paths, report);
         Ok(this)
+    }
+
+    /// The extracted entries that are what the archive says they are. A file that came
+    /// out shorter (or longer) than the archive lists it, and anything listed under the
+    /// requested `paths` that didn't come out at all, is an error and is not restored: a
+    /// cut-off file must never replace a whole one.
+    fn only_whole(
+        &mut self,
+        staged: Vec<Entry>,
+        listed: &[Entry],
+        paths: &[PathBuf],
+        report: Reporter<'_>,
+    ) -> Vec<Entry> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut found: Vec<FileError> = Vec::new();
+        let mut problem = |path: &[u8], message: String| {
+            let path = format!("/{}", String::from_utf8_lossy(path));
+            report(Event::Warning {
+                path: path.clone(),
+                message: message.clone(),
+            });
+            found.push(FileError { path, message });
+        };
+        let wanted: Vec<&[u8]> = paths
+            .iter()
+            .map(|p| {
+                let b = p.as_os_str().as_bytes();
+                let b = b.strip_prefix(b"/").unwrap_or(b);
+                b.strip_suffix(b"/").unwrap_or(b)
+            })
+            .collect();
+        let sizes: HashMap<&[u8], u64> = listed
+            .iter()
+            .filter(|e| e.kind == Kind::File)
+            .map(|e| (e.path.as_slice(), e.size))
+            .collect();
+        let mut out = Vec::with_capacity(staged.len());
+        // Came out, but not whole.
+        let mut cut: std::collections::HashSet<Vec<u8>> = Default::default();
+        for mut e in staged {
+            match sizes.get(e.path.as_slice()) {
+                Some(&size) if e.kind == Kind::File && e.size != size => {
+                    problem(
+                        &e.path,
+                        format!(
+                            "borg extracted {} of {size} bytes (is there room for it?); not restored",
+                            e.size
+                        ),
+                    );
+                    cut.insert(e.path);
+                }
+                _ => {
+                    if self.implied.contains(&e.path) {
+                        // Made by borg on the way down, as 0700: not what the folder was.
+                        e.mode = 0o755;
+                    }
+                    out.push(e);
+                }
+            }
+        }
+        let have: std::collections::HashSet<&[u8]> =
+            out.iter().map(|e| e.path.as_slice()).collect();
+        for e in listed.iter().filter(|e| {
+            !is_implied_parent(e)
+                && matches!(e.kind, Kind::File | Kind::Dir | Kind::Symlink)
+                && wanted.iter().any(|w| flux_fs::entry::is_within(&e.path, w))
+                && !have.contains(e.path.as_slice())
+                && !cut.contains(&e.path)
+        }) {
+            problem(&e.path, "borg didn't extract it; not restored".into());
+        }
+        self.errors.extend(found);
+        out
     }
 }
 
@@ -1066,6 +1204,10 @@ impl flux_fs::restore::RestoreSource for BorgSource {
             .as_ref()
             .ok_or_else(|| std::io::Error::other("nothing was extracted"))?;
         copier.copy_to(&staging.join(e.rel_path()), out, progress)
+    }
+
+    fn path_only(&self, e: &Entry) -> bool {
+        e.kind == Kind::Dir && self.implied.contains(&e.path)
     }
 }
 
@@ -1304,7 +1446,7 @@ pub fn backup(
     let comment = FluxComment {
         flux: 1,
         name: req.name.clone(),
-        pinned: false,
+        ..Default::default()
     };
     let mut args: Vec<String> = vec![
         "create".into(),
@@ -1462,6 +1604,9 @@ pub fn backup(
         errors: stored_errors,
         errors_total,
         flux_version: flux_core::VERSION.into(),
+        sources_missing: Vec::new(),
+        note: None,
+        tags: Vec::new(),
     };
     let pruned = if req.prune {
         prune_inner(&repo, &p.retention, false, report)?.removed
@@ -1705,6 +1850,7 @@ mod tests {
             flux: 1,
             name: Some("before {upgrade}".into()),
             pinned: true,
+            ..Default::default()
         };
         let arg = c.to_arg();
         assert!(arg.starts_with("{{") && arg.contains("{{upgrade}}"));

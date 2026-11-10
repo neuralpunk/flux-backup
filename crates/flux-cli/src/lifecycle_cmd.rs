@@ -36,6 +36,26 @@ pub struct NameArgs {
 }
 
 #[derive(Args)]
+pub struct NoteArgs {
+    pub profile: String,
+    pub snapshot: String,
+    /// The note ("before the upgrade"). Omit it, or use --clear, to remove the note.
+    pub note: Vec<String>,
+    #[arg(long, conflicts_with = "note")]
+    pub clear: bool,
+}
+
+#[derive(Args)]
+pub struct TagArgs {
+    pub profile: String,
+    pub snapshot: String,
+    /// Tags to add (or with --remove, to remove). Without any, lists the tags.
+    pub tags: Vec<String>,
+    #[arg(long)]
+    pub remove: bool,
+}
+
+#[derive(Args)]
 pub struct PinArgs {
     pub profile: String,
     pub snapshot: String,
@@ -190,6 +210,64 @@ pub fn run_name(ctx: &Ctx, args: NameArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn run_note(ctx: &Ctx, args: NoteArgs) -> anyhow::Result<ExitCode> {
+    use flux_fs::snapshot::SnapshotChange;
+    let (_, _, repo) = repo_for(ctx, &args.profile)?;
+    let s = repo.find(&args.snapshot)?;
+    let text = args.note.join(" ");
+    let m = repo.change(
+        &s.id,
+        &SnapshotChange {
+            note: Some((!args.clear && !text.trim().is_empty()).then_some(text)),
+            ..Default::default()
+        },
+    )?;
+    if ctx.json {
+        crate::output::print_json(&m)?;
+    } else {
+        match &m.note {
+            Some(n) => println!("Snapshot {} has the note {n:?}.", m.id),
+            None => println!("Removed the note of snapshot {}.", m.id),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_tag(ctx: &Ctx, args: TagArgs) -> anyhow::Result<ExitCode> {
+    use flux_fs::snapshot::SnapshotChange;
+    let (_, _, repo) = repo_for(ctx, &args.profile)?;
+    let s = repo.find(&args.snapshot)?;
+    let m = if args.tags.is_empty() {
+        s
+    } else {
+        let tags: Vec<String> = if args.remove {
+            let gone: Vec<String> = args.tags.iter().map(|t| t.trim().to_lowercase()).collect();
+            s.tags
+                .iter()
+                .filter(|t| !gone.contains(&t.to_lowercase()))
+                .cloned()
+                .collect()
+        } else {
+            s.tags.iter().chain(&args.tags).cloned().collect()
+        };
+        repo.change(
+            &s.id,
+            &SnapshotChange {
+                tags: Some(tags),
+                ..Default::default()
+            },
+        )?
+    };
+    if ctx.json {
+        crate::output::print_json(&m.tags)?;
+    } else if m.tags.is_empty() {
+        println!("Snapshot {} has no tags.", m.id);
+    } else {
+        println!("Snapshot {} is tagged {}.", m.id, m.tags.join(", "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn run_pin(ctx: &Ctx, args: PinArgs, pinned: bool) -> anyhow::Result<ExitCode> {
     let (_, _, repo) = repo_for(ctx, &args.profile)?;
     let s = repo.find(&args.snapshot)?;
@@ -208,15 +286,28 @@ pub fn run_pin(ctx: &Ctx, args: PinArgs, pinned: bool) -> anyhow::Result<ExitCod
 
 pub fn run_delete(ctx: &Ctx, args: DeleteArgs) -> anyhow::Result<ExitCode> {
     let (_, _, repo) = repo_for(ctx, &args.profile)?;
-    let snaps = args
-        .snapshots
-        .iter()
-        .map(|s| repo.find(s))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut snaps = Vec::new();
+    // Snapshots whose record is damaged: not listed, only deletable by their full id.
+    let mut damaged: Vec<&str> = Vec::new();
+    for s in &args.snapshots {
+        match repo.find(s) {
+            Ok(m) => snaps.push(m),
+            Err(_) if repo.is_damaged_snapshot(s) => {
+                if !args.force {
+                    bail!(
+                        "snapshot {s} is damaged and can't be read; --force deletes it (whatever only it used is freed)"
+                    );
+                }
+                damaged.push(s);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
     if let Some(p) = snaps.iter().find(|s| s.pinned && !args.force) {
         bail!("snapshot {} is pinned; unpin it or use --force", p.id);
     }
-    let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+    let mut ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+    ids.extend(damaged);
     if !args.yes && !output::confirm(&format!("Permanently delete {}?", ids.join(", ")))? {
         bail!("not confirmed (use --yes)");
     }

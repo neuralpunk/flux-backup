@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use flux_core::progress::ProgressSnapshot;
+use flux_core::sync::Locked;
 use flux_core::{Paths, ProfileId};
 use flux_runner::jobs::{self, Client, Message};
 
@@ -48,17 +49,13 @@ pub fn start(paths: Paths, sink: Sink) {
         let waker = Waker::new(&jobs::jobs_dir(&paths));
         loop {
             for job in jobs::running(&paths) {
-                if !watching
-                    .lock()
-                    .expect("watch set")
-                    .insert(job.profile.clone())
-                {
+                if !watching.locked().insert(job.profile.clone()) {
                     continue;
                 }
                 let (sink, paths, watching) = (sink.clone(), paths.clone(), watching.clone());
                 std::thread::spawn(move || {
                     follow(&*sink, &paths, &job.profile);
-                    watching.lock().expect("watch set").remove(&job.profile);
+                    watching.locked().remove(&job.profile);
                 });
             }
             match &waker {
@@ -147,9 +144,15 @@ mod waker_tests {
         });
         let waited = started.elapsed();
         assert!(waited < Duration::from_secs(2), "woke after {waited:?}");
-        // An atomic write is several events (create, close, rename); once they're drained,
-        // a quiet folder lets the wait run to its timeout.
-        w.wait(Duration::ZERO);
+        // An atomic write is several events (create, close, rename), and under load some
+        // arrive late; drain until the folder is quiet, then a wait runs to its timeout.
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            w.wait(Duration::from_millis(50));
+            if t.elapsed() >= Duration::from_millis(40) {
+                break;
+            }
+        }
         let t = std::time::Instant::now();
         w.wait(Duration::from_millis(200));
         assert!(t.elapsed() >= Duration::from_millis(150));

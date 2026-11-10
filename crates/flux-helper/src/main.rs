@@ -12,6 +12,8 @@
 //! `flux-helper --run-backup <id>` runs one backup of a system profile; the session
 //! starts that in the background for "Back up now", so the backup outlives the window.
 
+#![deny(clippy::unwrap_used)]
+
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flux_core::progress::{Progress, silent};
+use flux_core::sync::Locked;
 use flux_core::{Paths, ProfileId, ProfileStore, Scope};
 use flux_service::protocol::{self, MAX_LINE, Output, PROTOCOL_VERSION};
 use flux_service::{ApiError, Service, watch};
@@ -133,7 +136,7 @@ type Out = Arc<Mutex<std::io::Stdout>>;
 fn send(out: &Out, msg: &Output) {
     if let Ok(mut line) = serde_json::to_string(msg) {
         line.push('\n');
-        let mut o = out.lock().expect("stdout");
+        let mut o = out.locked();
         // The app went away: nothing to do but finish.
         let _ = o.write_all(line.as_bytes()).and_then(|()| o.flush());
     }

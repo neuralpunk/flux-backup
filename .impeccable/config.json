@@ -45,6 +45,36 @@
         ],
         "createdAt": "2026-11-08T12:04:53.390Z",
         "reason": "Agent: spent decision-round sketches (gitignored runtime), not shipped UI; the build is clean (detect app/src = [])"
+      },
+      {
+        "rule": "buried-raster",
+        "value": "*",
+        "files": [
+          "site/index.html"
+        ],
+        "createdAt": "2026-11-09T19:33:44.849Z",
+        "reason": "Claude: the laptop's screens are a crossfade stack; the inactive ones sit at opacity 0 by design and the active one is fully visible"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/site-directions/**"
+        ],
+        "createdAt": "2026-11-09T20:52:35.420Z",
+        "reason": "Claude: these are direction prototypes for the website, each deliberately in its own type system; docs/DESIGN.md documents the desktop app, not the site"
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist",
+        "createdAt": "2026-11-09T21:26:24.648Z",
+        "reason": "Owner chose the Titanium direction, whose prototype is set in Geist; deliberate, self-hosted"
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist mono",
+        "createdAt": "2026-11-09T21:26:24.661Z",
+        "reason": "Owner chose the Titanium direction, whose prototype sets commands and figures in Geist Mono"
       }
     ]
   }

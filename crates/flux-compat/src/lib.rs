@@ -11,6 +11,8 @@
 //! backup with the standard tool only. Flux's own files (snapshot metadata, cached
 //! listings) are conveniences; nothing in them is needed to get data back.
 
+#![deny(clippy::unwrap_used)]
+
 pub mod backintime;
 pub mod borg;
 pub mod export;

@@ -86,6 +86,106 @@ pub struct RunRecord {
     /// space forecast is made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub free_after: Option<u64>,
+    /// Sources whose drive wasn't connected (skipped: kept from before, or left out).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources_missing: Vec<std::path::PathBuf>,
+    /// How the backup went at each of the profile's other destinations (the fields above
+    /// are the main destination's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<DestinationRun>,
+    /// Unusual changes found in this backup (see [`crate::unusual`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unusual: Option<crate::unusual::UnusualReport>,
+    /// Where the time went (the performance inspector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance: Option<Performance>,
+}
+
+/// Where a run's time went.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Performance {
+    /// Wall-clock seconds of each phase (scanning, comparing, copying…), in order.
+    pub phases: Vec<Timed>,
+    /// Seconds per stage of the work, summed over threads (so they can add up to more
+    /// than the run took): reading, chunking, finding what's stored, compressing and
+    /// encrypting, writing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<Timed>,
+    /// Writes to the storage, their bytes, and the average time one took.
+    #[serde(default)]
+    pub writes: u64,
+    #[serde(default)]
+    pub bytes_written: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_ms: Option<f64>,
+    /// Bytes of files processed per second while copying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Timed {
+    pub name: String,
+    pub secs: f64,
+}
+
+impl Performance {
+    /// From a run's progress counters.
+    pub fn of(progress: &flux_core::progress::Progress) -> Option<Self> {
+        let t = &progress.timings;
+        let phases: Vec<Timed> = t
+            .phases()
+            .into_iter()
+            .map(|(name, secs)| Timed { name, secs })
+            .collect();
+        if phases.is_empty() {
+            return None;
+        }
+        let writes = t.writes.load(std::sync::atomic::Ordering::Relaxed);
+        let stages: Vec<(flux_core::progress::Stage, f64)> = t.stages();
+        let write_secs = stages
+            .iter()
+            .find(|(s, _)| *s == flux_core::progress::Stage::Write)
+            .map(|(_, s)| *s);
+        let copying = phases
+            .iter()
+            .find(|p| p.name == flux_core::progress::Phase::Transferring.label())
+            .map(|p| p.secs)
+            .filter(|s| *s > 0.0);
+        let done = progress
+            .bytes_done
+            .load(std::sync::atomic::Ordering::Relaxed);
+        Some(Performance {
+            stages: stages
+                .into_iter()
+                .map(|(s, secs)| Timed {
+                    name: s.label().into(),
+                    secs,
+                })
+                .collect(),
+            phases,
+            writes,
+            bytes_written: t.bytes_written.load(std::sync::atomic::Ordering::Relaxed),
+            write_ms: write_secs
+                .filter(|_| writes > 0)
+                .map(|s| s * 1000.0 / writes as f64),
+            throughput: copying.filter(|_| done > 0).map(|s| done as f64 / s),
+        })
+    }
+}
+
+/// One destination's part of a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DestinationRun {
+    /// The destination's name in the profile (`nas`).
+    pub name: String,
+    pub status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<SnapshotStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +290,46 @@ fn append_record(dir: &Path, record: &RunRecord) -> std::io::Result<()> {
             .map_err(std::io::Error::other)?;
     }
     Ok(())
+}
+
+/// Remove history older than `days` and beyond the newest `runs` runs (Activity's
+/// "keep history"), with the events of the runs removed. Snapshots aren't touched.
+pub fn trim(paths: &Paths, id: &ProfileId, days: Option<u32>, runs: Option<u32>, now: Timestamp) {
+    let dir = profile_log_dir(paths, id);
+    let path = dir.join("runs.jsonl");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let records: Vec<(&str, Option<RunRecord>)> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| (l, serde_json::from_str(l).ok()))
+        .collect();
+    let cutoff = days.map(|d| now - jiff::SignedDuration::from_hours(24 * i64::from(d)));
+    let keep_from = runs.map_or(0, |n| records.len().saturating_sub(n as usize));
+    let mut kept = String::new();
+    let mut gone = Vec::new();
+    for (i, (line, rec)) in records.iter().enumerate() {
+        let old = cutoff.is_some_and(|c| rec.as_ref().is_some_and(|r| r.finished < c));
+        if i < keep_from || old {
+            if let Some(r) = rec
+                && !r.run_id.is_empty()
+            {
+                gone.push(r.run_id.clone());
+            }
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    if gone.is_empty() {
+        return;
+    }
+    if flux_core::store::write_atomic(&path, kept.as_bytes(), 0o600).is_ok() {
+        for run in gone {
+            let _ = fs::remove_file(dir.join(format!("{run}.jsonl")));
+        }
+    }
 }
 
 fn rotate_event_files(dir: &Path) {
@@ -349,7 +489,42 @@ mod tests {
             warnings: 0,
             hooks: vec![],
             free_after: None,
+            sources_missing: Vec::new(),
+            destinations: Vec::new(),
+            unusual: None,
+            performance: None,
         }
+    }
+
+    #[test]
+    fn trim_by_age_and_count() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = Paths::under(t.path(), flux_core::Scope::User);
+        let id = ProfileId::new("p").unwrap();
+        let dir = profile_log_dir(&paths, &id);
+        let now = Timestamp::now();
+        for (n, days_ago) in [(1, 40), (2, 20), (3, 5), (4, 1)] {
+            let mut r = record(&format!("run{n}"));
+            r.finished = now - jiff::SignedDuration::from_hours(24 * days_ago);
+            append_record(&dir, &r).unwrap();
+            fs::write(dir.join(format!("run{n}.jsonl")), "{}\n").unwrap();
+        }
+        trim(&paths, &id, Some(30), None, now);
+        let ids: Vec<String> = recent_runs(&paths, &id, 10)
+            .into_iter()
+            .map(|r| r.run_id)
+            .collect();
+        assert_eq!(ids, ["run4", "run3", "run2"]);
+        assert!(!dir.join("run1.jsonl").exists() && dir.join("run2.jsonl").exists());
+        trim(&paths, &id, None, Some(1), now);
+        let ids: Vec<String> = recent_runs(&paths, &id, 10)
+            .into_iter()
+            .map(|r| r.run_id)
+            .collect();
+        assert_eq!(ids, ["run4"]);
+        assert!(!dir.join("run3.jsonl").exists() && dir.join("run4.jsonl").exists());
+        trim(&paths, &id, Some(30), Some(5), now); // nothing more to remove
+        assert_eq!(recent_runs(&paths, &id, 10).len(), 1);
     }
 
     #[test]

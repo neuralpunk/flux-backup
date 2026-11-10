@@ -24,17 +24,20 @@ use crate::{ApiError, Result, Service};
 /// Changes shown at most in one comparison (the summary always covers everything).
 const MAX_CHANGES: usize = 5000;
 
+/// Change a snapshot's name, pin, note or tags. A name must be unique; an empty name
+/// removes it.
 pub fn update_snapshot_impl(
     state: &Service,
     id: String,
     snapshot: String,
-    name: Option<String>,
-    set_name: bool,
-    pinned: Option<bool>,
+    mut change: flux_fs::snapshot::SnapshotChange,
 ) -> Result<SnapshotMeta> {
     let (pid, p) = state.load(&id)?;
     let repo = state.open(&pid, &p)?;
-    if let Some(n) = name.as_deref()
+    if let Some(name) = &mut change.name {
+        *name = name.take().filter(|n| !n.trim().is_empty());
+    }
+    if let Some(Some(n)) = change.name.as_ref().map(|n| n.as_deref())
         && repo
             .snapshots()?
             .iter()
@@ -45,8 +48,9 @@ pub fn update_snapshot_impl(
             format!("another snapshot is already named “{n}”"),
         ));
     }
-    let name = set_name.then(|| name.filter(|n| !n.trim().is_empty()));
-    Ok(repo.update(&snapshot, name, pinned)?)
+    let r = repo.change(&snapshot, &change)?;
+    state.forget_cached(&pid);
+    Ok(r)
 }
 
 /// Delete a snapshot. Returns the bytes freed (Vaults; `None` for Mirrors).
@@ -242,4 +246,320 @@ pub fn restore_impl(
         r
     });
     Ok(result?)
+}
+
+/// Test a restore now (the profile's settings: by default 10 random files).
+pub fn restore_test_impl(
+    state: &Service,
+    id: String,
+) -> Result<flux_runner::restore_test::TestReport> {
+    let (pid, p) = state.load(&id)?;
+    let repo = state.open(&pid, &p)?;
+    Ok(flux_runner::restore_test::run(
+        &state.paths,
+        &pid,
+        &p,
+        &p.restore_test,
+        &repo,
+        &flux_core::progress::Progress::new(),
+        &flux_core::progress::silent,
+    ))
+}
+
+/// The latest restore tests, newest first.
+pub fn restore_tests_impl(
+    state: &Service,
+    id: String,
+) -> Result<Vec<flux_runner::restore_test::TestReport>> {
+    let (pid, _) = state.load(&id)?;
+    let mut h = flux_runner::restore_test::load_state(&state.paths, &pid).history;
+    h.reverse();
+    Ok(h)
+}
+
+/// "This was me": the unusual changes of `snapshot` were the person's own. The warning
+/// goes; the snapshot before them is unpinned (if Flux pinned it) and the tag removed.
+pub fn dismiss_unusual_impl(state: &Service, id: String, snapshot: String) -> Result<()> {
+    let (pid, p) = state.load(&id)?;
+    flux_runner::dismiss_unusual(&state.paths, &pid, &snapshot)?;
+    let run = flux_runner::runlog::recent_runs(&state.paths, &pid, 300)
+        .into_iter()
+        .find(|r| r.unusual.as_ref().is_some_and(|u| u.snapshot == snapshot));
+    if let Ok(repo) = state.open(&pid, &p)
+        && let Ok(snaps) = repo.snapshots()
+    {
+        {
+            if let Some(s) = snaps.iter().find(|s| s.id == snapshot) {
+                let tags: Vec<String> = s
+                    .tags
+                    .iter()
+                    .filter(|t| *t != flux_runner::UNUSUAL_TAG)
+                    .cloned()
+                    .collect();
+                let _ = repo.change(
+                    &s.id,
+                    &flux_fs::snapshot::SnapshotChange {
+                        tags: Some(tags),
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Some(before) = run.and_then(|r| r.unusual).and_then(|u| u.before)
+                && let Some(s) = snaps.iter().find(|s| s.id == before)
+                && s.note
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(flux_runner::AUTO_PIN_NOTE))
+            {
+                let _ = repo.change(
+                    &s.id,
+                    &flux_fs::snapshot::SnapshotChange {
+                        pinned: Some(false),
+                        note: Some(None),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    state.forget_cached(&pid);
+    Ok(())
+}
+
+/// Save files of a snapshot as an archive in folder `dir` (named after the backup, the
+/// snapshot's date and, for one item, its name). `paths` empty: the whole snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn export_snapshot_impl(
+    state: &Service,
+    id: String,
+    snapshot: String,
+    paths: Vec<String>,
+    format: flux_runner::archive::Format,
+    dir: String,
+    checksums: Option<flux_runner::archive::Checksums>,
+    on_progress: &(dyn Fn(ProgressSnapshot) + Sync),
+) -> Result<flux_runner::archive::ExportOutcome> {
+    let (pid, p) = state.load(&id)?;
+    let repo = state.open(&pid, &p)?;
+    let snap = repo.find(&snapshot)?;
+    let dir = PathBuf::from(dir);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(ApiError::new(
+            "error",
+            "Choose a folder to save the archive in.",
+        ));
+    }
+    let when = snap
+        .started
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%Y-%m-%d-%H%M")
+        .to_string();
+    let what = match paths.as_slice() {
+        [one] => std::path::Path::new(one)
+            .file_name()
+            .map(|n| format!("-{}", n.to_string_lossy().replace(['/', '\0'], "_")))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let base = format!("{}-{when}{what}", pid.as_str().replace('+', "-"));
+    let mut out = dir.join(format!("{base}.{}", format.extension()));
+    let mut n = 2;
+    while out.exists() {
+        out = dir.join(format!("{base}-{n}.{}", format.extension()));
+        n += 1;
+    }
+    let progress = Progress::new();
+    let done = AtomicBool::new(false);
+    let result = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Relaxed) {
+                on_progress(progress.snapshot());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let r = flux_runner::archive::export(
+            &repo,
+            &flux_runner::archive::ExportRequest {
+                snapshot: &snap,
+                paths: paths.into_iter().map(PathBuf::from).collect(),
+                format,
+                out,
+                checksums,
+            },
+            &progress,
+            &silent,
+        );
+        done.store(true, Relaxed);
+        r
+    });
+    result.map_err(|e| ApiError::new("error", e))
+}
+
+#[cfg(test)]
+mod unusual_tests {
+    use super::*;
+    use flux_core::profile::Target;
+    use flux_core::{Paths, ProfileId, ProfileStore, Scope};
+
+    #[test]
+    fn this_was_me_unpins_and_untags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let docs = t.join("src/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(t.join("tgt")).unwrap();
+        for i in 0..40 {
+            std::fs::write(docs.join(format!("f{i}.odt")), format!("doc {i}")).unwrap();
+        }
+        let paths = Paths::under(t.join("home"), Scope::User);
+        let id = ProfileId::new("p").unwrap();
+        let mut p = flux_core::Profile::new(
+            "P",
+            Target::Local {
+                path: t.join("tgt"),
+                fs_uuid: None,
+            },
+            vec![t.join("src")],
+        );
+        p.options.notify = false;
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        let backup = || {
+            flux_runner::run_backup(
+                &flux_runner::BackupJob {
+                    paths: &paths,
+                    id: &id,
+                    profile: &p,
+                    name: None,
+                    dry_run: false,
+                    trigger: flux_runner::Trigger::Manual,
+                    prune: true,
+                    only_if_due: false,
+                    ask: None,
+                    shutdown_after: false,
+                },
+                &flux_core::progress::Progress::new(),
+                &flux_core::progress::silent,
+            )
+        };
+        backup();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        for i in 0..25 {
+            let f = docs.join(format!("f{i}.odt"));
+            std::fs::rename(&f, f.with_extension("odt.locked")).unwrap();
+        }
+        let u = backup().record.unusual.expect("flagged");
+        let state = Service::new(paths.clone());
+        let o = crate::views::overview_impl(&state, "p".into()).unwrap();
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["unusual"]["snapshot"], u.snapshot.as_str());
+        assert_eq!(v["health"][0]["level"], "danger");
+
+        dismiss_unusual_impl(&state, "p".into(), u.snapshot.clone()).unwrap();
+        let snaps = crate::views::snapshots_impl(&state, "p".into()).unwrap();
+        assert!(
+            snaps.iter().all(|s| !s.pinned && s.note.is_none()),
+            "{snaps:?}"
+        );
+        assert!(snaps.iter().all(|s| s.tags.is_empty()));
+        let v =
+            serde_json::to_value(crate::views::overview_impl(&state, "p".into()).unwrap()).unwrap();
+        assert!(v["unusual"].is_null());
+    }
+}
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use flux_core::profile::Target;
+    use flux_core::{Paths, ProfileId, ProfileStore, Scope};
+    use flux_runner::archive::{Checksums, Format};
+
+    #[test]
+    fn archives_are_named_and_never_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        std::fs::create_dir_all(t.join("src/docs")).unwrap();
+        std::fs::create_dir_all(t.join("tgt")).unwrap();
+        std::fs::create_dir_all(t.join("out")).unwrap();
+        std::fs::write(t.join("src/docs/a"), "a").unwrap();
+        let paths = Paths::under(t.join("home"), Scope::User);
+        let id = ProfileId::new("p").unwrap();
+        let mut p = flux_core::Profile::new(
+            "P",
+            Target::Local {
+                path: t.join("tgt"),
+                fs_uuid: None,
+            },
+            vec![t.join("src")],
+        );
+        p.options.notify = false;
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        flux_runner::run_backup(
+            &flux_runner::BackupJob {
+                paths: &paths,
+                id: &id,
+                profile: &p,
+                name: None,
+                dry_run: false,
+                trigger: flux_runner::Trigger::Manual,
+                prune: true,
+                only_if_due: false,
+                ask: None,
+                shutdown_after: false,
+            },
+            &flux_core::progress::Progress::new(),
+            &flux_core::progress::silent,
+        );
+        let state = Service::new(paths);
+        let out = t.join("out").display().to_string();
+        let docs = t.join("src/docs").display().to_string();
+        let export = |paths: Vec<String>, sums| {
+            export_snapshot_impl(
+                &state,
+                "p".into(),
+                "latest".into(),
+                paths,
+                Format::Zip,
+                out.clone(),
+                sums,
+                &|_| {},
+            )
+        };
+        let a = export(vec![docs.clone()], Some(Checksums::Sha256)).unwrap();
+        let name = a
+            .archive
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("p-") && name.ends_with("-docs.zip"),
+            "{name}"
+        );
+        assert!(
+            a.manifest
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-docs.zip.sha256")
+        );
+        let b = export(vec![docs], None).unwrap();
+        assert!(
+            b.archive.to_string_lossy().ends_with("-docs-2.zip"),
+            "{:?}",
+            b.archive
+        );
+        let all = export(Vec::new(), None).unwrap();
+        assert_eq!(all.files, 1);
+        assert!(
+            export_snapshot_impl(
+                &state,
+                "p".into(),
+                "latest".into(),
+                Vec::new(),
+                Format::Zip,
+                "relative".into(),
+                None,
+                &|_| {}
+            )
+            .is_err()
+        );
+    }
 }

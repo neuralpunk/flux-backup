@@ -1,0 +1,11 @@
+{
+  "kdf": "argon2id",
+  "m_kib": 65536,
+  "t": 3,
+  "p": 4,
+  "salt": "Kbv6Oyfz//FQpud/TgGZbA==",
+  "nonce": "zBifcj+cZpl6WOXllm9Yg4vY7zLFhEeD",
+  "ciphertext": "6HFmqUn1AFXyXnidrkQETAD6t0wnAA9Cc1ybibqWa1x+KJo5VUAMPQUWAzmlamxubPxDuy8iSguTku+LqNHeoLc6V8bLZVpuDqi4sqW4gA1yAE6gQszwKA==",
+  "created": "2026-11-09T16:31:08.844446735Z",
+  "label": "initial"
+}

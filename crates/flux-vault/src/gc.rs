@@ -115,6 +115,13 @@ pub fn delete(
     gc_locked(repo, report)
 }
 
+/// Delete data no snapshot uses, and nothing else: no snapshot is forgotten. Takes the
+/// exclusive lock.
+pub fn collect(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, VaultError> {
+    let _lock = repo.lock(true)?;
+    gc_locked(repo, report)
+}
+
 /// Delete data no snapshot uses. Caller holds the exclusive lock.
 pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, VaultError> {
     let mut out = GcReport::default();
@@ -123,7 +130,8 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
 
     // Everything still reachable from any snapshot (all owners).
     let mut used: HashSet<BlobId> = HashSet::new();
-    for rec in repo.records()? {
+    // Every record, or stop: a snapshot left out here would lose its data below.
+    for rec in repo.records_strict()? {
         let root = parse_id(&rec.tree)
             .ok_or_else(|| VaultError::Corrupt(format!("snapshot {}: bad tree id", rec.meta.id)))?;
         let mut stack = vec![root];
@@ -131,7 +139,7 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
             if !used.insert(t) {
                 continue;
             }
-            for n in repo.load_tree(&t)?.nodes {
+            for n in repo.load_tree(&t, rec.tree_format)?.nodes {
                 stack.extend(n.subtree);
                 used.extend(n.content);
             }
@@ -182,8 +190,8 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
     out.orphan_packs = orphans.len() as u64;
 
     // Copy still-used blobs out of packs that are mostly garbage (no re-encryption needed).
-    let data_packer = Packer::new(repo.backend(), &repo.crypto);
-    let tree_packer = Packer::new(repo.backend(), &repo.crypto);
+    let data_packer = Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs);
+    let tree_packer = Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs);
     for (pack, _) in &repack {
         let hex = hex_id(pack);
         let path = pack_path(&hex);

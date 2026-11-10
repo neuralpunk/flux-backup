@@ -38,19 +38,23 @@ pub struct SleepInhibitor {
 /// Ask logind not to suspend while a backup runs. `None` if logind isn't reachable or
 /// refuses (the backup proceeds anyway).
 pub fn inhibit_sleep(why: &str) -> Option<SleepInhibitor> {
-    let conn = zbus::blocking::Connection::system().ok()?;
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.login1"),
-            "/org/freedesktop/login1",
-            Some("org.freedesktop.login1.Manager"),
-            "Inhibit",
-            &("sleep", "Flux Backup", why, "block"),
-        )
-        .map_err(|e| tracing::debug!("logind inhibit failed: {e}"))
-        .ok()?;
-    let fd: zbus::zvariant::OwnedFd = reply.body().deserialize().ok()?;
-    Some(SleepInhibitor { _fd: fd.into() })
+    // zbus 6 has no blocking API: run its async call to completion on this thread.
+    zbus::block_on(async {
+        let conn = zbus::Connection::system().await.ok()?;
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1",
+                Some("org.freedesktop.login1.Manager"),
+                "Inhibit",
+                &("sleep", "Flux Backup", why, "block"),
+            )
+            .await
+            .map_err(|e| tracing::debug!("logind inhibit failed: {e}"))
+            .ok()?;
+        let fd: zbus::OwnedFd = reply.body().deserialize().ok()?;
+        Some(SleepInhibitor { _fd: fd.into() })
+    })
 }
 
 /// Lower this thread's CPU and I/O priority. Threads spawned afterwards (the engine's

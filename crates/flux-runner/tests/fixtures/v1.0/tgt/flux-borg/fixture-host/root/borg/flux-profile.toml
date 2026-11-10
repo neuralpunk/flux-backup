@@ -1,0 +1,60 @@
+# The settings of the Flux Backup profile “borg”, kept with its backups so
+# they can be recovered on another computer (Flux Backup: Recover an existing backup,
+# or flux recover). Saved by Flux Backup 1.0.0.
+# Without passwords, hooks and webhooks.
+# flux-profile-id = "borg"
+# made-on = "fixture-host"
+# made-by = "root"
+# kept-as = "borg"
+
+version = 1
+name = "borg"
+engine = "borg"
+
+[target]
+kind = "local"
+path = "/srv/tgt"
+
+[sources]
+paths = ["/srv/src"]
+exclude = []
+exclude_caches = true
+one_file_system = false
+
+[retention]
+enabled = true
+keep_last = 1
+keep_within = "1day"
+keep_hourly = 0
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 12
+keep_yearly = 5
+keep_named = true
+
+[schedule]
+trigger = "manual"
+catch_up = true
+skip_on_battery = false
+skip_on_metered = false
+on_connect = false
+
+[options]
+preserve_acl = true
+preserve_xattr = true
+symlinks = "preserve"
+change_detection = "metadata"
+continue_on_errors = true
+snapshot_if_unchanged = false
+nice = 10
+io_priority = "best_effort_low"
+notify = false
+backup_before_restore = true
+threads = 0
+
+[borg]
+encryption = "repokey-blake2"
+compression = "zstd,3"
+
+[borg.password_source]
+from = "keyring"

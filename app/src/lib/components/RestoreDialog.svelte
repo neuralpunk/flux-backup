@@ -80,14 +80,24 @@
     if (f) folder = f;
   }
 
+  // Whether this dialog is still on screen: a restore's outcome is shown here, and if the
+  // dialog is gone by the time it ends (the view under it was replaced), as a toast.
+  let shown = true;
+  $effect(() => () => {
+    shown = false;
+  });
+
   async function run() {
     busy = true;
     error = null;
     try {
-      result = await api.restore(profile, snapshot.id, paths, where === "elsewhere" ? folder : null, where === "original" && overwrite, where === "original" && exact);
-      if (result.errors.length === 0) app.toast("ok", `Restored ${count(result.restored)} items.`);
+      const r = await api.restore(profile, snapshot.id, paths, where === "elsewhere" ? folder : null, where === "original" && overwrite, where === "original" && exact);
+      result = r;
+      if (r.errors.length === 0) app.toast("ok", `Restored ${count(r.restored)} items.`);
+      else if (!shown) app.toast("bad", `Restored ${count(r.restored)} items, but ${count(r.errors.length)} couldn't be restored: ${r.errors[0]!.path} (${r.errors[0]!.message}).`);
     } catch (e) {
       error = (e as Error).message;
+      if (!shown) app.toast("bad", `The restore failed: ${error}`);
     } finally {
       busy = false;
       // Even a failed restore may have written some files: whatever shows them, check again.
@@ -96,7 +106,7 @@
   }
 </script>
 
-<Modal title="Restore from {dateTime(snapshot.started)}" {onclose}>
+<Modal title="Restore from {dateTime(snapshot.started)}" {onclose} locked={busy}>
   {#if result}
     <div class="space-y-4">
       <div class="flex items-center gap-3">
@@ -108,6 +118,9 @@
           <div class="tabular text-sm text-fg-2">
             {count(result.restored)} items · {bytes(result.bytes)} · {count(result.skipped_identical)} already identical{#if result.removed} · {removeWord(result.removed)} that weren't in the snapshot removed{/if}
           </div>
+          {#each result.exact_notes ?? [] as note (note)}
+            <div class="mt-1 text-[13px] text-fg-muted">Exact restore: {note}.</div>
+          {/each}
         </div>
       </div>
       {#if result.moved_aside.length}
@@ -206,6 +219,9 @@
                 </li>
               {/if}
             </ul>
+            {#each preview.exact_notes ?? [] as note (note)}
+              <p class="mt-2 text-[13px] text-fg-muted">Exact restore: {note}.</p>
+            {/each}
             {#if removes && preview.remove_paths?.length}
               <details class="mt-2" open>
                 <summary class="cursor-pointer text-[13px] text-fg-muted select-none">Show what will be removed</summary>

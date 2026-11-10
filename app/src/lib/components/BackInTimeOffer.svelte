@@ -42,9 +42,7 @@
       <span class="glyph glyph-ok mt-0.5"><Icon name="check" size={13} /></span>
       <div class="min-w-0 flex-1">
         <h3 class="font-semibold">Started from Back In Time's “{used.name}”</h3>
-        <p class="mt-0.5 text-[13px] text-fg-2">
-          Its folders, exclusions, schedule and what to keep are filled in. Check each step; on <span class="font-medium text-fg">Protection</span> you choose how Flux stores the new backups.
-        </p>
+        <p class="mt-0.5 text-[13px] text-fg-2">Its settings are filled in; check each step.</p>
       </div>
       <button class="btn btn-ghost h-8 shrink-0" onclick={onstartover}>Start from scratch</button>
     </div>
@@ -64,10 +62,8 @@
     <div class="flex items-start gap-3">
       <span class="glyph glyph-run mt-0.5"><Icon name="info" size={13} /></span>
       <div class="min-w-0 flex-1">
-        <h3 id="bit-title" class="font-semibold">You have {profiles.length === 1 ? "a Back In Time profile" : `${profiles.length} Back In Time profiles`}. Import {profiles.length === 1 ? "it" : "one"}?</h3>
-        <p class="mt-0.5 max-w-[66ch] text-[13px] text-fg-2">
-          Flux can start from its settings: the folders, exclusions, schedule and what to keep come over. The new backups are Flux's own; your Back In Time snapshots stay as they are.
-        </p>
+        <h3 id="bit-title" class="font-semibold">Start from your Back In Time settings?</h3>
+        <p class="mt-0.5 max-w-[66ch] text-[13px] text-fg-2">Its folders, exclusions, schedule and what to keep come over. Your old snapshots stay as they are.</p>
       </div>
       <button class="btn-icon size-8 shrink-0" onclick={ondismiss} aria-label="Not now" title="Not now"><Icon name="x" size={15} /></button>
     </div>
@@ -77,8 +73,10 @@
           <Icon name={b.mode.startsWith("ssh") ? "server" : "drive"} size={17} class="shrink-0 text-fg-2" />
           <span class="min-w-0 flex-1">
             <span class="block font-medium">{b.name}</span>
-            <span class="block truncate text-[12.5px] text-fg-2">{folders(b)} → <span class="font-mono">{where(b)}</span></span>
-            <span class="block text-[12.5px] text-fg-muted">{state(b)}{b.mode.endsWith("encfs") ? " · encrypted with EncFS" : ""}</span>
+            <span class="flex gap-1 text-[12.5px] text-fg-2">
+              <span class="min-w-0 truncate" title={where(b)}>{folders(b)} → <span class="font-mono">{where(b)}</span></span>
+              <span class="shrink-0 text-fg-muted">· {state(b)}{b.mode.endsWith("encfs") ? " · EncFS" : ""}</span>
+            </span>
           </span>
           <button class="btn h-8 shrink-0" onclick={() => onuse(b)}>Use these settings</button>
         </div>

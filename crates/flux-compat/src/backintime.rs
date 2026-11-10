@@ -482,13 +482,17 @@ fn retention(p: &mut Profile, k: &Keys<'_>) {
 ///
 /// rsync matches a pattern with a slash in the middle at any depth; gitignore anchors it
 /// at the root, so it gets `**/`. A leading `#` or `!` means something else in gitignore
-/// and is escaped; rsync's `***` is `**`.
+/// and is escaped; rsync's `***` is `**`, and its `/**/` (one folder or more) is
+/// gitignore's `/*/**/`.
 pub fn pattern(rsync: &str) -> Option<String> {
     let p = rsync.trim();
     if p.is_empty() {
         return None;
     }
     let mut out = p.replace("***", "**");
+    // rsync's `a/**/b` needs at least one folder between a and b; gitignore's also
+    // matches `a/b`. (Found by the property tests in tests/filter_props.rs.)
+    out = out.replace("/**/", "/*/**/");
     let inner = out.trim_end_matches('/');
     if inner.contains('/')
         && !out.starts_with('/')
@@ -628,6 +632,26 @@ profiles.version=1
 
     fn no_scan(_: &Path) -> (usize, Option<String>) {
         (3, Some("20261101-070001-123".into()))
+    }
+
+    #[test]
+    fn rsync_patterns_as_gitignore() {
+        assert_eq!(pattern("*.tmp").as_deref(), Some("*.tmp"));
+        assert_eq!(
+            pattern("a/b").as_deref(),
+            Some("**/a/b"),
+            "any depth in rsync"
+        );
+        assert_eq!(pattern("/srv/x").as_deref(), Some("/srv/x"));
+        assert_eq!(
+            pattern("cache/***").as_deref(),
+            Some("**/cache/**"),
+            "any depth too"
+        );
+        // rsync's /**/ needs a folder in between (found by the property tests).
+        assert_eq!(pattern("/srv/**/build").as_deref(), Some("/srv/*/**/build"));
+        assert_eq!(pattern("!x").as_deref(), Some("\\!x"));
+        assert_eq!(pattern("  "), None);
     }
 
     #[test]

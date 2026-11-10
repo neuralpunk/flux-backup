@@ -7,6 +7,7 @@ use crate::VaultError;
 use crate::backend::{Backend, pack_path};
 use crate::crypto::{BlobId, Crypto, hex_id};
 use crate::format::{BlobKind, IndexFile, IndexPack, PackEntry};
+use flux_core::sync::Locked;
 
 /// Close a pack once it reaches this size.
 pub const PACK_TARGET: usize = 16 << 20;
@@ -81,12 +82,42 @@ impl Builder {
     }
 }
 
-/// Serialize a pack: blobs, sealed header, header length.
-fn finish(crypto: &Crypto, b: Builder) -> Result<(BlobId, Vec<u8>, Vec<PackEntry>), VaultError> {
+/// The Padmé length for `len` bytes (Nikitin et al., "Reducing Metadata Leakage from
+/// Encrypted Files and Communication with PURBs", 2019): rounded up so only about
+/// log₂(log₂ len) bits of the length remain, at most about 12% bigger (less for big
+/// lengths: a 16 MiB pack grows by at most 3%).
+pub fn padme(len: u64) -> u64 {
+    if len < 2 {
+        return len;
+    }
+    let e = 63 - u64::from(len.leading_zeros()); // ⌊log₂ len⌋
+    let s = 64 - u64::from(e.leading_zeros()); // ⌊log₂ e⌋ + 1
+    let mask = (1u64 << (e - s)) - 1;
+    (len + mask) & !mask
+}
+
+/// Serialize a pack: blobs, sealed header, header length. `pad`: random bytes between the
+/// blobs and the header bring the whole file to its [`padme`] length, so a pack holding
+/// one small file doesn't give away that file's size. Readers find the header from the
+/// end and the blobs by their offsets, so padding needs nothing from them (Flux before 1.0
+/// reads padded packs too).
+fn finish(
+    crypto: &Crypto,
+    b: Builder,
+    pad: bool,
+) -> Result<(BlobId, Vec<u8>, Vec<PackEntry>), VaultError> {
     let mut bytes = b.buf;
     let header = crypto.seal(
         &postcard::to_allocvec(&b.entries).map_err(|e| VaultError::Corrupt(e.to_string()))?,
     )?;
+    if pad {
+        let total = (bytes.len() + header.len() + 4) as u64;
+        let extra = (padme(total) - total) as usize;
+        let start = bytes.len();
+        bytes.resize(start + extra, 0);
+        getrandom::fill(&mut bytes[start..])
+            .map_err(|e| VaultError::Corrupt(format!("no randomness: {e}")))?;
+    }
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
     let id = *blake3::hash(&bytes).as_bytes();
@@ -155,17 +186,40 @@ pub struct Packer<'a> {
     written: Mutex<Vec<IndexPack>>,
     /// Pack bytes written so far.
     pub bytes_written: std::sync::atomic::AtomicU64,
+    /// Pad each pack to its [`padme`] length.
+    pad: bool,
+    /// Where pack writes are timed (the performance inspector).
+    timings: Option<&'a flux_core::progress::Timings>,
+    /// Why a blob handed to this packer didn't reach the repository. A failed pack write
+    /// loses the blobs of many files, not only of the one whose blob filled the pack, and
+    /// other files already count on them (they were deduplicated against them). So it
+    /// isn't one file's error: nothing more is accepted, and [`Packer::finish`] fails.
+    failed: Mutex<Option<String>>,
 }
 
 impl<'a> Packer<'a> {
     pub fn new(backend: &'a dyn Backend, crypto: &'a Crypto) -> Self {
+        Self::padded(backend, crypto, false)
+    }
+
+    /// A packer that pads its packs (`pad`) to hide their exact sizes.
+    pub fn padded(backend: &'a dyn Backend, crypto: &'a Crypto, pad: bool) -> Self {
         Self {
             backend,
             crypto,
             current: Mutex::new(Builder::new()),
             written: Mutex::new(Vec::new()),
             bytes_written: Default::default(),
+            pad,
+            timings: None,
+            failed: Mutex::new(None),
         }
+    }
+
+    /// Time each pack written into `t`.
+    pub fn timed(mut self, t: &'a flux_core::progress::Timings) -> Self {
+        self.timings = Some(t);
+        self
     }
 
     /// Add a sealed blob (from [`encode_blob`]).
@@ -176,8 +230,9 @@ impl<'a> Packer<'a> {
         raw_length: usize,
         sealed: &[u8],
     ) -> Result<(), VaultError> {
+        self.check()?;
         let full = {
-            let mut cur = self.current.lock().expect("packer lock");
+            let mut cur = self.current.locked();
             let offset = cur.buf.len() as u32;
             cur.buf.extend_from_slice(sealed);
             cur.entries.push(PackEntry {
@@ -190,7 +245,20 @@ impl<'a> Packer<'a> {
             (cur.buf.len() >= PACK_TARGET).then(|| std::mem::replace(&mut *cur, Builder::new()))
         };
         match full {
-            Some(b) => self.write(b),
+            Some(b) => self.write(b).inspect_err(|e| self.fail(e)),
+            None => Ok(()),
+        }
+    }
+
+    /// Record that a blob this run counts on was lost (see `failed`).
+    pub fn fail(&self, why: &VaultError) {
+        self.failed.locked().get_or_insert_with(|| why.to_string());
+    }
+
+    /// An error if a blob handed to this packer was lost.
+    pub fn check(&self) -> Result<(), VaultError> {
+        match &*self.failed.locked() {
+            Some(why) => Err(VaultError::Store(why.clone())),
             None => Ok(()),
         }
     }
@@ -199,16 +267,20 @@ impl<'a> Packer<'a> {
         if b.entries.is_empty() {
             return Ok(());
         }
-        let (id, bytes, entries) = finish(self.crypto, b)?;
+        let (id, bytes, entries) = finish(self.crypto, b, self.pad)?;
         let hex = hex_id(&id);
         let path = pack_path(&hex);
         // Durable later: the caller flushes once before writing the index (see write_pack).
+        let t = std::time::Instant::now();
         self.backend
             .write_pack(&path, &bytes)
             .map_err(|e| VaultError::io(&path, e))?;
+        if let Some(timings) = self.timings {
+            timings.wrote(bytes.len() as u64, t.elapsed());
+        }
         self.bytes_written
             .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        self.written.lock().expect("packer lock").push(IndexPack {
+        self.written.locked().push(IndexPack {
             pack: id,
             blobs: entries,
         });
@@ -217,12 +289,10 @@ impl<'a> Packer<'a> {
 
     /// Write the last, partly filled pack. Returns everything written.
     pub fn finish(self) -> Result<Vec<IndexPack>, VaultError> {
-        let last = std::mem::replace(
-            &mut *self.current.lock().expect("packer lock"),
-            Builder::new(),
-        );
+        self.check()?;
+        let last = std::mem::replace(&mut *self.current.locked(), Builder::new());
         self.write(last)?;
-        Ok(self.written.into_inner().expect("packer lock"))
+        Ok(self.written.into_value())
     }
 }
 
@@ -325,4 +395,34 @@ pub fn read_blob(backend: &dyn Backend, crypto: &Crypto, loc: &Loc) -> Result<Ve
         )
         .map_err(|e| VaultError::io(&path, e))?;
     decode_blob(crypto, &sealed, &loc.entry)
+}
+
+#[cfg(test)]
+mod padding_tests {
+    use super::padme;
+
+    #[test]
+    fn padme_lengths() {
+        assert_eq!(padme(0), 0);
+        assert_eq!(padme(1), 1);
+        for len in [
+            2u64,
+            3,
+            100,
+            1000,
+            4097,
+            65_537,
+            1 << 20,
+            (16 << 20) + 1,
+            1 << 40,
+        ] {
+            let p = padme(len);
+            assert!(p >= len, "{len} → {p}");
+            assert!((p - len) as f64 <= len as f64 * 0.12 + 1.0, "{len} → {p}");
+            assert_eq!(padme(p), p, "a padded length stays put");
+        }
+        // Lengths close together share a padded length: that's what hides them.
+        assert_eq!(padme(10_000), padme(10_100));
+        assert!(padme((16 << 20) + 1) - ((16 << 20) + 1) <= (16 << 20) / 32);
+    }
 }

@@ -179,7 +179,14 @@ fn header(id: &ProfileId, p: &Profile, comment: &str, what: &str) -> String {
 }
 
 fn flux(id: &ProfileId, p: &Profile) -> Export {
-    let body = p
+    // Webhooks stay behind: their addresses and headers can hold secrets.
+    let mut q = p.clone();
+    let mut notes = Vec::new();
+    if !q.webhooks.is_empty() {
+        q.webhooks.clear();
+        notes.push("Webhooks aren't exported (their addresses and headers can hold secrets); add them again after importing.".into());
+    }
+    let body = q
         .to_toml()
         .unwrap_or_else(|e| format!("# could not serialize: {e}\n"));
     Export {
@@ -190,7 +197,7 @@ fn flux(id: &ProfileId, p: &Profile) -> Export {
             header(id, p, "#", "Export")
         ),
         executable: false,
-        notes: Vec::new(),
+        notes,
     }
 }
 
@@ -201,6 +208,13 @@ fn common_notes(p: &Profile) -> Vec<String> {
         "Pinned and named snapshots are a Flux feature; other tools' retention may remove them."
             .into(),
     );
+    if !p.destinations.is_empty() {
+        let names: Vec<&str> = p.destinations.iter().map(|d| d.label()).collect();
+        n.push(format!(
+            "Only the main destination is exported; the other places backups go ({}) aren't.",
+            names.join(", ")
+        ));
+    }
     if p.retention.max_age.is_some() {
         n.push("\u{201c}Never keep longer than\u{201d} (max_age) has no equivalent.".into());
     }
@@ -637,6 +651,113 @@ cat > "$EXCLUDES" <<'FLUX_EXCLUDES'
         executable: true,
         notes,
     }
+}
+
+/// Name of the copy of a profile kept with its backups.
+pub const SAVED_PROFILE: &str = "flux-profile.toml";
+
+/// The copy of a profile kept with its backups, for recovering them on another computer:
+/// the Flux profile without webhooks, hooks, or password commands (a command can hold the
+/// password itself), with where its backups are kept (`made_as` lines) so a recovery can
+/// find them again.
+pub fn recovery_copy(id: &ProfileId, p: &Profile) -> String {
+    let mut q = p.clone();
+    q.webhooks.clear();
+    q.hooks = Default::default();
+    for source in [
+        q.vault.as_mut().map(|v| &mut v.password_source),
+        q.borg.as_mut().map(|b| &mut b.password_source),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if matches!(source, flux_core::profile::PasswordSource::Command { .. }) {
+            *source = flux_core::profile::PasswordSource::Keyring;
+        }
+    }
+    let k = p.kept_as(id);
+    // The copy describes the backup, not this computer's way into it.
+    q.origin = None;
+    let body = q
+        .to_toml()
+        .unwrap_or_else(|e| format!("# could not serialize: {e}\n"));
+    format!(
+        "# The settings of the Flux Backup profile “{name}”, kept with its backups so\n\
+         # they can be recovered on another computer (Flux Backup: Recover an existing backup,\n\
+         # or flux recover). Saved by Flux Backup {version}.\n\
+         # Without passwords, hooks and webhooks.\n\
+         # flux-profile-id = \"{id}\"\n\
+         # made-on = \"{host}\"\n\
+         # made-by = \"{user}\"\n\
+         # kept-as = \"{kept}\"\n\n{body}",
+        name = p.name,
+        version = flux_core::VERSION,
+        host = k.host,
+        user = k.user,
+        kept = k.profile,
+    )
+}
+
+/// A profile read from next to its backups, as what it is there: a description of the
+/// backup, written by whoever could write to that drive or server. Everything in it that
+/// would run a program on this computer is dropped: hooks, webhooks, a password command,
+/// ssh options (`ProxyCommand` runs a command), and the extra arguments and remote program
+/// passed to rsync and borg. [`recovery_copy`] never writes the first three; none of them
+/// is ever taken from a file found on a drive.
+fn description_only(mut p: Profile) -> Profile {
+    use flux_core::profile::{PasswordSource, Target};
+    fn plain(t: &mut Target) {
+        if let Target::Ssh { ssh_options, .. } = t {
+            ssh_options.clear();
+        }
+    }
+    p.hooks = Default::default();
+    p.webhooks.clear();
+    for source in [
+        p.vault.as_mut().map(|v| &mut v.password_source),
+        p.borg.as_mut().map(|b| &mut b.password_source),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if matches!(source, PasswordSource::Command { .. }) {
+            *source = PasswordSource::Keyring;
+        }
+    }
+    plain(&mut p.target);
+    // Other places it was copied to are set up again by hand (they may be elsewhere now).
+    p.destinations.clear();
+    if let Some(r) = p.rsync.as_mut() {
+        r.extra_args.clear();
+    }
+    if let Some(b) = p.borg.as_mut() {
+        b.extra_args.clear();
+        b.remote_path = None;
+    }
+    p
+}
+
+/// A [`recovery_copy`] read back: the profile, its id and the names its backups are kept
+/// under.
+pub fn parse_recovery_copy(
+    text: &str,
+) -> Result<(Profile, Option<flux_core::profile::KeptAs>), String> {
+    let field = |name: &str| {
+        text.lines().find_map(|l| {
+            l.strip_prefix(&format!("# {name} = "))
+                .map(|v| v.trim().trim_matches('"').to_owned())
+        })
+    };
+    let p = description_only(Profile::from_toml(text).map_err(|e| e.to_string())?);
+    let kept = match (field("made-on"), field("made-by"), field("kept-as")) {
+        (Some(host), Some(user), Some(profile)) => Some(flux_core::profile::KeptAs {
+            host,
+            user,
+            profile,
+        }),
+        _ => None,
+    };
+    Ok((p, kept))
 }
 
 /// Read an exported (or hand-written) Flux profile. Returns the id it was exported

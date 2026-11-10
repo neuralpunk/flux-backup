@@ -5,3 +5,8 @@
 /app/src-tauri/target
 *.swp
 .DS_Store
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus/*/*
+!/fuzz/corpus/*/seed-*
+/fuzz/Cargo.lock

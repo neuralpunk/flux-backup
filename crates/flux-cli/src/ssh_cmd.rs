@@ -115,7 +115,7 @@ pub fn run_ssh(ctx: &Ctx, cmd: SshCmd) -> anyhow::Result<ExitCode> {
 fn test(ctx: &Ctx, profile: &str) -> anyhow::Result<ExitCode> {
     let (p, t) = target_of(ctx, profile)?;
     let Target::Ssh { path, .. } = &p.target else {
-        unreachable!()
+        unreachable!("target_of only returns SSH targets")
     };
     let ok = |m: &str| println!("✓ {m}");
     println!("Connecting to {} …", t.destination());

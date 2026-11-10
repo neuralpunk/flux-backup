@@ -5,9 +5,13 @@
   // same numbers are in the table below the chart.
   import { bytes, dayLabel, dateTime } from "../format";
   import type { Space } from "../types";
+  import type { Snippet } from "svelte";
+  import Icon from "./Icon.svelte";
   import StorageMeter from "./StorageMeter.svelte";
 
-  let { space, target }: { space: Space; target: string } = $props();
+  let { space, target, children }: { space: Space; target: string; children?: Snippet } = $props();
+  // The chart is open when the drive is filling up soon; otherwise one click away.
+  const soon = $derived(space.days_left != null && space.days_left < 60);
 
   const size = $derived(space.size ?? 0);
   const pts = $derived(space.points.map((p) => ({ t: new Date(p.t).getTime(), used: Math.max(0, size - p.free), free: p.free })));
@@ -74,7 +78,11 @@
   <p class="mt-3 text-sm {space.days_left != null && space.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{headline}</p>
 
   {#if pts.length >= 3}
-  <div class="relative mt-4" bind:clientWidth={width}>
+  <details class="group/chart mt-2" open={soon}>
+  <summary class="flex w-fit cursor-pointer list-none items-center gap-1.5 text-[13px] text-fg-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden">
+    <Icon name="chevronRight" size={13} class="transition-transform group-open/chart:rotate-90" /> History and forecast
+  </summary>
+  <div class="relative mt-3" bind:clientWidth={width}>
     <svg
       width={width}
       height={H + AXIS}
@@ -143,5 +151,9 @@
       </tbody>
     </table>
   </details>
+  </details>
+  {/if}
+  {#if children}
+    <div class="mt-4 border-t border-[var(--c-sep)] pt-4">{@render children()}</div>
   {/if}
 </section>

@@ -10,12 +10,15 @@
 //! 4. **Finalize**: write manifest and meta, `syncfs`, then rename `.partial` → `<id>`. The
 //!    rename is the commit point; an interrupted run is resumed from `.partial`.
 
+#![deny(clippy::unwrap_used)]
+
 pub mod check;
 pub mod exec;
 pub mod manifest;
 pub mod plan;
 pub mod prune;
 pub mod remote;
+pub mod replicate;
 pub mod repo;
 
 pub use flux_fs::{fsops, scan};
@@ -101,10 +104,13 @@ impl MirrorError {
 /// Where a profile's Mirror repository lives, and the target root it is under.
 pub fn repo_root(id: &ProfileId, profile: &Profile) -> Result<(PathBuf, PathBuf), MirrorError> {
     match &profile.target {
-        Target::Local { path, .. } => Ok((
-            MirrorRepo::locate(path, &sys::hostname(), &sys::username(), id.as_str()),
-            path.clone(),
-        )),
+        Target::Local { path, .. } => {
+            let k = profile.kept_as(id);
+            Ok((
+                MirrorRepo::locate(path, &k.host, &k.user, &k.profile),
+                path.clone(),
+            ))
+        }
         Target::Ssh { .. } => Err(MirrorError::Unsupported("SSH targets (coming in Phase 5)")),
     }
 }
@@ -125,6 +131,9 @@ pub struct BackupRequest<'a> {
     /// Apply the retention policy after the run, and remove old snapshots beforehand if
     /// the target lacks space.
     pub prune: bool,
+    /// Sources whose drive isn't connected (left out of `profile`): their files are kept
+    /// from the previous snapshot instead of looking deleted.
+    pub keep: Vec<PathBuf>,
 }
 
 pub use flux_fs::outcome::BackupOutcome;
@@ -183,7 +192,21 @@ pub fn backup(
         (Some(r), Some(p)) => Some(ManifestReader::open(&r.manifest_path(&p.id))?),
         _ => None,
     };
-    let the_plan = plan(scanned.entries, prev_manifest)?;
+    let mut entries = scanned.entries;
+    if !req.keep.is_empty()
+        && let (Some(r), Some(prev)) = (&repo, &previous)
+    {
+        let before = ManifestReader::read_all(&r.manifest_path(&prev.id))?;
+        let kept = flux_fs::scan::carry_over(&mut entries, before, &req.keep);
+        report(Event::Info {
+            message: format!(
+                "kept {kept} items of {} from snapshot {}: the drive isn't connected",
+                list_paths(&req.keep),
+                prev.id
+            ),
+        });
+    }
+    let the_plan = plan(entries, prev_manifest)?;
 
     if req.dry_run {
         progress.set_phase(Phase::Done);
@@ -251,6 +274,10 @@ pub fn backup(
             ),
         });
     }
+    let opener = flux_fs::fsops::SourceOpener::new(
+        &flux_fs::scan::normalize_sources(&profile.sources.paths),
+        opts.symlinks != flux_core::profile::SymlinkMode::Preserve,
+    );
     let result = pool.install(|| {
         execute(&ExecCtx {
             plan: &the_plan,
@@ -263,6 +290,7 @@ pub fn backup(
             progress,
             report,
             continue_on_errors: opts.continue_on_errors,
+            opener: &opener,
         })
     })?;
 
@@ -320,11 +348,21 @@ pub fn backup(
         },
         name: req.name.clone(),
         pinned: false,
-        sources: profile.sources.paths.clone(),
+        sources: with_kept(&profile.sources.paths, &req.keep),
         stats,
         errors,
         errors_total,
         flux_version: flux_core::VERSION.to_owned(),
+        sources_missing: req
+            .keep
+            .iter()
+            .map(|p| flux_fs::snapshot::SourceMissing {
+                path: p.clone(),
+                kept_from: previous.as_ref().map(|s| s.id.clone()),
+            })
+            .collect(),
+        note: None,
+        tags: Vec::new(),
     };
     write_meta(&partial, &meta)?;
 
@@ -498,4 +536,22 @@ fn check_free_space(target: &Path, needed: u64) -> Result<(), MirrorError> {
         });
     }
     Ok(())
+}
+
+/// The sources a snapshot covers: those scanned and those kept from before.
+pub fn with_kept(sources: &[PathBuf], kept: &[PathBuf]) -> Vec<PathBuf> {
+    let mut all: Vec<PathBuf> = sources.iter().chain(kept).cloned().collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// "/mnt/photos and /mnt/music" (for messages).
+pub fn list_paths(paths: &[PathBuf]) -> String {
+    let v: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    match v.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }

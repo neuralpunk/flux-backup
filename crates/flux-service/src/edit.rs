@@ -30,7 +30,7 @@ pub fn backintime_impl(state: &Service) -> Result<Vec<flux_compat::backintime::B
 #[derive(Serialize)]
 pub struct Editable {
     id: String,
-    pub(crate) profile: Profile,
+    pub profile: Profile,
     issues: Vec<Issue>,
 }
 
@@ -655,4 +655,300 @@ pub fn import_profile_impl(state: &Service, toml: String, id: Option<String>) ->
         id: pid.to_string(),
         issues: p.validate_in(state.scope()),
     })
+}
+
+/// Add a destination to a saved profile, right away (not through the editor's Save): the
+/// profile is validated and saved, and for an encrypted Vault or Borg repository the
+/// password is set up at once, as for a new backup, so the next run asks nobody.
+/// Returns the saved profile.
+pub fn add_destination_impl(
+    state: &Service,
+    id: String,
+    destination: serde_json::Value,
+    password: Option<String>,
+) -> Result<Profile> {
+    let (pid, mut p) = state.load(&id)?;
+    if pid.split_destination().is_some() {
+        return Err(ApiError::new(
+            "error",
+            "Add destinations to the backup itself.",
+        ));
+    }
+    let d: flux_core::profile::Destination = serde_json::from_value(destination)
+        .map_err(|e| ApiError::new("invalid", format!("destination: {e}")))?;
+    if p.destinations.iter().any(|x| x.name == d.name) {
+        return Err(ApiError::new(
+            "invalid",
+            format!("This backup already has a destination named “{}”.", d.name),
+        ));
+    }
+    let name = d.name.clone();
+    p.destinations.push(d);
+    if let Some(i) = validate(state, &p)
+        .into_iter()
+        .find(|i| i.severity == Severity::Error && i.field.starts_with("destinations"))
+    {
+        return Err(ApiError::new("invalid", i.message));
+    }
+    ProfileStore::new(&state.paths).save(&pid, &p)?;
+    let did = pid
+        .with_destination(&name)
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    if let Some(pw) = password.filter(|pw| !pw.is_empty())
+        && let Err(e) = crate::views::set_password_impl(state, did.to_string(), pw)
+    {
+        return Err(ApiError::new(
+            e.code(),
+            format!("The destination was added, but its password couldn't be set up: {e}"),
+        ));
+    }
+    state.forget_cached(&pid);
+    Ok(ProfileStore::new(&state.paths).load(&pid)?)
+}
+
+/// Remove a destination from a profile. The backups made there stay where they are.
+/// Returns the saved profile.
+pub fn remove_destination_impl(state: &Service, id: String, name: String) -> Result<Profile> {
+    let (pid, mut p) = state.load(&id)?;
+    let before = p.destinations.len();
+    p.destinations.retain(|d| d.name != name);
+    if p.destinations.len() == before {
+        return Err(ApiError::new(
+            "error",
+            format!("This backup has no destination “{name}”."),
+        ));
+    }
+    let store = ProfileStore::new(&state.paths);
+    store.save(&pid, &p)?;
+    Ok(store.load(&pid)?)
+}
+
+/// What the rule tester shows: is `path` backed up by `profile` (the editor's draft),
+/// and why.
+#[derive(Serialize)]
+pub struct Explained {
+    pub path: String,
+    pub backed_up: bool,
+    pub why: flux_fs::coverage::Why,
+    pub text: String,
+}
+fn rules_of(profile: serde_json::Value) -> Result<flux_fs::coverage::Rules> {
+    let p = parse(profile).map_err(|i| ApiError::new("invalid", i[0].message.clone()))?;
+    flux_fs::coverage::Rules::of(&p).map_err(|e| ApiError::new("invalid", e.to_string()))
+}
+fn absolute(path: &str) -> Result<std::path::PathBuf> {
+    let expanded = match (path.strip_prefix('~'), flux_core::sys::home_dir()) {
+        (Some(rest), Some(h)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", h.display())
+        }
+        _ => path.to_owned(),
+    };
+    let p = std::path::PathBuf::from(&expanded);
+    if !p.is_absolute() {
+        return Err(ApiError::new(
+            "invalid",
+            "Type a full path, starting with / or ~/.",
+        ));
+    }
+    Ok(p)
+}
+pub fn explain_impl(profile: serde_json::Value, path: String) -> Result<Explained> {
+    let rules = rules_of(profile)?;
+    let abs = absolute(path.trim())?;
+    let why = flux_fs::coverage::explain(&rules, &abs);
+    Ok(Explained {
+        text: why.text(&abs),
+        backed_up: why.included(),
+        path: abs.display().to_string(),
+        why,
+    })
+}
+/// A folder's items, each marked backed up or left out, with totals (counted for up to
+/// 10 seconds).
+pub fn coverage_impl(
+    profile: serde_json::Value,
+    dir: String,
+) -> Result<flux_fs::coverage::Coverage> {
+    let rules = rules_of(profile)?;
+    let abs = absolute(dir.trim())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    flux_fs::coverage::list(&rules, &abs, Some(deadline))
+        .map_err(|e| ApiError::new("error", format!("{}: {e}", abs.display())))
+}
+/// The templates a new backup can start from.
+pub fn templates_impl(state: &Service) -> Vec<flux_runner::templates::Template> {
+    flux_runner::templates::list(&state.paths)
+}
+/// A new backup, from template `template`.
+pub fn new_from_template_impl(state: &Service, template: String) -> Result<Editable> {
+    let base = new_profile_impl(state)?;
+    let home = sys::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let p = flux_runner::templates::apply(&state.paths, &template, base.profile, &home)
+        .map_err(|e| ApiError::new("error", e))?;
+    Ok(Editable {
+        id: String::new(),
+        issues: Vec::new(),
+        profile: p,
+    })
+}
+/// Save a backup's settings as a template (without where it goes). Returns the
+/// templates.
+pub fn save_template_impl(
+    state: &Service,
+    id: String,
+    name: String,
+) -> Result<Vec<flux_runner::templates::Template>> {
+    let (_, p) = state.load(&id)?;
+    flux_runner::templates::save(&state.paths, &name, &p)
+        .map_err(|e| ApiError::new("invalid", e))?;
+    Ok(templates_impl(state))
+}
+/// Remove one of your templates. Returns the templates.
+pub fn delete_template_impl(
+    state: &Service,
+    template: String,
+) -> Result<Vec<flux_runner::templates::Template>> {
+    flux_runner::templates::delete(&state.paths, &template)
+        .map_err(|e| ApiError::new("error", e))?;
+    Ok(templates_impl(state))
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    use flux_core::Paths;
+
+    #[test]
+    fn add_and_remove_an_encrypted_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        for d in ["src", "main", "usb"] {
+            std::fs::create_dir_all(t.join(d)).unwrap();
+        }
+        let state = Service::new(Paths::under(t.join("home"), Scope::User));
+        let id = ProfileId::new("home").unwrap();
+        let p = Profile::new(
+            "Home",
+            Target::Local {
+                path: t.join("main"),
+                fs_uuid: None,
+            },
+            vec![t.join("src")],
+        );
+        ProfileStore::new(&state.paths).create(&id, &p).unwrap();
+        let key = t.join("keys/usb.pass");
+        let dest = serde_json::json!({
+            "name": "usb",
+            "label": "USB stick",
+            "engine": "vault",
+            "target": { "kind": "local", "path": t.join("usb") },
+            "vault": {
+                "password_source": { "from": "file", "path": key },
+                "hashing": { "level": "custom", "memory_mib": 8, "passes": 1, "threads": 1 },
+            },
+        });
+        let saved =
+            add_destination_impl(&state, "home".into(), dest.clone(), Some("pw".into())).unwrap();
+        assert_eq!(saved.destinations.len(), 1);
+        // The Vault exists at once, its password kept where the destination says.
+        assert!(t.join("usb/flux-vault/config").exists());
+        assert_eq!(std::fs::read_to_string(&key).unwrap().trim(), "pw");
+        // Browsing it as a profile of its own works (no snapshots yet).
+        let e = crate::views::snapshots_impl(&state, "home+usb".into());
+        assert!(
+            e.is_ok() || e.as_ref().err().is_some_and(|e| e.code() == "empty"),
+            "{e:?}"
+        );
+        // The same name again, or the main destination's place: refused.
+        assert_eq!(
+            add_destination_impl(&state, "home".into(), dest, None)
+                .unwrap_err()
+                .code(),
+            "invalid"
+        );
+        let same_place = serde_json::json!({ "name": "again", "engine": "mirror", "target": { "kind": "local", "path": t.join("main") } });
+        assert_eq!(
+            add_destination_impl(&state, "home".into(), same_place, None)
+                .unwrap_err()
+                .code(),
+            "invalid"
+        );
+        // A destination can't have destinations.
+        assert!(
+            add_destination_impl(&state, "home+usb".into(), serde_json::json!({}), None).is_err()
+        );
+
+        let saved = remove_destination_impl(&state, "home".into(), "usb".into()).unwrap();
+        assert!(saved.destinations.is_empty());
+        assert!(t.join("usb/flux-vault/config").exists(), "its backups stay");
+        assert!(remove_destination_impl(&state, "home".into(), "usb".into()).is_err());
+    }
+}
+#[cfg(test)]
+mod explain_tests {
+    use super::*;
+
+    #[test]
+    fn the_draft_decides() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        std::fs::create_dir_all(src.join("build")).unwrap();
+        std::fs::write(src.join("build/out.o"), "o").unwrap();
+        std::fs::write(src.join("a.c"), "c").unwrap();
+        let mut p = Profile::new(
+            "T",
+            flux_core::profile::Target::Local {
+                path: t.path().join("tgt"),
+                fs_uuid: None,
+            },
+            vec![src.clone()],
+        );
+        let draft = |p: &Profile| serde_json::to_value(p).unwrap();
+        let out = src.join("build/out.o").display().to_string();
+        assert!(explain_impl(draft(&p), out.clone()).unwrap().backed_up);
+        // An exclusion typed in the editor, not saved yet.
+        p.sources.exclude = vec!["build/".into()];
+        let e = explain_impl(draft(&p), out).unwrap();
+        assert!(!e.backed_up && e.text.contains("build/"), "{}", e.text);
+        let c = coverage_impl(draft(&p), src.display().to_string()).unwrap();
+        let build = c.items.iter().find(|i| i.name == "build").unwrap();
+        assert!(!build.backed_up && build.files_out == 1);
+        assert!(explain_impl(draft(&p), "relative/path".into()).is_err());
+    }
+}
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn new_backups_from_templates() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = flux_core::Paths::under(t.path().join("home"), Scope::User);
+        let state = Service::new(paths.clone());
+        let e = new_from_template_impl(&state, "development".into()).unwrap();
+        assert_eq!(e.profile.name, "Projects");
+        assert!(e.profile.sources.exclude.contains(&"target/".to_owned()));
+        let mut p = e.profile.clone();
+        p.target = Target::Local {
+            path: t.path().join("tgt"),
+            fs_uuid: None,
+        };
+        let id = ProfileId::new("dev").unwrap();
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        let after = save_template_impl(&state, "dev".into(), "My dev setup".into()).unwrap();
+        let mine = after.iter().find(|t| t.own).unwrap();
+        let again = new_from_template_impl(&state, mine.id.clone()).unwrap();
+        assert_eq!(again.profile.sources.exclude, p.sources.exclude);
+        assert_eq!(
+            again.profile.target,
+            new_profile_impl(&state).unwrap().profile.target
+        );
+        assert!(
+            delete_template_impl(&state, mine.id.clone())
+                .unwrap()
+                .iter()
+                .all(|t| !t.own)
+        );
+        assert!(new_from_template_impl(&state, "own:gone".into()).is_err());
+    }
 }

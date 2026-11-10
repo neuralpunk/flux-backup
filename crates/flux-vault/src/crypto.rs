@@ -136,7 +136,10 @@ impl Crypto {
     /// Unwrap a stored object.
     pub fn open(&self, object: &[u8]) -> Result<Vec<u8>, CryptoError> {
         match (object.first(), self) {
-            (Some(&TAG_PLAIN), _) => Ok(object[1..].to_vec()),
+            (Some(&TAG_PLAIN), Crypto::Plain { .. }) => Ok(object[1..].to_vec()),
+            // Never written by an encrypted Vault: someone with the drive could have put
+            // it there to be trusted without the key.
+            (Some(&TAG_PLAIN), Crypto::Encrypted(_)) => Err(CryptoError::Authentication),
             (Some(&TAG_SEALED), Crypto::Encrypted(k)) => {
                 if object.len() < 1 + NONCE_LEN + 16 {
                     return Err(CryptoError::Malformed);
@@ -174,6 +177,42 @@ impl KdfParams {
         t: 1,
         p: 1,
     };
+
+    /// The parameters of a profile's hashing setting.
+    pub fn of(h: flux_core::profile::PasswordHashing) -> Self {
+        let (m_kib, t, p) = h.params();
+        KdfParams { m_kib, t, p }
+    }
+
+    /// The profile setting these parameters are (a preset, or custom).
+    pub fn hashing(self) -> flux_core::profile::PasswordHashing {
+        flux_core::profile::PasswordHashing::from_params(self.m_kib, self.t, self.p)
+    }
+
+    /// How long hashing one password with these parameters takes on this computer.
+    pub fn time_it(self) -> Result<std::time::Duration, CryptoError> {
+        let start = std::time::Instant::now();
+        kek("timing the password hashing", &[0u8; 16], self)?;
+        Ok(start.elapsed())
+    }
+}
+
+/// The secret of an unlock file: what, with the password, opens a key slot that needs one.
+/// Any file works; Flux makes one of 64 random bytes.
+pub type UnlockSecret = [u8; 32];
+
+pub fn unlock_secret(file_contents: &[u8]) -> UnlockSecret {
+    blake3::derive_key("flux-vault unlock file v1", file_contents)
+}
+
+/// What a key slot's password hashing gets: the password alone, or (for a slot that needs
+/// an unlock file) the password with the file's secret. The secret is hex, after a NUL a
+/// typed password can't contain, so no password collides with a password and file.
+pub fn slot_input(password: &str, unlock: Option<&UnlockSecret>) -> Zeroizing<String> {
+    match unlock {
+        None => Zeroizing::new(password.to_owned()),
+        Some(s) => Zeroizing::new(format!("{password}\0{}", hex::encode(s))),
+    }
 }
 
 /// `keys/<id>`: the master key wrapped with a password.
@@ -188,6 +227,10 @@ pub struct KeySlot {
     pub created: Timestamp,
     #[serde(default)]
     pub label: String,
+    /// This slot opens only with the password and an unlock file (see [`slot_input`]).
+    /// Left out when false, so other slots look as they always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlock_file: bool,
 }
 
 fn kek(password: &str, salt: &[u8], p: KdfParams) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
@@ -233,6 +276,7 @@ impl KeySlot {
             ciphertext: B64.encode(ct),
             created: Timestamp::now(),
             label: label.into(),
+            unlock_file: false,
         })
     }
 
@@ -292,6 +336,49 @@ mod tests {
         assert!(other.open(&obj).is_err());
         // Same plaintext, different ciphertext (random nonce).
         assert_ne!(c.seal(b"secret").unwrap(), obj);
+    }
+
+    #[test]
+    fn unlock_files_change_the_slot_input() {
+        let s = unlock_secret(b"random bytes on a usb stick");
+        assert_eq!(s, unlock_secret(b"random bytes on a usb stick"));
+        assert_ne!(s, unlock_secret(b"another file"));
+        assert_eq!(slot_input("pw", None).as_str(), "pw");
+        let with = slot_input("pw", Some(&s));
+        assert!(with.starts_with("pw\0") && with.len() == 2 + 1 + 64);
+        // A slot made with a file doesn't open without it, and the reverse.
+        let m = MasterKey::generate().unwrap();
+        let slot = KeySlot::wrap(&m, &with, "repo", KdfParams::TESTING, "x").unwrap();
+        assert!(slot.unwrap(&with, "repo").is_ok());
+        assert!(slot.unwrap("pw", "repo").is_err());
+        let other = slot_input("pw", Some(&unlock_secret(b"another file")));
+        assert!(slot.unwrap(&other, "repo").is_err());
+    }
+
+    #[test]
+    fn hashing_presets_round_trip() {
+        use flux_core::profile::PasswordHashing as H;
+        for h in [H::Standard, H::Strong, H::Maximum] {
+            assert_eq!(KdfParams::of(h).hashing(), h);
+        }
+        assert_eq!(KdfParams::of(H::Standard), KdfParams::DEFAULT);
+        let c = H::Custom {
+            memory_mib: 128,
+            passes: 2,
+            threads: 8,
+        };
+        assert_eq!(KdfParams::of(c).hashing(), c);
+        assert!(KdfParams::TESTING.time_it().is_ok());
+    }
+
+    #[test]
+    fn an_encrypted_vault_refuses_unencrypted_objects() {
+        let c = Crypto::Encrypted(MasterKey::generate().unwrap());
+        // What someone with the drive could write in place of a sealed record.
+        let forged = [&[TAG_PLAIN][..], b"{\"forged\":true}"].concat();
+        assert!(matches!(c.open(&forged), Err(CryptoError::Authentication)));
+        let sealed = c.seal(b"real").unwrap();
+        assert_eq!(c.open(&sealed).unwrap(), b"real");
     }
 
     #[test]

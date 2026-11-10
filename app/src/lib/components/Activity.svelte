@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PerformanceView from "./PerformanceView.svelte";
   import { api } from "../api";
   import { app } from "../state.svelte";
   import { ago, between, bytes, count, dateTime, phaseLabel, runStatusLabel, time } from "../format";
@@ -81,7 +82,7 @@
   </div>
 {:else}
   <div class="flex h-full min-h-0 gap-3">
-    <div class="card flex w-72 shrink-0 flex-col overflow-hidden">
+    <div class="card flex w-60 shrink-0 flex-col overflow-hidden min-[1100px]:w-72">
       <div class="flex items-center gap-2 px-3 pt-3">
         <div class="segmented flex flex-1 [&>button]:flex-1" role="radiogroup" aria-label="Show">
           <button role="radio" aria-checked={!problemsOnly} onclick={() => (problemsOnly = false)}>All</button>
@@ -130,6 +131,7 @@
           {#if r.pruned.length}<p class="mt-1 text-[12.5px] text-fg-muted" title={r.pruned.join(", ")}>Removed {r.pruned.length} old {r.pruned.length === 1 ? "snapshot" : "snapshots"}</p>{/if}
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto px-6 pt-3 pb-5">
+          {#if r.performance}<PerformanceView perf={r.performance} />{/if}
           <h3 class="label mb-2">Log</h3>
           {#if !events}
             <div class="h-24 rounded-lg bg-surface-3 motion-safe:animate-pulse"></div>

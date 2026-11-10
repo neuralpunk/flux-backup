@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use flux_core::filter::Filter;
 use flux_core::profile::Sources;
+use flux_core::sync::Locked;
 
 const CACHEDIR_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
@@ -194,13 +195,13 @@ pub fn find_marked(sources: &Sources, filter: &Filter, never: &[PathBuf]) -> Vec
                 let hit = (exclude_caches && name == b"CACHEDIR.TAG" && is_cachedir_tag(e.path()))
                     || markers.iter().any(|m| m.as_bytes() == name);
                 if hit && let Some(parent) = e.path().parent() {
-                    found.lock().unwrap().push(parent.to_owned());
+                    found.locked().push(parent.to_owned());
                 }
             }
             ignore::WalkState::Continue
         })
     });
-    let mut v = found.into_inner().unwrap();
+    let mut v = found.into_value();
     v.sort();
     v.dedup();
     v
@@ -240,6 +241,7 @@ mod tests {
             exclude_caches: false,
             exclude_if_present: vec![],
             one_file_system: false,
+            volumes: Vec::new(),
         };
         assert_eq!(profile_rules(&s, None), ["+ keep.tmp", "- *.tmp"]);
     }
@@ -281,6 +283,7 @@ mod tests {
             exclude_caches: true,
             exclude_if_present: vec![".nobackup".into()],
             one_file_system: false,
+            volumes: Vec::new(),
         };
         let filter = Filter::new(&sources, None).unwrap();
         let found = find_marked(&sources, &filter, &[]);

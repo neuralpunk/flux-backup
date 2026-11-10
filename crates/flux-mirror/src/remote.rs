@@ -153,19 +153,23 @@ impl RemoteMirror {
         offset: u64,
         len: u64,
     ) -> std::io::Result<Vec<u8>> {
-        let remote = format!(
-            "{}/data/{}",
-            self.snapshot_dir(id),
-            String::from_utf8_lossy(&e.path)
-        );
+        let remote = self.data_path(id, e);
         let mut out = Vec::with_capacity(len.min(1 << 20) as usize);
         self.pool.with(|s| {
-            s.read_range(&remote, offset, len, |chunk| {
+            s.read_range_bytes(&remote, offset, len, |chunk| {
                 out.extend_from_slice(chunk);
                 Ok(())
             })
         })?;
         Ok(out)
+    }
+
+    /// Where entry `e` of snapshot `id` is on the server: bytes, because a file name
+    /// needn't be UTF-8 and the server has it exactly as it was.
+    fn data_path(&self, id: &str, e: &Entry) -> Vec<u8> {
+        let mut p = format!("{}/data/", self.snapshot_dir(id)).into_bytes();
+        p.extend_from_slice(&e.path);
+        p
     }
 
     pub fn snapshot_dir(&self, id: &str) -> String {
@@ -328,6 +332,13 @@ pub fn backup(
             "local targets in the remote engine",
         ));
     };
+    // rsync would store such links as links while the manifest lists files (the profile
+    // is refused when saved; this is for one written by hand or before 1.0).
+    if profile.options.symlinks != flux_core::profile::SymlinkMode::Preserve {
+        return Err(MirrorError::Unsupported(
+            "following symbolic links in a Mirror on an SSH server (it stores links as links): set symlinks = \"preserve\", or use the Vault or rsync format",
+        ));
+    }
     progress.set_phase(Phase::Preparing);
     report(Event::Phase {
         phase: Phase::Preparing,
@@ -335,7 +346,8 @@ pub fn backup(
     let ssh = pool.target().clone();
     ssh.run("command -v rsync >/dev/null || { echo 'rsync is not installed on the server' >&2; exit 1; }")
         .map_err(remote_err)?;
-    let root = RemoteMirror::locate(path, &sys::hostname(), &sys::username(), req.id.as_str());
+    let k = profile.kept_as(req.id);
+    let root = RemoteMirror::locate(path, &k.host, &k.user, &k.profile);
     let repo = if req.dry_run {
         RemoteMirror::open(pool.clone(), root, req.cache_dir).ok()
     } else {
@@ -466,6 +478,13 @@ pub fn backup(
     .arg(format!("--files-from={}", list_file.display()))
     .arg("-e")
     .arg(ssh.rsync_rsh());
+    // Checksum detection is for files that change without their size or time changing
+    // (some databases, disk images): rsync, deciding by size and time alone, would link
+    // such a file to the previous snapshot's copy while the manifest records the new
+    // content. It must compare contents too.
+    if opts.change_detection == flux_core::profile::ChangeDetection::Checksum {
+        cmd.arg("--checksum");
+    }
     if opts.preserve_acl {
         cmd.arg("-A");
     }
@@ -567,6 +586,9 @@ pub fn backup(
         errors,
         errors_total,
         flux_version: flux_core::VERSION.to_owned(),
+        sources_missing: Vec::new(),
+        note: None,
+        tags: Vec::new(),
     };
     repo.put(
         &format!("snapshots/{PARTIAL}/manifest.zst"),
@@ -801,13 +823,9 @@ impl flux_fs::restore::RestoreSource for RemoteSource<'_> {
         progress: &Progress,
     ) -> std::io::Result<u64> {
         let mut out = out;
-        let remote = format!(
-            "{}/data/{}",
-            self.repo.snapshot_dir(&self.id),
-            String::from_utf8_lossy(&e.path)
-        );
+        let remote = self.repo.data_path(&self.id, e);
         let n = self.repo.pool.with(|s| {
-            s.read_range(&remote, 0, u64::MAX, |chunk| {
+            s.read_range_bytes(&remote, 0, u64::MAX, |chunk| {
                 if progress.is_cancelled() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,

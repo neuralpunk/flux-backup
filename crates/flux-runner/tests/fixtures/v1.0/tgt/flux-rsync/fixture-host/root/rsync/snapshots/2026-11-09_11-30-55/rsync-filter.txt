@@ -1,0 +1,6 @@
+# Flux Backup: exclusion rules for a backup of “rsync” (rsync) started 2026-11-09 11:30:55 -06:00
+# rsync filter rules (used with --exclude-from). The first rule that matches a
+# path decides: "- " leaves it out, "+ " keeps it.
+
+# The backup folders themselves:
+- /srv/tgt/flux-rsync/***

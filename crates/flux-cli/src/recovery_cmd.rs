@@ -68,3 +68,153 @@ pub fn run(ctx: &Ctx, args: RecoveryArgs) -> anyhow::Result<ExitCode> {
     }
     Ok(ExitCode::SUCCESS)
 }
+
+#[derive(Args)]
+#[command(
+    after_help = "Without --pick, lists the backups found. With it, sets that backup \
+    up on this computer: the saved settings (folders, exclusions, rules) if they were kept \
+    with it, reaching the backups where they were found.\n\nAn encrypted Vault's backups \
+    are listed once its password is given (FLUX_PASSWORD, or typed).\n\nExamples:\n  \
+    flux recover /run/media/me/Backup\n  \
+    flux recover nas:/srv/backup --pick 2\n  \
+    flux recover /run/media/me/Backup --pick 1 --carry-on --id home"
+)]
+pub struct RecoverArgs {
+    /// Where the backups are: a drive's folder, `[user@]host:/path` or `ssh://…`.
+    pub target: String,
+    /// The backup to recover: its number in the list.
+    #[arg(long, value_name = "N")]
+    pub pick: Option<usize>,
+    /// Carry on backing up from this computer, on the saved schedule (otherwise nothing
+    /// is scheduled: restore what you need, then decide).
+    #[arg(long)]
+    pub carry_on: bool,
+    /// The id of the profile made here (default: the one it had).
+    #[arg(long)]
+    pub id: Option<String>,
+}
+
+pub fn recover(ctx: &Ctx, args: RecoverArgs) -> anyhow::Result<ExitCode> {
+    use flux_runner::recover::{self as rc, Then};
+    let mut target = crate::target_spec::parse(&args.target)?;
+    if let flux_core::Target::Local { path, .. } = &mut target {
+        *path = absolutize(path.clone())?;
+    }
+    let env_pw = std::env::var("FLUX_PASSWORD")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let mut password = env_pw.map(flux_runner::password::Secret::new);
+    let mut search = rc::find(
+        &ctx.paths,
+        &target,
+        password.as_ref().map(|s| s.as_str()),
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if search.vault_locked
+        && password.is_none()
+        && !ctx.json
+        && let Some(pw) =
+            flux_runner::password::terminal_ask("Password of the encrypted Vault there: ", false)
+    {
+        password = Some(pw);
+        search = rc::find(
+            &ctx.paths,
+            &target,
+            password.as_ref().map(|s| s.as_str()),
+            false,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if search.wrong_password {
+        eprintln!("warning: that password doesn't open the Vault there; its backups aren't listed");
+    } else if search.vault_locked {
+        eprintln!(
+            "note: there's an encrypted Vault there; give its password (FLUX_PASSWORD) to list its backups"
+        );
+    }
+    let Some(n) = args.pick else {
+        if ctx.json {
+            output::print_json(&search)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        if search.found.is_empty() {
+            bail!("no Flux backups found in {}", args.target);
+        }
+        for (i, f) in search.found.iter().enumerate() {
+            println!(
+                "{:>3}. {} ({}), made on {} by {}{}",
+                i + 1,
+                f.name,
+                f.engine.label(),
+                f.kept.host,
+                f.kept.user,
+                if f.here { ", this computer" } else { "" }
+            );
+            if !f.sources.is_empty() {
+                let s: Vec<_> = f.sources.iter().map(|p| p.display().to_string()).collect();
+                println!("     {}", s.join(", "));
+            }
+            let mut facts = Vec::new();
+            if let Some(c) = f.snapshots {
+                facts.push(format!("{c} snapshot{}", if c == 1 { "" } else { "s" }));
+            }
+            if let Some(t) = f.newest {
+                facts.push(format!("newest {}", t.strftime("%Y-%m-%d %H:%M")));
+            }
+            facts.push(if f.saved {
+                "settings kept with it".into()
+            } else {
+                "no settings kept (made before Flux 1.0?)".into()
+            });
+            println!("     {}", facts.join(" · "));
+        }
+        println!(
+            "\nRecover one with: flux recover {} --pick N [--carry-on]",
+            args.target
+        );
+        return Ok(ExitCode::SUCCESS);
+    };
+    let found = search
+        .found
+        .get(n.wrapping_sub(1))
+        .with_context(|| format!("there's no backup {n} in the list"))?;
+    let then = if args.carry_on {
+        Then::CarryOn
+    } else {
+        Then::Restore
+    };
+    let (id, p) = rc::recover(&ctx.paths, found, &target, then, args.id.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    // The password opened it: keep it the way the profile says, so backups and restores
+    // don't ask again.
+    if let Some(pw) = &password
+        && matches!(
+            found.engine,
+            flux_core::Engine::Vault | flux_core::Engine::Borg
+        )
+        && p.password_source().is_some()
+    {
+        let service = flux_service::Service::new(ctx.paths.clone());
+        if let Err(e) =
+            flux_service::views::set_password_impl(&service, id.to_string(), pw.to_string())
+        {
+            eprintln!("warning: the password couldn't be kept for {id}: {e}");
+        }
+    }
+    if then == Then::CarryOn {
+        crate::profile_cmd::sync_schedule(ctx, &id, &p);
+    }
+    if ctx.json {
+        output::print_json(&serde_json::json!({ "id": id, "profile": p }))?;
+    } else {
+        println!("Recovered “{}” as {id}.", p.name);
+        println!("  Restore:  flux restore {id} --help   (or open Flux Backup)");
+        if then == Then::Restore {
+            println!(
+                "  Nothing is scheduled. To carry on backing up from this computer:\n            flux profile edit {id}   (set its schedule)"
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}

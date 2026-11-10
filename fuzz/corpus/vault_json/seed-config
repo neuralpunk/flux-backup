@@ -1,0 +1,15 @@
+{
+  "format": 2,
+  "id": "fc8369679d7163a32bf9a50f94334d80",
+  "encrypted": false,
+  "created": "2026-11-09T16:51:10.136113624Z",
+  "chunker": {
+    "min": 524288,
+    "avg": 1048576,
+    "max": 8388608
+  },
+  "plain_keys": {
+    "id_key": "TAyVxIXjTsUpyAkZTCfJeUM6DN+GUMF7xjSb3/jS1cg=",
+    "chunk_seed": 1957754718764321510
+  }
+}

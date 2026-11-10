@@ -30,7 +30,7 @@ impl PlanStats {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum BackupOutcome {
     Created {

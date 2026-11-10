@@ -1,7 +1,8 @@
 <script lang="ts">
   // Custom titlebar (the window is undecorated). Drag anywhere on it to move the window;
   // double-click to maximize. Window buttons follow GNOME's: round, with symbolic icons.
-  import { inTauri } from "../api";
+  import { api, inTauri } from "../api";
+  import { openMenuBelow } from "../menu.svelte";
   import { app } from "../state.svelte";
   import Icon from "../components/Icon.svelte";
   import Logo from "./Logo.svelte";
@@ -13,6 +14,28 @@
   const act = (f: "minimize" | "toggleMaximize" | "close") => () => {
     if (inTauri) void win().then((w) => w[f]());
   };
+
+  // GNOME's main menu: the app-wide places that aren't a backup.
+  function mainMenu(e: MouseEvent & { currentTarget: HTMLElement }) {
+    openMenuBelow(
+      e.currentTarget,
+      [
+        { label: "Preferences", icon: "settings", onselect: () => app.openPreferences() },
+        { label: "Keyboard shortcuts", icon: "help", shortcut: "?", onselect: () => (app.showShortcuts = true) },
+        {
+          label: "User guide",
+          icon: "lifebuoy",
+          onselect: () => {
+            if (inTauri) api.openLink("guide").catch((err: Error) => app.toast("bad", err.message));
+            else app.toast("info", "The guide opens in your web browser in the app.");
+          },
+        },
+        "separator",
+        { label: "About Flux Backup", icon: "info", onselect: () => (app.dialog = { kind: "about" }) },
+      ],
+      "Main menu",
+    );
+  }
 </script>
 
 {#snippet winButton(label: string, icon: "minimize" | "maximize" | "x", f: "minimize" | "toggleMaximize" | "close")}
@@ -34,10 +57,11 @@
   {/if}
   <div class="absolute right-3 flex items-center gap-2">
     <button
-      aria-label="Keyboard shortcuts"
-      title="Keyboard shortcuts (?)"
+      aria-label="Main menu"
+      title="Main menu"
+      aria-haspopup="menu"
       class="btn-icon mr-1 size-7"
-      onclick={() => (app.showShortcuts = true)}><Icon name="help" size={16} /></button
+      onclick={mainMenu}><Icon name="menu" size={16} /></button
     >
     {@render winButton("Minimize", "minimize", "minimize")}
     {@render winButton("Maximize", "maximize", "toggleMaximize")}

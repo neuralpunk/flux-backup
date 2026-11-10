@@ -1,0 +1,12 @@
+# Flux Backup snapshot 2026-11-09_11-30-55 of “rsync” (rsync)
+# Written by rsync 3.5.2-ga8306e06 on fixture-host for user root.
+# Started:  2026-11-09 11:30:55 -06:00
+# Finished: 2026-11-09 11:30:55 -06:00
+# rsync exit status: 0 (success)
+#
+# Flux ran the command below with this folder named snapshots/.partial and renamed
+# it to 2026-11-09_11-30-55 when rsync had finished. The exclusion rules it read are in
+# rsync-filter.txt, next to this file. Files are under data/, at their original
+# absolute paths. To restore with rsync alone, see ../../FLUX-RECOVERY.txt.
+
+rsync --archive --hard-links --numeric-ids --relative --delete --delete-excluded --acls --xattrs --exclude-from=/srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/.partial/rsync-filter.txt --link-dest=../../2026-11-09_11-30-53/data --info=progress2 --stats --no-human-readable /srv/src/ /srv/tgt/flux-rsync/fixture-host/root/rsync/snapshots/.partial/data/

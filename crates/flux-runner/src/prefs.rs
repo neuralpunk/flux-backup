@@ -30,6 +30,9 @@ pub struct Settings {
     /// What runs scheduled backups: systemd timers (the default) or cron.
     #[serde(skip_serializing_if = "is_default")]
     pub scheduler: crate::schedule::SchedulerKind,
+    /// Webhooks told about every backup (each backup can add its own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<flux_core::webhook::Webhook>,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -58,7 +61,13 @@ impl Settings {
             path: paths.config_dir.clone(),
             source: e,
         })?;
-        write_atomic(&Self::file(paths), text.as_bytes(), 0o644)
+        // Webhook addresses and headers can be secrets (tokens, private topics).
+        let mode = if self.webhooks.is_empty() {
+            0o644
+        } else {
+            0o600
+        };
+        write_atomic(&Self::file(paths), text.as_bytes(), mode)
     }
 }
 
@@ -130,9 +139,28 @@ mod tests {
             scheduler: crate::schedule::SchedulerKind::Cron,
             one_at_a_time: true,
             diff_tool: Some("meld --newtab".into()),
+            webhooks: vec![flux_core::webhook::Webhook {
+                url: "https://ntfy.sh/my-backups".into(),
+                preset: flux_core::webhook::Preset::Ntfy,
+                events: Vec::new(),
+                headers: Vec::new(),
+                enabled: true,
+            }],
         };
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths), s);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Paths| {
+            std::fs::metadata(p.config_dir.join("settings.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(&paths), 0o600, "webhooks can hold secrets");
+        Settings::default().save(&paths).unwrap();
+        assert_eq!(mode(&paths), 0o644);
+        s.save(&paths).unwrap();
         assert!(
             std::fs::read_to_string(paths.config_dir.join("settings.toml"))
                 .unwrap()

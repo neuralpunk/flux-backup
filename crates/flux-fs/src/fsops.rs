@@ -317,8 +317,18 @@ impl Copier {
 
     /// Like [`Copier::copy`], into a file that is already open (and empty).
     pub fn copy_to(&self, src: &Path, output: &File, progress: &Progress) -> io::Result<u64> {
+        self.copy_from(File::open(src)?, output, progress)
+    }
+
+    /// Like [`Copier::copy_to`], from a file that is already open (a backup opens its
+    /// sources with a [`SourceOpener`]).
+    pub fn copy_from(
+        &self,
+        mut input: File,
+        output: &File,
+        progress: &Progress,
+    ) -> io::Result<u64> {
         let mut output = output;
-        let mut input = File::open(src)?;
         let meta = input.metadata()?;
         let len = meta.len();
 
@@ -384,8 +394,36 @@ impl Copier {
 
 /// Fewer blocks allocated than the size needs: the file has holes (or the filesystem
 /// compresses it; then the whole file is data and nothing is lost by looking).
-fn is_sparse(m: &fs::Metadata) -> bool {
+pub fn is_sparse(m: &fs::Metadata) -> bool {
     m.len() > 0 && m.blocks().saturating_mul(512) < m.len()
+}
+
+/// Where the data of a sparse file lies, as (offset, length) runs in order, up to `len`;
+/// everything else is holes. `None` when the file has no holes worth recording (it isn't
+/// sparse, or is all data) or the filesystem can't say (`SEEK_DATA` unsupported).
+pub fn data_segments(file: &File, len: u64) -> io::Result<Option<Vec<(u64, u64)>>> {
+    use rustix::fs::{SeekFrom, seek};
+    if !is_sparse(&file.metadata()?) {
+        return Ok(None);
+    }
+    let mut runs = Vec::new();
+    let mut pos = 0u64;
+    while pos < len {
+        let start = match seek(file, SeekFrom::Data(pos)) {
+            Ok(s) => s,
+            // No data after `pos`: the rest is a hole.
+            Err(Errno::NXIO) => break,
+            Err(Errno::INVAL | Errno::OPNOTSUPP) if pos == 0 => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if start >= len {
+            break;
+        }
+        let end = seek(file, SeekFrom::Hole(start))?.min(len);
+        runs.push((start, end - start));
+        pos = end;
+    }
+    Ok((runs.as_slice() != [(0, len)]).then_some(runs))
 }
 
 impl Copier {
@@ -474,9 +512,103 @@ impl Copier {
 
 /// BLAKE3 of a file's contents.
 pub fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
+    hash_open(File::open(path)?)
+}
+
+/// BLAKE3 of an open file's contents.
+pub fn hash_open(file: File) -> io::Result<[u8; 32]> {
     let mut h = blake3::Hasher::new();
-    h.update_reader(File::open(path)?)?;
+    h.update_reader(file)?;
     Ok(*h.finalize().as_bytes())
+}
+
+/// Opens the files a backup reads, as the scan saw them.
+///
+/// The scan looks at each path without following links, but files are read later, some
+/// of them minutes later, and a path can be something else by then. In a backup of
+/// `/home` run as root, a user could swap a file of theirs (or a folder on the way to it)
+/// for a link to `/etc/shadow` in between: its contents would be stored under their name,
+/// for them to restore. A named pipe put there would make the backup wait forever.
+///
+/// So a file is opened below the source it was found in, without following any link on
+/// the way or at the end (the kernel refuses the whole path if there is one, with
+/// `openat2`; on kernels without it, at least the file itself is never a followed link),
+/// without blocking, and is used only if it is a regular file. Links to and above the
+/// source itself are followed, as the scan follows them: those are the user's own choice
+/// of what to back up. With a profile that follows links, files are opened as before
+/// (still never a pipe or device).
+#[derive(Debug, Clone)]
+pub struct SourceOpener {
+    roots: Vec<std::path::PathBuf>,
+    follow: bool,
+}
+
+impl SourceOpener {
+    /// For a backup of `sources`; `follow_links`: the profile copies what links point to.
+    pub fn new(sources: &[std::path::PathBuf], follow_links: bool) -> Self {
+        let mut roots: Vec<_> = sources.to_vec();
+        // The innermost source first, when one lies inside another.
+        roots.sort_by_key(|r| std::cmp::Reverse(r.as_os_str().len()));
+        Self {
+            roots,
+            follow: follow_links,
+        }
+    }
+
+    pub fn open(&self, path: &Path) -> io::Result<File> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags};
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+        let fd = if self.follow {
+            rustix::fs::open(path, flags, Mode::empty())?
+        } else {
+            let below = self
+                .roots
+                .iter()
+                .find_map(|r| Some((r, path.strip_prefix(r).ok()?)))
+                .filter(|(_, rel)| !rel.as_os_str().is_empty());
+            let strict = below.and_then(|(root, rel)| {
+                let dir = rustix::fs::open(
+                    root,
+                    OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .ok()?;
+                match rustix::fs::openat2(
+                    &dir,
+                    rel,
+                    flags | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                    ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::BENEATH,
+                ) {
+                    // A kernel (or sandbox) without openat2: the plain way, below.
+                    Err(Errno::NOSYS | Errno::INVAL | Errno::PERM) => None,
+                    r => Some(r),
+                }
+            });
+            match strict {
+                Some(r) => r,
+                // The source itself (a single file given as a source may be a link), or
+                // no openat2: the file itself is still never a followed link.
+                None if below.is_none() && self.roots.iter().any(|r| r == path) => {
+                    rustix::fs::open(path, flags, Mode::empty())
+                }
+                None => rustix::fs::open(path, flags | OFlags::NOFOLLOW, Mode::empty()),
+            }
+            .map_err(|e| match e {
+                Errno::LOOP | Errno::XDEV => io::Error::other(
+                    "became a link (or lies behind one) since it was looked at; not backed up",
+                ),
+                e => e.into(),
+            })?
+        };
+        let file = File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other(
+                "is no longer a regular file (it changed since it was looked at); not backed up",
+            ));
+        }
+        Ok(file)
+    }
 }
 
 /// Create a special file (FIFO or device node).
@@ -535,6 +667,65 @@ pub fn make_tree_writable(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backup reads the file the scan saw: not what a link put in its place (or in
+    /// place of a folder on the way) points to, and never a pipe it would wait on.
+    #[test]
+    fn sources_are_opened_without_following_links() {
+        use std::os::unix::fs::symlink;
+        let t = tempfile::tempdir().unwrap();
+        let secret = t.path().join("secret");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("shadow"), "root's").unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(src.join("dir")).unwrap();
+        fs::write(src.join("dir/file"), "mine").unwrap();
+        let opener = SourceOpener::new(std::slice::from_ref(&src), false);
+        let read = |o: &SourceOpener, p: &Path| {
+            o.open(p).and_then(|mut f| {
+                let mut s = String::new();
+                f.read_to_string(&mut s).map(|_| s)
+            })
+        };
+        assert_eq!(read(&opener, &src.join("dir/file")).unwrap(), "mine");
+
+        // The file becomes a link to someone else's.
+        symlink(secret.join("shadow"), src.join("dir/swapped")).unwrap();
+        assert!(read(&opener, &src.join("dir/swapped")).is_err());
+        // A folder on the way becomes a link.
+        symlink(&secret, src.join("way")).unwrap();
+        assert!(read(&opener, &src.join("way/shadow")).is_err());
+        // A named pipe: refused at once, not waited on.
+        rustix::fs::mknodat(
+            CWD,
+            src.join("pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(read(&opener, &src.join("pipe")).is_err());
+
+        // A profile that follows links reads through them, as it always did.
+        let following = SourceOpener::new(std::slice::from_ref(&src), true);
+        assert_eq!(
+            read(&following, &src.join("dir/swapped")).unwrap(),
+            "root's"
+        );
+        assert!(read(&following, &src.join("pipe")).is_err());
+
+        // The source itself may be reached through a link: that is the user's choice.
+        symlink(&src, t.path().join("alias")).unwrap();
+        let alias = t.path().join("alias");
+        let via = SourceOpener::new(std::slice::from_ref(&alias), false);
+        assert_eq!(read(&via, &alias.join("dir/file")).unwrap(), "mine");
+        assert!(read(&via, &alias.join("dir/swapped")).is_err());
+        // A single file as the source, itself a link.
+        let one = t.path().join("one");
+        symlink(src.join("dir/file"), &one).unwrap();
+        let single = SourceOpener::new(std::slice::from_ref(&one), false);
+        assert_eq!(read(&single, &one).unwrap(), "mine");
+    }
 
     #[test]
     fn copy_and_hash() {
@@ -610,5 +801,35 @@ mod tests {
                 "progress counts the whole file"
             );
         }
+    }
+
+    #[test]
+    fn data_segments_of_sparse_and_dense_files() {
+        use std::os::unix::fs::FileExt;
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("disk.img");
+        let f = File::create(&src).unwrap();
+        f.set_len(64 << 20).unwrap();
+        f.write_all_at(&[1u8; 4096], 0).unwrap();
+        f.write_all_at(&[7u8; 8192], 32 << 20).unwrap();
+        drop(f);
+        let f = File::open(&src).unwrap();
+        if !is_sparse(&f.metadata().unwrap()) {
+            eprintln!("this filesystem doesn't make sparse files; skipping");
+            return;
+        }
+        let runs = data_segments(&f, 64 << 20).unwrap().unwrap();
+        // Filesystems round to their block size; the data written is inside the runs.
+        let covered = |off: u64, n: u64| runs.iter().any(|&(s, l)| s <= off && off + n <= s + l);
+        assert!(covered(0, 4096) && covered(32 << 20, 8192), "{runs:?}");
+        let data: u64 = runs.iter().map(|r| r.1).sum();
+        assert!(data < 4 << 20, "mostly holes: {runs:?}");
+
+        let dense = t.path().join("dense");
+        fs::write(&dense, vec![3u8; 100_000]).unwrap();
+        assert_eq!(
+            data_segments(&File::open(&dense).unwrap(), 100_000).unwrap(),
+            None
+        );
     }
 }

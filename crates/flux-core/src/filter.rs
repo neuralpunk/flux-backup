@@ -32,6 +32,8 @@ pub struct FilterError {
 #[derive(Debug, Clone)]
 pub struct Filter {
     globs: Gitignore,
+    /// Each pattern as written (`~/Videos`) by the line it became (`/home/me/Videos`).
+    written: Vec<(String, String)>,
     /// Absolute paths that are always skipped (e.g. the backup repository itself).
     hard_excludes: Vec<PathBuf>,
     larger_than: Option<ByteSize>,
@@ -43,11 +45,13 @@ impl Filter {
     /// Build a filter from a profile's sources section. `home` is used for `~` expansion.
     pub fn new(sources: &Sources, home: Option<&Path>) -> Result<Self, FilterError> {
         let mut b = GitignoreBuilder::new("/");
+        let mut written = Vec::new();
         for pat in &sources.exclude {
             let expanded = expand_home(pat.trim(), home);
             if expanded.is_empty() {
                 continue;
             }
+            written.push((expanded.clone(), pat.clone()));
             b.add_line(None, &expanded).map_err(|e| FilterError {
                 pattern: pat.clone(),
                 message: e.to_string(),
@@ -59,6 +63,7 @@ impl Filter {
         })?;
         Ok(Self {
             globs,
+            written,
             hard_excludes: Vec::new(),
             larger_than: sources.exclude_larger_than,
             exclude_caches: sources.exclude_caches,
@@ -80,6 +85,54 @@ impl Filter {
     }
 
     /// Should a regular file of `size` bytes be skipped?
+    /// The pattern that decides `abs` (as written in the profile), and whether it leaves it
+    /// out (`true`) or brings it back (`!pattern`, `false`). `None`: no pattern matches.
+    pub fn rule_for(&self, abs: &Path, is_dir: bool) -> Option<(String, bool)> {
+        let m = self.globs.matched(abs, is_dir);
+        let glob = match &m {
+            ignore::Match::Ignore(g) | ignore::Match::Whitelist(g) => *g,
+            ignore::Match::None => return None,
+        };
+        let line = glob.original();
+        let written = self
+            .written
+            .iter()
+            .find(|(e, _)| e.trim() == line.trim())
+            .map_or_else(|| line.to_owned(), |(_, w)| w.clone());
+        Some((written, m.is_ignore()))
+    }
+
+    /// Paths always left out (the backup's own storage).
+    pub fn is_hard_excluded(&self, abs: &Path) -> bool {
+        self.hard_excludes.iter().any(|h| abs == h)
+    }
+
+    /// The size limit, if any.
+    pub fn size_limit(&self) -> Option<u64> {
+        self.larger_than.map(|b| b.bytes())
+    }
+
+    /// Why a folder's contents are left out by a marker inside it: `CACHEDIR.TAG`, or the
+    /// marker file's name.
+    pub fn marker_in<'a>(
+        &self,
+        dir: &Path,
+        names: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Option<String> {
+        for name in names {
+            if self.exclude_caches
+                && name == b"CACHEDIR.TAG"
+                && is_cachedir_tag(&dir.join("CACHEDIR.TAG"))
+            {
+                return Some("CACHEDIR.TAG".into());
+            }
+            if self.if_present.iter().any(|m| m.as_bytes() == name) {
+                return Some(String::from_utf8_lossy(name).into_owned());
+            }
+        }
+        None
+    }
+
     pub fn is_too_large(&self, size: u64) -> bool {
         self.larger_than.is_some_and(|max| size > max.bytes())
     }
@@ -94,18 +147,7 @@ impl Filter {
         dir: &Path,
         names: impl IntoIterator<Item = &'a [u8]>,
     ) -> bool {
-        for name in names {
-            if self.exclude_caches
-                && name == b"CACHEDIR.TAG"
-                && is_cachedir_tag(&dir.join("CACHEDIR.TAG"))
-            {
-                return true;
-            }
-            if self.if_present.iter().any(|m| m.as_bytes() == name) {
-                return true;
-            }
-        }
-        false
+        self.marker_in(dir, names).is_some()
     }
 
     /// True if any marker rules are active (lets callers skip collecting names).
@@ -149,6 +191,7 @@ mod tests {
             exclude_caches: true,
             exclude_if_present: vec![".nobackup".into()],
             one_file_system: false,
+            volumes: Vec::new(),
         };
         Filter::new(&sources, Some(Path::new("/home/me"))).unwrap()
     }
@@ -178,6 +221,26 @@ mod tests {
         assert!(!f.is_excluded(Path::new("/home/me/src/x/target/release"), true));
         assert!(f.is_too_large(101));
         assert!(!f.is_too_large(100));
+    }
+
+    #[test]
+    fn which_rule_decides() {
+        let f = filter(&["*.tmp", "~/Videos", "!keep.tmp"]);
+        assert_eq!(
+            f.rule_for(Path::new("/home/me/x/a.tmp"), false),
+            Some(("*.tmp".into(), true))
+        );
+        assert_eq!(
+            f.rule_for(Path::new("/home/me/Videos"), true),
+            Some(("~/Videos".into(), true)),
+            "as written, not expanded"
+        );
+        assert_eq!(
+            f.rule_for(Path::new("/home/me/keep.tmp"), false),
+            Some(("!keep.tmp".into(), false))
+        );
+        assert_eq!(f.rule_for(Path::new("/home/me/a.txt"), false), None);
+        assert_eq!(f.size_limit(), Some(100));
     }
 
     #[test]

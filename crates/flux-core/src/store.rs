@@ -28,6 +28,8 @@ pub enum StoreError {
     },
     #[error("cannot serialise profile: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("{0} is a destination of profile {1}: change it in that profile")]
+    Destination(ProfileId, ProfileId),
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
@@ -103,7 +105,14 @@ impl ProfileStore {
         Ok(out)
     }
 
+    /// A profile, or (for `home+nas`) the profile as its destination `nas` sees it.
     pub fn load(&self, id: &ProfileId) -> Result<Profile, StoreError> {
+        if let Some((base, dest)) = id.split_destination() {
+            return self
+                .load(&base)?
+                .for_destination(dest)
+                .ok_or_else(|| StoreError::NotFound(id.clone()));
+        }
         let path = self.path_of(id);
         match read_profile(&path) {
             Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
@@ -113,22 +122,47 @@ impl ProfileStore {
         }
     }
 
+    /// The line that says which schema a profile file Flux wrote follows (from 1.0 on).
+    const SCHEMA_LINE: &str = "# schema";
+
     /// Create a new profile; fails if one with this id exists.
     pub fn create(&self, id: &ProfileId, profile: &Profile) -> Result<PathBuf, StoreError> {
+        if let Some((base, _)) = id.split_destination() {
+            return Err(StoreError::Destination(id.clone(), base));
+        }
         if self.exists(id) {
             return Err(StoreError::AlreadyExists(id.clone()));
         }
         self.save(id, profile)
     }
 
-    /// Write (create or replace) a profile atomically.
+    /// Write (create or replace) a profile atomically. Sources on a drive of their own get
+    /// that drive recorded (`sources.volumes`), so a missing drive is recognised later.
     pub fn save(&self, id: &ProfileId, profile: &Profile) -> Result<PathBuf, StoreError> {
-        let mut text = String::from(
-            "# Flux Backup profile. Reference: https://github.com/neuralpunk/flux-backup\n",
+        if let Some((base, _)) = id.split_destination() {
+            return Err(StoreError::Destination(id.clone(), base));
+        }
+        let mut profile = profile.clone();
+        crate::source_check::record_volumes(&mut profile);
+        let mut text = format!(
+            "# Flux Backup profile. Reference: https://github.com/neuralpunk/flux-backup\n{} {}, written by Flux Backup {}\n",
+            Self::SCHEMA_LINE,
+            crate::profile::PROFILE_VERSION,
+            crate::VERSION
         );
         text.push_str(&profile.to_toml()?);
         let path = self.path_of(id);
         create_private_dir(&self.dir)?;
+        // A profile from before 1.0 (or written by hand): kept as it was, the first time
+        // Flux rewrites it.
+        if let Ok(old) = fs::read_to_string(&path)
+            && !old.contains(Self::SCHEMA_LINE)
+        {
+            let keep = self.dir.join(format!("{id}.toml.pre-1.0.bak"));
+            if !keep.exists() {
+                write_atomic(&keep, old.as_bytes(), 0o600)?;
+            }
+        }
         write_atomic(&path, text.as_bytes(), 0o600)?;
         Ok(path)
     }
@@ -236,6 +270,32 @@ mod tests {
 
         store.delete(&id).unwrap();
         assert!(matches!(store.delete(&id), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_profile_from_before_1_0_is_kept_when_first_rewritten() {
+        let (_t, store) = setup();
+        let id = ProfileId::new("home").unwrap();
+        let p = profile("Home");
+        // As 0.3 wrote it (no schema line).
+        let old = format!("# Flux Backup profile.\n{}", p.to_toml().unwrap());
+        fs::create_dir_all(&store.dir).unwrap();
+        fs::write(store.path_of(&id), &old).unwrap();
+        assert_eq!(store.load(&id).unwrap(), p, "read as it is");
+        store.save(&id, &p).unwrap();
+        let kept = store.dir.join("home.toml.pre-1.0.bak");
+        assert_eq!(fs::read_to_string(&kept).unwrap(), old);
+        let now = fs::read_to_string(store.path_of(&id)).unwrap();
+        assert!(now.contains("# schema 1, written by Flux Backup"), "{now}");
+        // Saved again: the copy stays the original; it isn't listed as a profile.
+        store.save(&id, &p).unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), old);
+        assert_eq!(store.list().unwrap().len(), 1);
+        // A profile Flux 1.0 wrote gets no copy.
+        let id2 = ProfileId::new("new").unwrap();
+        store.create(&id2, &p).unwrap();
+        store.save(&id2, &p).unwrap();
+        assert!(!store.dir.join("new.toml.pre-1.0.bak").exists());
     }
 
     #[test]

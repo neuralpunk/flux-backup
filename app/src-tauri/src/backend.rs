@@ -92,6 +92,19 @@ impl Backend {
             let app = app.clone();
             watch::start(user.paths.clone(), Arc::new(move |n| emit(&app, n)));
         }
+        // Vaults whose "lock again after" time has passed without use are locked again.
+        // (System backups lock as a whole when their helper stops after 15 idle minutes.)
+        {
+            let (app, user) = (app.clone(), user.clone());
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    for id in user.expire_idle() {
+                        let _ = app.emit("flux://locked", json!({ "profile": id }));
+                    }
+                }
+            });
+        }
         Self {
             user,
             helper: Mutex::new(None),
@@ -213,6 +226,8 @@ async fn route(state: St<'_>, call: Call, system: bool) -> Result<Value> {
 macro_rules! commands {
     ($( $name:ident ( $($arg:ident : $ty:ty),* ) => $call:expr ;)*) => {$(
         #[tauri::command]
+        // One parameter per field the page sends: the IPC call's shape.
+        #[allow(clippy::too_many_arguments)]
         pub async fn $name(state: St<'_>, $($arg: $ty),*) -> Result<Value> {
             route(state, $call, false).await
         }
@@ -244,8 +259,9 @@ commands! {
     exclude_suggestions(sources: Vec<String>) => Call::ExcludeSuggestions { sources };
     drives() => Call::Drives;
     backintime_profiles() => Call::BackInTime;
-    update_snapshot(id: String, snapshot: String, name: Option<String>, set_name: bool, pinned: Option<bool>)
-        => Call::UpdateSnapshot { id, snapshot, name, set_name, pinned };
+    update_snapshot(id: String, snapshot: String, name: Option<String>, set_name: bool, pinned: Option<bool>,
+        note: Option<String>, set_note: Option<bool>, tags: Option<Vec<String>>)
+        => Call::UpdateSnapshot { id, snapshot, name, set_name, pinned, note, set_note: set_note.unwrap_or(false), tags };
     delete_snapshot(id: String, snapshot: String) => Call::DeleteSnapshot { id, snapshot };
     compare(id: String, old: String, new: Option<String>) => Call::Compare { id, old, new };
     runs(id: String, limit: usize) => Call::Runs { id, limit };
@@ -265,6 +281,35 @@ commands! {
     versions(id: String, path: String) => Call::Versions { id, path };
     restore_preview(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
         => Call::RestorePreview { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
+    vault_security(id: String) => Call::VaultSecurity { id };
+    strengthen_key(id: String, hashing: flux_core::profile::PasswordHashing) => Call::StrengthenKey { id, hashing };
+    set_unlock_file(id: String, path: Option<String>, create: Option<bool>)
+        => Call::SetUnlockFile { id, path, create: create.unwrap_or(false) };
+    time_hashing(hashing: flux_core::profile::PasswordHashing) => Call::TimeHashing { hashing };
+    lock_vault(id: String) => Call::Lock { id };
+    add_destination(id: String, destination: Value, password: Option<String>)
+        => Call::AddDestination { id, destination, password };
+    remove_destination(id: String, name: String) => Call::RemoveDestination { id, name };
+    restore_test(id: String) => Call::RestoreTest { id };
+    restore_tests(id: String) => Call::RestoreTests { id };
+    dismiss_unusual(id: String, snapshot: String) => Call::DismissUnusual { id, snapshot };
+    set_webhooks(webhooks: Value) => Call::SetWebhooks { webhooks };
+    test_webhook(webhook: Value) => Call::TestWebhook { webhook };
+    find_backups(target: Value, password: Option<String>) => Call::FindBackups { target, password };
+    explain(profile: Value, path: String) => Call::Explain { profile, path };
+    save_template(id: String, name: String) => Call::SaveTemplate { id, name };
+    storage(id: String) => Call::Storage { id };
+    vault_format(id: String) => Call::VaultFormat { id };
+    upgrade_vault(id: String) => Call::UpgradeVault { id };
+    coverage(profile: Value, dir: String) => Call::Coverage { profile, dir };
+    export_snapshot(id: String, snapshot: String, paths: Vec<String>, format: flux_runner::archive::Format,
+        dir: String, checksums: Option<flux_runner::archive::Checksums>)
+        => Call::ExportSnapshot { id, snapshot, paths, format, dir, checksums };
+    recover(target: Value, engine: flux_core::Engine, kept: flux_core::profile::KeptAs,
+        then: flux_runner::recover::Then, id: Option<String>, password: Option<String>)
+        => Call::Recover { target, engine, kept, then, id, password };
+    readiness(id: String) => Call::Readiness { id };
+    set_readiness(id: String, key: String, yes: bool) => Call::SetReadiness { id, key, yes };
 }
 
 /// Open two files in the comparison program chosen in the preferences (the program comes
@@ -323,6 +368,51 @@ pub async fn open_snapshot_file(
         Ok(local)
     })
     .await
+}
+
+/// Versions for the About dialog: this app, the `flux` command and the helper it would
+/// run, the system, and the WebKitGTK that draws the window.
+#[tauri::command]
+pub async fn about() -> Result<Value> {
+    blocking(|| {
+        let mut v = serde_json::to_value(flux_service::extras::about_impl())?;
+        v["webkit"] = json!(tauri::webview_version().ok());
+        Ok(v)
+    })
+    .await
+}
+
+/// The project's own pages; the page names one, never a URL.
+const LINKS: &[(&str, &str)] = &[
+    ("website", "https://neuralpunk.github.io/flux-backup/"),
+    (
+        "guide",
+        "https://neuralpunk.github.io/flux-backup/guide.html",
+    ),
+    ("issues", "https://github.com/neuralpunk/flux-backup/issues"),
+    ("source", "https://github.com/neuralpunk/flux-backup"),
+    (
+        "changes",
+        "https://github.com/neuralpunk/flux-backup/blob/main/CHANGELOG.md",
+    ),
+];
+
+/// Open one of the project's pages in the web browser.
+#[tauri::command]
+pub async fn open_link(which: String) -> Result<()> {
+    let url = LINKS
+        .iter()
+        .find(|(k, _)| *k == which)
+        .map(|(_, u)| *u)
+        .ok_or_else(|| ApiError::new("error", format!("unknown link {which}")))?;
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| ApiError::new("error", format!("couldn't open {url}: {e}")))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -421,6 +511,39 @@ pub async fn save_recovery_kit(state: St<'_>, id: String, dir: String) -> Result
 #[tauri::command]
 pub async fn new_profile(state: St<'_>, system: Option<bool>) -> Result<Value> {
     route(state, Call::NewProfile, system.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn templates(state: St<'_>, system: Option<bool>) -> Result<Value> {
+    route(state, Call::Templates, system.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn new_from_template(
+    state: St<'_>,
+    template: String,
+    system: Option<bool>,
+) -> Result<Value> {
+    route(
+        state,
+        Call::NewFromTemplate { template },
+        system.unwrap_or(false),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_template(
+    state: St<'_>,
+    template: String,
+    system: Option<bool>,
+) -> Result<Value> {
+    route(
+        state,
+        Call::DeleteTemplate { template },
+        system.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]

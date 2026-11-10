@@ -9,10 +9,27 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 0.3. See the [changelog](CHANGELOG.md) for what's new. Read the [user guide](docs/USER_GUIDE.md) to get
-> started, and the [threat model](docs/THREAT_MODEL.md) for what Flux protects against.
-> [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md) show how it was built. As with
-> any new backup tool, keep another copy of anything precious until you trust it.
+> **Status:** 1.0. See the [changelog](CHANGELOG.md) for what's new. Read the
+> [user guide](docs/USER_GUIDE.md) to get started, the [threat model](docs/THREAT_MODEL.md)
+> for what Flux protects against, and [FORMATS.md](docs/FORMATS.md) for how your backups
+> are stored (frozen for 1.x). [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md)
+> show how it was built.
+
+### What 1.0 adds
+
+- **Recover anywhere.** On a new computer, *Recover an existing backup* finds your
+  backups on a drive or server and sets them up again. Without Flux at all,
+  `flux-vault-recover` (kept next to each Vault on a drive) lists, restores and checks
+  them. Snapshots can be exported as `.tar.zst` or `.zip` with checksums.
+- **More than one copy.** A backup can go to several places, some kept elsewhere, each
+  stored its own way, or copied from the first.
+- **Know it works.** Restore tests on a schedule, a recovery-readiness checklist, and a
+  warning (with the snapshot before kept safe) when a backup looks like ransomware's work.
+- **Told where you are.** Webhooks to ntfy, Gotify, chats or healthchecks-style monitors.
+- **Easier to set up.** Templates, a rule tester that says why a file is or isn't backed
+  up, network rules, a calendar of snapshots, and where each backup's space and time go.
+- **Stronger Vaults.** Password hashing levels, an optional unlock file, hidden sizes,
+  and sparse files kept sparse.
 
 ## Install
 
@@ -25,7 +42,7 @@ build from source, see [Building](#building).
 | | **Mirror** | **Vault** |
 |---|---|---|
 | Format | Plain folders, unchanged files hard-linked | Deduplicated chunk repository |
-| Browse without Flux | Yes, with any file manager | Via Flux or `flux mount` |
+| Browse without Flux | Yes, with any file manager | Via `flux mount`, or `flux-vault-recover` (no Flux needed) |
 | Dedup | Per unchanged file | Across files and snapshots |
 | Compression / encryption | — / use an encrypted disk | zstd / XChaCha20-Poly1305 |
 | Targets | Local drives, SSH (server needs rsync) | Local drives, SSH/SFTP |
@@ -70,6 +87,9 @@ the other engines. See the
 | ![All backups, with the one that needs attention explained](docs/screenshots/health-dark.png) | ![Preferences with schedules paused](docs/screenshots/preferences-dark.png) |
 | **Export to other tools** | **Size estimate** |
 | ![Export dialog](docs/screenshots/export-dark.png) | ![New backup, step one, with a size estimate](docs/screenshots/new-dark.png) |
+| ![Recovering an existing backup on a new computer](docs/screenshots/recover-dark.png) | ![Templates for a new backup](docs/screenshots/templates-dark.png) |
+| ![What's backed up, and the rule that leaves node_modules out](docs/screenshots/rules-dark.png) | ![The snapshot calendar](docs/screenshots/calendar-dark.png) |
+| ![Storage and recovery readiness](docs/screenshots/storage-dark.png) | ![Exporting a snapshot as an archive](docs/screenshots/archive-dark.png) |
 
 The app (Tauri 2, Svelte 5, Tailwind 4, and the GNOME-style "At home on the desktop" design
 in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
@@ -152,6 +172,10 @@ flux find home report             # search every snapshot (part of a name; or '*
 flux history home ~/thesis.tex    # every version of a file, and where to restore it from
 flux prune home --dry-run         # what retention would remove, and why each one is kept
 flux name home latest before-upgrade && flux pin home before-upgrade
+flux note home latest "Before the upgrade" && flux tag home latest upgrade   # labels only
+flux snapshots home --tag upgrade
+flux profile destination add home usb --target /run/media/$USER/STICK --engine vault   # a second place
+flux snapshots home+usb                                     # browse that place
 flux log home                     # recent runs; `--run last` shows one run's events
 flux mount home ~/snapshots       # every snapshot as a read-only folder (any engine)
 flux recovery home                # compatibility mode: how to use the backups without Flux
@@ -173,13 +197,19 @@ flux key list docs                # passwords (key slots) that open the Vault
 flux key add docs                 # add another password; `key passwd` changes it
 flux key store docs               # save the password in the keyring (for scheduled backups)
 flux prune docs                   # apply retention and reclaim space
+flux key strengthen docs --level strong   # hash the password harder (instant; no data rewritten)
+flux key unlock-file docs create /run/media/$USER/STICK/docs.flux-unlock   # password + file
+flux unlock docs                  # clear a lock left by a job that died (no password needed)
+flux vault upgrade docs           # move a Vault made before 1.0 to format 2 (keeps holes)
 ```
 
 All Vault profiles on a target share one repository (`<target>/flux-vault`), so identical
 files deduplicate across profiles and machines. Everything stored (contents, file names,
 metadata) is encrypted with XChaCha20-Poly1305 under a key protected by Argon2id. Chunk
 ids are keyed, so they don't reveal content. The format and threat model are documented in
-[docs/VAULT_FORMAT.md](docs/VAULT_FORMAT.md).
+[docs/VAULT_FORMAT.md](docs/VAULT_FORMAT.md); every format Flux writes (Mirror, snapshots,
+profiles, the compatibility modes) is in [docs/FORMATS.md](docs/FORMATS.md), frozen for
+1.x.
 
 Password sources, set with `[vault] password_source`:
 - `{ from = "keyring" }` (default): the desktop keyring;
@@ -220,8 +250,9 @@ SFTP session of a run. Scheduled runs use `BatchMode`, so they never hang on a p
 `target.bandwidth_limit` caps upload speed.
 
 * **Vault** needs only SFTP on the server. Flux's own pipelined SFTP client keeps many
-  requests in flight, so latency costs little. Remote locks are lock files that expire
-  if a job dies.
+  requests in flight, so latency costs little. Locks are lock files the same on a local
+  disk and over SFTP, so a Vault on a NAS used both ways has one lock; they expire if a
+  job dies, and `flux unlock` clears them at once.
 * **Mirror** needs `rsync` on the server. Flux scans and compares locally, then hands
   rsync the exact file list with `--link-dest`, so unchanged files are hard-linked on the
   server as they are locally. Manifests are cached locally, so browsing and diffing don't
@@ -379,18 +410,21 @@ snapshots were checked byte-for-byte against the source and against rsync's outp
 
 ## Building
 
-Requires Rust 1.91+. The desktop app also needs Node.js 20+ and the WebKitGTK 4.1
-development packages (Fedora: `webkit2gtk4.1-devel libsoup3-devel`; Debian/Ubuntu:
-`libwebkit2gtk-4.1-dev libsoup-3.0-dev`).
+Requires Rust 1.99+. The desktop app also needs Node.js 26 (LTS; `app/.nvmrc` says so for
+nvm and fnm) and the WebKitGTK 4.1 development packages (Fedora: `webkit2gtk4.1-devel
+libsoup3-devel`; Debian/Ubuntu: `libwebkit2gtk-4.1-dev libsoup-3.0-dev`). Node only builds
+the app's interface; nothing in the installed app runs on it.
 
 ```sh
 cargo build --release      # CLI at target/release/flux (the GUI is not a default member)
 cargo test                 # everything except the GUI
-cd app && npm install && npm run tauri build    # app + .deb + .rpm + AppImage
+cd app && npm ci && npm run tauri build         # app + .deb + .rpm + AppImage
 ```
 
-`npm run tauri build` first runs `packaging/prepare-dist.sh`, which builds `flux` and
-`flux-helper` and generates man pages and completions into `target/dist/`. The packages then
+`npm run tauri build` first runs `packaging/prepare-dist.sh`, which builds `flux`,
+`flux-helper` and `flux-vault-recover` (statically linked when the musl target is installed:
+`rustup target add x86_64-unknown-linux-musl`) and generates man pages and completions into
+`target/dist/`. The packages then
 include all of it, plus the polkit policy, the `.desktop` file and AppStream metadata
 (`packaging/`). To install without packages, run `packaging/prepare-dist.sh`, then
 `sudo PREFIX=/usr packaging/install.sh` (`DESTDIR` is honoured). Tagging `v*` builds the
@@ -400,8 +434,9 @@ The app ID is `io.github.neuralpunk.FluxBackup`. The desktop file is still `flux
 because Tauri names it after `productName`, which also names the packages. A Flatpak manifest
 should rename it to the app ID with `rename-desktop-file` (and the icon with `rename-icon`).
 
-`flux completions <bash|zsh|fish>` prints a completion script; `man flux-restore` and
-friends document every command.
+`flux completions <bash|zsh|fish>` prints a completion script. Every command has a man page:
+`man flux`, `man flux-restore` and so on, installed by the packages (74 pages) and by
+`install.sh`.
 
 ## License
 

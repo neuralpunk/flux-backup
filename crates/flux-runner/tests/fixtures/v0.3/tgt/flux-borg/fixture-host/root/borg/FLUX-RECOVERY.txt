@@ -1,0 +1,153 @@
+FLUX BACKUP — RECOVERY GUIDE (Borg compatibility mode)
+=============================================================
+
+These are backups of “borg”, made by Flux Backup in Borg compatibility mode.
+They're stored in a standard Borg repository, written by borg itself. You don't
+need Flux to get your files back or to keep making backups: borg is enough.
+
+  Profile:     borg (borg)
+  Computer:    fixture-host, user root
+  Repository:  /srv/tgt/flux-borg/fixture-host/root/borg/repo
+  Encryption:  repokey-blake2        Compression: zstd,3
+  Written by Flux Backup 0.3.0 with Borg 1.4.5
+  Backed up:
+  /srv/src
+
+Never used Borg? Read IN SHORT and NEW TO BORG, then use the commands below as
+they are. Know Borg well? Skip to FOR BORG USERS at the end.
+
+IN SHORT
+--------
+  Your files are inside the repository folder above, in Borg's own format
+  (compressed, deduplicated and encrypted), so you can't open them there directly. To get them back you
+  need the program borg and your passphrase, then:
+    1. open a terminal and paste the lines under SET UP,
+    2. type   borg list                    to see your backups (archives),
+    3. mount them like a folder (BROWSE) or extract what you need (RESTORE).
+
+NEW TO BORG
+-----------
+  borg is a free backup program in every Linux distribution. Check that it's
+  installed by typing  borg --version ; if it isn't, install the “borgbackup”
+  package (sudo apt install borgbackup, sudo dnf install borgbackup,
+  sudo pacman -S borg).
+
+  * A repository is the folder that holds all your backups.
+  * Each backup is an “archive”, named after the date and time it was made.
+    In commands, ::NAME means “archive NAME in the repository”.
+  * borg extract writes files into the folder you're in, under their full path
+    (home/me/...), so cd to the right place first.
+  * --dry-run --list shows what would happen without changing anything.
+
+  Each command below is one line: copy the whole line into a terminal and press
+  Enter.
+
+SET UP (once per terminal window)
+-------------------------------
+  export BORG_REPO=/srv/tgt/flux-borg/fixture-host/root/borg/repo
+  export BORG_PASSCOMMAND='secret-tool lookup service flux-backup profile borg'
+
+  The passphrase is the one you chose in Flux. Flux keeps it in your desktop
+  keyring; the BORG_PASSCOMMAND line above lets borg read it from there
+  (secret-tool, from libsecret). Without it, leave that line out and borg
+  asks you to type the passphrase. Show it with:
+    secret-tool lookup service flux-backup profile borg
+
+LIST THE BACKUPS
+----------------
+  borg list                              every archive
+  borg list --last 1 --short             the newest one's name
+  borg list ::2026-11-09_10-31-35     the files in one archive
+
+BROWSE
+------
+  mkdir -p ~/flux-backups && borg mount :: ~/flux-backups
+  Every archive shows up as a folder; copy what you need with any file manager.
+  When you're done:  borg umount ~/flux-backups
+  (Mounting needs borg's FUSE support, e.g. the python3-llfuse or python3-pyfuse3
+  package. If it's missing, extract instead.)
+
+RESTORE ONE FILE
+----------------
+  mkdir -p ~/restored && cd ~/restored && borg extract ::2026-11-09_10-31-35 srv/src/path/to/file
+  The file is now in ~/restored/srv/src/path/to/file; copy it wherever you like.
+
+RESTORE A FOLDER (to where it was)
+----------------------------------
+  cd / && borg extract --dry-run --list ::2026-11-09_10-31-35 srv/src
+  cd / && borg extract ::2026-11-09_10-31-35 srv/src
+  borg replaces files that differ and doesn't delete anything else. To keep your
+  current versions, restore into another folder instead (as above) and compare.
+
+RESTORE EVERYTHING (every backed-up path to where it was)
+--------------------------------------------------------
+  cd / && sudo --preserve-env=BORG_REPO,BORG_RSH borg extract --list ::2026-11-09_10-31-35
+  sudo is needed for other users' files and file owners; borg asks for the
+  passphrase.
+
+  To use the newest archive whatever its name:
+    A=$(borg list --last 1 --short) && borg list "::$A"
+
+KEEP A COPY OF THE KEY
+----------------------
+  The encryption key is stored inside the repository, locked by your passphrase.
+  If the repository's key were ever damaged, nothing could be decrypted, so keep a
+  copy somewhere else (it's useless without the passphrase):
+    borg key export :: ~/flux-borg-key-borg.txt
+    borg key export --paper :: > ~/flux-borg-key-borg-paper.txt    (to print)
+
+MAKE A NEW BACKUP WITHOUT FLUX
+------------------------------
+  sh /srv/tgt/flux-borg/fixture-host/root/borg/flux-backup.sh            (or add --dry-run to only show what would change)
+  It runs the same borg create as Flux, with the same exclusions, and names the
+  archive after the date and time. It needs nothing but borg.
+
+WHAT IS LEFT OUT
+----------------
+  Exclusions from the profile:
+  (none)
+  Also left out: folders with a CACHEDIR.TAG (--exclude-caches).
+
+DELETE OLD BACKUPS
+------------------
+  borg delete ::2025-01-31_18-00-00      one archive
+  borg compact                           then free the space
+  Or let borg choose, with rules like Flux's for this profile:
+    borg prune --list --dry-run --keep-last 1 --keep-within 1d --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 5
+    borg prune --list --keep-last 1 --keep-within 1d --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --keep-yearly 5 && borg compact
+  borg prune doesn't know Flux's pinned and named snapshots; check with --dry-run.
+
+CHECK THE BACKUPS
+-----------------
+  borg check                             structure (quick)
+  borg check --verify-data               read and verify every byte (slow)
+
+THE FILES HERE (/srv/tgt/flux-borg/fixture-host/root/borg)
+------------------------
+  FLUX-RECOVERY.txt   this guide (Flux rewrites it after every backup)
+  flux-backup.sh       the backup, with borg only
+  flux-patterns.txt    the exclusion patterns, in borg's syntax
+  repo/                the Borg repository
+
+FOR BORG USERS
+--------------
+  Standard Borg 1.x repository: borg init --encryption=repokey-blake2 --make-parent-dirs.
+  One archive per backup (also when nothing changed), named %Y-%m-%d_%H-%M-%S in
+  local time (_2 within one second). Flux's backup command (it adds --json --progress --list
+  --filter=AME --log-json and a --comment to follow the run):
+
+  borg create --stats --compression=zstd,3 --exclude-caches --patterns-from=/srv/tgt/flux-borg/fixture-host/root/borg/flux-patterns.txt '::{now:%Y-%m-%d_%H-%M-%S}' /srv/src
+
+  * Patterns: flux-patterns.txt, "P sh", first match wins. The profile's gitignore
+    patterns are reversed; exclusions use "!" (don't recurse) because gitignore
+    never looks inside excluded folders; name patterns become **/name; borg can't
+    tell folders from files, so a trailing / is dropped.
+  * Archive comments hold Flux's notes as JSON: {"flux":1,"name":"…","pinned":true}
+    (set with borg recreate --comment). Archives without it are listed by Flux too.
+  * Flux runs borg with BORG_RELOCATED_REPO_ACCESS_IS_OK=yes,
+    BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes, BORG_PASSPHRASE from its own
+    password source, and BORG_RSH for ssh options. Your ~/.config/borg and
+    ~/.cache/borg are shared with Flux.
+  * Restores from Flux extract into a temporary folder, then go through Flux's own
+    restore (identical files skipped, differing ones kept aside); borg extract is
+    the equivalent. Retention: Flux's policy, applied with borg delete + compact.

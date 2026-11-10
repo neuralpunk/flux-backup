@@ -88,6 +88,7 @@ impl Env {
                 dry_run: false,
                 never: vec![self.root.clone()],
                 cache_dir: Some(self._tmp.path().join("cache")),
+                keep: Vec::new(),
             },
             &Progress::new(),
             &silent,
@@ -283,6 +284,24 @@ fn small_edit_in_large_file_stores_little() {
     assert!(fs::read(out.join("src/big.bin")).unwrap() == big);
 }
 
+/// An encrypted Vault never gets an empty password: not when made, not as another key.
+#[test]
+fn an_empty_password_is_refused() {
+    let e = env();
+    let made = VaultRepo::init(
+        Box::new(LocalBackend::new(&e.root)),
+        Some(""),
+        KdfParams::TESTING,
+    );
+    assert!(matches!(made, Err(VaultError::EmptyPassword)));
+    assert!(!e.root.join("config").exists(), "nothing was created");
+    let repo = e.init(Some(PW));
+    assert!(matches!(
+        repo.add_key("", "empty"),
+        Err(VaultError::EmptyPassword)
+    ));
+}
+
 #[test]
 fn passwords_and_key_slots() {
     let e = env();
@@ -398,6 +417,54 @@ fn prune_reclaims_space_and_keeps_the_rest_intact() {
     assert!(fs::read(out.join("src/keep.bin")).unwrap() == noise(2 << 20, 10));
 }
 
+/// A snapshot whose record can't be read is not a snapshot that doesn't exist: pruning
+/// and deleting must not take its data for unused.
+#[test]
+fn gc_refuses_while_a_snapshot_record_is_unreadable() {
+    let e = env();
+    write(&e.src.join("a.bin"), &noise(1 << 20, 30));
+    let repo = e.init(Some(PW));
+    let s1 = e.snap(&repo);
+    fs::remove_file(e.src.join("a.bin")).unwrap();
+    write(&e.src.join("b.bin"), &noise(1 << 20, 31));
+    let s2 = e.snap(&repo);
+
+    // The first record becomes unreadable (as a failing read would leave it for gc).
+    let rec = e.root.join("snapshots").join(&s1.id);
+    let good = fs::read(&rec).unwrap();
+    fs::write(&rec, b"not a record").unwrap();
+    let packs = || fs::read_dir(e.root.join("data")).unwrap().count();
+    let before = all_repo_bytes(&e.root).len();
+    let n = packs();
+
+    let err = gc::delete(&repo, &[&s2.id], &silent).unwrap_err();
+    assert!(
+        matches!(err, flux_vault::VaultError::UnreadableSnapshot(..)),
+        "{err}"
+    );
+    assert_eq!(packs(), n, "no pack was deleted");
+    let report = check::check(&repo, false, &Progress::new(), &silent).unwrap();
+    assert!(
+        report.errors.iter().any(|m| m.contains(&s1.id)),
+        "{report:?}"
+    );
+
+    // Readable again: its data is all there, and gc only frees what the deleted one used.
+    fs::write(&rec, &good).unwrap();
+    let r = gc::delete(&repo, &[], &silent).unwrap();
+    assert!(r.bytes_freed > 0);
+    assert!(all_repo_bytes(&e.root).len() < before);
+    let out = e._tmp.path().join("r");
+    e.restore_to(&repo, &s1, &out);
+    assert!(fs::read(out.join("src/a.bin")).unwrap() == noise(1 << 20, 30));
+
+    // A record that stays damaged can be deleted by its id, and gc works again.
+    fs::write(&rec, b"not a record").unwrap();
+    assert!(repo.is_damaged_record(&s1.id));
+    gc::delete(&repo, &[&s1.id], &silent).unwrap();
+    assert!(repo.snapshots(&e.owner).unwrap().is_empty());
+}
+
 #[test]
 fn orphan_packs_from_interrupted_backup_are_collected() {
     let e = env();
@@ -458,6 +525,7 @@ fn unencrypted_vault_and_shared_dedup_between_owners() {
             dry_run: false,
             never: vec![],
             cache_dir: None,
+            keep: Vec::new(),
         },
         &Progress::new(),
         &silent,
@@ -510,6 +578,7 @@ fn deleting_snapshots_frees_their_data() {
             dry_run: false,
             never: vec![e.root.clone()],
             cache_dir: None,
+            keep: Vec::new(),
         },
         &Progress::new(),
         &silent,
@@ -671,4 +740,385 @@ fn cached_file_list_matches_the_repository() {
     let out = e._tmp.path().join("r");
     e.restore_to(&repo, &s3, &out);
     assert_eq!(fs::read(out.join("src/docs/newer.txt")).unwrap(), b"newer");
+}
+
+/// A 48 MiB disk image with 12 KiB of data in three places (a hole at the start, between
+/// and at the end). `None` when this filesystem doesn't make sparse files.
+fn sparse_file(path: &Path, marker: u8) -> Option<()> {
+    use std::os::unix::fs::FileExt;
+    let f = fs::File::create(path).unwrap();
+    f.set_len(48 << 20).unwrap();
+    f.write_all_at(&[marker; 4096], 1 << 20).unwrap();
+    f.write_all_at(&noise(4096, u64::from(marker)), 20 << 20)
+        .unwrap();
+    f.write_all_at(&[marker ^ 0xff; 4096], 40 << 20).unwrap();
+    drop(f);
+    flux_fs::fsops::is_sparse(&fs::metadata(path).unwrap()).then_some(())
+}
+
+fn allocated(path: &Path) -> u64 {
+    fs::metadata(path).unwrap().blocks() * 512
+}
+
+/// The Vault config as an older Flux wrote it: format 1.
+fn make_format_1(root: &Path) {
+    let path = root.join("config");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["format"] = 1.into();
+    fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+}
+
+fn record_json(root: &Path, repo: &VaultRepo, id: &str) -> serde_json::Value {
+    let sealed = fs::read(root.join("snapshots").join(id)).unwrap();
+    let plain = repo.crypto.open(&sealed).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+#[test]
+fn sparse_files_keep_their_holes() {
+    let e = env();
+    if sparse_file(&e.src.join("disk.img"), 1).is_none() {
+        eprintln!("this filesystem doesn't make sparse files; skipping");
+        return;
+    }
+    write(&e.src.join("plain.txt"), b"dense");
+    let repo = e.init(Some(PW));
+    assert_eq!(repo.tree_format(), 2, "new Vaults are format 2");
+    let s = e.snap(&repo);
+    assert_eq!(s.format, 2);
+    assert_eq!(record_json(&e.root, &repo, &s.id)["tree_format"], 2);
+    // Only the data was read; the file's full length is recorded.
+    assert!(
+        s.stats.copied_bytes < 1 << 20,
+        "read {}",
+        s.stats.copied_bytes
+    );
+    let listed = flux_vault::entries_of(&repo, &s.id).unwrap();
+    let img = listed
+        .iter()
+        .find(|x| x.path.ends_with(b"disk.img"))
+        .unwrap();
+    assert_eq!(img.size, 48 << 20);
+
+    let out = e._tmp.path().join("restored");
+    let r = e.restore_to(&repo, &s, &out);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_same_tree(&e.src, &out.join("src"));
+    let restored = out.join("src/disk.img");
+    assert_eq!(fs::metadata(&restored).unwrap().len(), 48 << 20);
+    assert!(
+        allocated(&restored) < 4 << 20,
+        "restored sparse: {} bytes allocated",
+        allocated(&restored)
+    );
+
+    // Unchanged on the next run (its content, holes and all, comes from the parent).
+    assert!(matches!(e.backup(&repo), BackupOutcome::Unchanged { .. }));
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+#[test]
+fn format_1_vaults_stay_format_1_until_upgraded() {
+    let e = env();
+    if sparse_file(&e.src.join("disk.img"), 1).is_none() {
+        eprintln!("this filesystem doesn't make sparse files; skipping");
+        return;
+    }
+    let repo = e.init(Some(PW));
+    drop(repo);
+    make_format_1(&e.root);
+
+    // An older Vault: written densely, in format 1, as Flux 0.3 would.
+    let repo = e.open();
+    assert_eq!(repo.tree_format(), 1);
+    let old = e.snap(&repo);
+    assert_eq!(old.format, 1);
+    assert!(
+        record_json(&e.root, &repo, &old.id)
+            .get("tree_format")
+            .is_none(),
+        "format 1 records look as they always did"
+    );
+    assert_eq!(old.stats.copied_bytes, 48 << 20, "read densely");
+    let out = e._tmp.path().join("old");
+    e.restore_to(&repo, &old, &out);
+    assert_same_tree(&e.src, &out.join("src"));
+
+    // Upgraded: a new snapshot of a changed image keeps holes, the old one still reads.
+    drop(repo);
+    let backend = LocalBackend::new(&e.root);
+    let u = VaultRepo::upgrade_format(&backend).unwrap();
+    assert_eq!((u.from, u.to), (1, 2));
+    assert_eq!(
+        VaultRepo::upgrade_format(&backend).unwrap().from,
+        2,
+        "once only"
+    );
+    let repo = e.open();
+    assert_eq!(repo.tree_format(), 2);
+    fs::remove_file(e.src.join("disk.img")).unwrap();
+    sparse_file(&e.src.join("disk.img"), 9).unwrap();
+    let new = e.snap(&repo);
+    assert_eq!(record_json(&e.root, &repo, &new.id)["tree_format"], 2);
+    assert!(new.stats.copied_bytes < 1 << 20);
+
+    let out_new = e._tmp.path().join("new");
+    e.restore_to(&repo, &new, &out_new);
+    assert_same_tree(&e.src, &out_new.join("src"));
+    assert!(allocated(&out_new.join("src/disk.img")) < 4 << 20);
+    let out_old = e._tmp.path().join("old-again");
+    e.restore_to(&repo, &old, &out_old);
+    assert_eq!(
+        fs::read(out_old.join("src/disk.img")).unwrap(),
+        fs::read(out.join("src/disk.img")).unwrap(),
+        "the format 1 snapshot is still read as before"
+    );
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+
+    // Pruning walks both formats' trees: deleting the old snapshot keeps the new intact.
+    gc::delete(&repo, &[old.id.as_str()], &silent).unwrap();
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+#[test]
+fn a_newer_format_is_refused_in_words() {
+    let e = env();
+    drop(e.init(Some(PW)));
+    let path = e.root.join("config");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["format"] = 99.into();
+    fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    let err = VaultRepo::open(Box::new(LocalBackend::new(&e.root)), Some(PW))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("newer than this Flux supports"), "{err}");
+    assert!(VaultRepo::upgrade_format(&LocalBackend::new(&e.root)).is_err());
+}
+
+#[test]
+fn a_locked_vault_says_who_holds_it() {
+    let e = env();
+    let repo = e.init(Some(PW));
+    let held = repo.lock(true).unwrap();
+    let other = e.open();
+    let err = other.lock(false).err().unwrap().to_string();
+    assert!(err.contains("another Flux job is using the Vault"), "{err}");
+    assert!(
+        err.contains(&format!("process {}", std::process::id())),
+        "{err}"
+    );
+    assert!(err.contains("flux unlock"), "{err}");
+    // Its own live lock isn't stale, so clearing without force leaves it.
+    assert!(other.clear_locks(false).unwrap().is_empty());
+    drop(held);
+    assert!(other.lock(true).is_ok());
+}
+
+/// "Hide file sizes": every pack is padded to its Padmé length, and everything still
+/// restores and checks.
+#[test]
+fn padded_packs_hide_sizes() {
+    let e = env();
+    write(&e.src.join("small.txt"), b"a short secret");
+    write(&e.src.join("big.bin"), &noise(3 << 20, 5));
+    let mut repo = e.init(Some(PW));
+    repo.pad_packs = true;
+    let s = e.snap(&repo);
+    let packs: Vec<PathBuf> = fs::read_dir(e.root.join("data"))
+        .unwrap()
+        .flat_map(|d| {
+            fs::read_dir(d.unwrap().path())
+                .unwrap()
+                .map(|f| f.unwrap().path())
+        })
+        .collect();
+    assert!(!packs.is_empty());
+    for p in &packs {
+        let len = fs::metadata(p).unwrap().len();
+        assert_eq!(
+            flux_vault::pack::padme(len),
+            len,
+            "{} is padded",
+            p.display()
+        );
+    }
+    let out = e._tmp.path().join("restored");
+    let r = e.restore_to(&repo, &s, &out);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_same_tree(&e.src, &out.join("src"));
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+    // A reader that knows nothing of padding (a fresh open) reads it too.
+    drop(repo);
+    let repo = e.open();
+    let report = check::check(&repo, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+/// A source whose drive isn't connected (`keep`): the Vault snapshot keeps its files from
+/// the previous one without reading anything, and nothing counts as deleted.
+#[test]
+fn missing_drive_keeps_its_files() {
+    let mut e = env();
+    let photos = e._tmp.path().join("photos");
+    fs::create_dir_all(&photos).unwrap();
+    write(&photos.join("a.jpg"), &noise(100_000, 9));
+    write(&e.src.join("notes.txt"), b"v1");
+    e.profile.sources.paths = vec![e.src.clone(), photos.clone()];
+    let repo = e.init(Some(PW));
+    let first = e.snap(&repo);
+
+    write(&e.src.join("notes.txt"), b"v2 changed");
+    fs::remove_dir_all(&photos).unwrap(); // gone, as an unplugged drive's folder is
+    let mut reduced = e.profile.clone();
+    reduced.sources.paths = vec![e.src.clone()];
+    let out = backup(
+        &repo,
+        &BackupRequest {
+            owner: &e.owner,
+            profile: &reduced,
+            name: None,
+            dry_run: false,
+            never: vec![e.root.clone()],
+            cache_dir: Some(e._tmp.path().join("cache")),
+            keep: vec![photos.clone()],
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    let BackupOutcome::Created {
+        snapshot: second, ..
+    } = out
+    else {
+        panic!("expected a snapshot")
+    };
+    assert_eq!(second.stats.deleted, 0);
+    assert!(
+        second.stats.copied_bytes < 100,
+        "the photo wasn't read: {}",
+        second.stats.copied_bytes
+    );
+    assert_eq!(
+        second.sources_missing[0].kept_from.as_deref(),
+        Some(first.id.as_str())
+    );
+    let listed = flux_vault::entries_of(&repo, &second.id).unwrap();
+    assert!(listed.iter().any(|x| x.path.ends_with(b"photos/a.jpg")));
+
+    // Restoring the kept file gives the photo back.
+    let out = e._tmp.path().join("restored");
+    let source = VaultSource::new(&repo, &second.id).unwrap();
+    let r = restore(
+        &source,
+        &RestoreRequest {
+            snapshot: &second,
+            paths: vec![photos.clone()],
+            to: Some(out.clone()),
+            keep_existing: true,
+            dry_run: false,
+            xattrs: XattrPolicy {
+                acl: true,
+                other: true,
+            },
+            links: flux_fs::safe::LinkPolicy::for_process(),
+            exact: None,
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(
+        fs::read(out.join("photos/a.jpg")).unwrap(),
+        noise(100_000, 9)
+    );
+}
+
+/// A replica: the same Vault in another place, copied file by file. It opens with the same
+/// password and restores; later runs copy only what's new and remove what was pruned.
+#[test]
+fn replicas_copy_the_vault() {
+    let e = env();
+    write(&e.src.join("a.txt"), b"first");
+    write(&e.src.join("big.bin"), &noise(3 << 20, 4));
+    let repo = e.init(Some(PW));
+    let s1 = e.snap(&repo);
+    let copy_root = e._tmp.path().join("usb/flux-vault");
+    let replica = LocalBackend::new(&copy_root);
+    let r = flux_vault::replicate::replicate(repo.backend(), &replica, &Progress::new()).unwrap();
+    assert!(r.copied_files > 3 && r.snapshots == 1, "{r:?}");
+
+    // The replica is the same Vault: the same password opens it, and it restores.
+    let copy = VaultRepo::open(Box::new(LocalBackend::new(&copy_root)), Some(PW)).unwrap();
+    assert_eq!(copy.config.id, repo.config.id);
+    let out = e._tmp.path().join("from-copy");
+    let source = VaultSource::new(&copy, &s1.id).unwrap();
+    restore(
+        &source,
+        &RestoreRequest {
+            snapshot: &s1,
+            paths: vec![e.src.clone()],
+            to: Some(out.clone()),
+            keep_existing: true,
+            dry_run: false,
+            xattrs: XattrPolicy {
+                acl: true,
+                other: true,
+            },
+            links: flux_fs::safe::LinkPolicy::for_process(),
+            exact: None,
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    assert_same_tree(&e.src, &out.join("src"));
+
+    // Nothing new: nothing copied. A small change: little copied.
+    let again =
+        flux_vault::replicate::replicate(repo.backend(), &replica, &Progress::new()).unwrap();
+    assert_eq!((again.copied_files, again.removed_files), (0, 0));
+    write(&e.src.join("a.txt"), b"second");
+    let s2 = e.snap(&repo);
+    let r = flux_vault::replicate::replicate(repo.backend(), &replica, &Progress::new()).unwrap();
+    assert!(r.copied_bytes < 1 << 20, "only the change: {r:?}");
+    assert_eq!(r.snapshots, 2);
+
+    // A note changes a snapshot record: copied. Deleting a snapshot at the source: gone
+    // from the replica too, and it still checks out.
+    let mut rec = repo.read_record(&s2.id).unwrap();
+    rec.meta.note = Some("noted".into());
+    repo.write_record(&rec).unwrap();
+    gc::delete(&repo, &[s1.id.as_str()], &silent).unwrap();
+    let r = flux_vault::replicate::replicate(repo.backend(), &replica, &Progress::new()).unwrap();
+    assert!(r.removed_files > 0 && r.snapshots == 1, "{r:?}");
+    let copy = VaultRepo::open(Box::new(LocalBackend::new(&copy_root)), Some(PW)).unwrap();
+    assert_eq!(
+        copy.read_record(&s2.id).unwrap().meta.note.as_deref(),
+        Some("noted")
+    );
+    let report = check::check(&copy, true, &Progress::new(), &silent).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+
+    // Another Vault already there is never overwritten.
+    let other = e._tmp.path().join("other/flux-vault");
+    VaultRepo::init(
+        Box::new(LocalBackend::new(&other)),
+        Some(PW),
+        KdfParams::TESTING,
+    )
+    .unwrap();
+    let err = flux_vault::replicate::replicate(
+        repo.backend(),
+        &LocalBackend::new(&other),
+        &Progress::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("another Vault is already at"), "{err}");
 }

@@ -6,6 +6,7 @@ mod mount_cmd;
 mod output;
 mod profile_cmd;
 mod recovery_cmd;
+mod restore_test_cmd;
 mod schedule_cmd;
 mod ssh_cmd;
 mod target_spec;
@@ -56,6 +57,11 @@ enum Command {
     Ls(backup_cmd::LsArgs),
     /// Restore files or folders from a snapshot.
     Restore(backup_cmd::RestoreArgs),
+    /// Is a file or folder backed up, and which rule decides? `--list`: each item of a
+    /// folder, with what's in and out below it.
+    Explain(backup_cmd::ExplainArgs),
+    /// Save files of a snapshot as an archive: .tar.zst (keeps everything) or .zip.
+    Export(backup_cmd::ExportArgs),
     /// Show snapshots as read-only folders (FUSE) until unmounted.
     Mount(mount_cmd::MountArgs),
     /// Show what changed between snapshots, or since a snapshot.
@@ -68,6 +74,12 @@ enum Command {
     Prune(lifecycle_cmd::PruneArgs),
     /// Name a snapshot (named snapshots are kept by default), or remove its name.
     Name(lifecycle_cmd::NameArgs),
+    /// Write a note on a snapshot ("before the upgrade"), or remove it. Notes never
+    /// affect what retention keeps.
+    Note(lifecycle_cmd::NoteArgs),
+    /// Add tags to a snapshot (`taxes`, `release`), remove them, or list them. Tags never
+    /// affect what retention keeps; `flux snapshots --tag` finds snapshots by tag.
+    Tag(lifecycle_cmd::TagArgs),
     /// Keep a snapshot forever, whatever the retention policy says.
     Pin(lifecycle_cmd::PinArgs),
     /// Let retention manage a pinned snapshot again.
@@ -78,15 +90,26 @@ enum Command {
     Log(lifecycle_cmd::LogArgs),
     /// Verify a profile's backups.
     Check(vault_cmd::CheckArgs),
+    /// Restore a sample of the newest snapshot into a temporary folder and check every
+    /// restored file (also run after backups, as `[restore_test]` says).
+    RestoreTest(restore_test_cmd::RestoreTestArgs),
     /// Print diagnostics for a bug report: versions, tools, the profile (secrets hidden)
     /// and its recent runs.
     Diagnostics { profile: String },
     /// Show the recovery kit of a compatibility-mode profile: how to use its backups
     /// without Flux.
     Recovery(recovery_cmd::RecoveryArgs),
+    /// Find the backups on a drive or a server (from another computer, say) and set one up
+    /// here again, with the settings kept with it.
+    Recover(recovery_cmd::RecoverArgs),
     /// Manage the passwords of a Vault.
     #[command(subcommand)]
     Key(vault_cmd::KeyCmd),
+    /// Vault maintenance: move to the newest format.
+    #[command(subcommand)]
+    Vault(vault_cmd::VaultCmd),
+    /// Remove locks a backup job left behind when it died (Vault backups).
+    Unlock(vault_cmd::UnlockArgs),
     /// SSH helpers: test a server, create and install keys.
     #[command(subcommand)]
     Ssh(ssh_cmd::SshCmd),
@@ -159,18 +182,24 @@ fn main() -> ExitCode {
         Command::Info(a) => backup_cmd::run_info(&ctx, a),
         Command::Ls(a) => backup_cmd::run_ls(&ctx, a),
         Command::Restore(a) => backup_cmd::run_restore(&ctx, a),
+        Command::Export(a) => backup_cmd::run_export(&ctx, a),
+        Command::Explain(a) => backup_cmd::run_explain(&ctx, a),
         Command::Mount(a) => mount_cmd::run_mount(&ctx, a),
         Command::Diff(a) => lifecycle_cmd::run_diff(&ctx, a),
         Command::Find(a) => lifecycle_cmd::run_find(&ctx, a),
         Command::History(a) => lifecycle_cmd::run_history(&ctx, a),
         Command::Prune(a) => lifecycle_cmd::run_prune(&ctx, a),
         Command::Name(a) => lifecycle_cmd::run_name(&ctx, a),
+        Command::Note(a) => lifecycle_cmd::run_note(&ctx, a),
+        Command::Tag(a) => lifecycle_cmd::run_tag(&ctx, a),
         Command::Pin(a) => lifecycle_cmd::run_pin(&ctx, a, true),
         Command::Unpin(a) => lifecycle_cmd::run_pin(&ctx, a, false),
         Command::Delete(a) => lifecycle_cmd::run_delete(&ctx, a),
         Command::Log(a) => lifecycle_cmd::run_log(&ctx, a),
         Command::Check(a) => vault_cmd::run_check(&ctx, a),
+        Command::RestoreTest(a) => restore_test_cmd::run(&ctx, a),
         Command::Recovery(a) => recovery_cmd::run(&ctx, a),
+        Command::Recover(a) => recovery_cmd::recover(&ctx, a),
         Command::Diagnostics { profile } => {
             let service = flux_service::Service::new(ctx.paths.clone());
             flux_service::extras::diagnostics_impl(&service, profile)
@@ -181,6 +210,8 @@ fn main() -> ExitCode {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))
         }
         Command::Key(cmd) => vault_cmd::run_key(&ctx, cmd),
+        Command::Vault(cmd) => vault_cmd::run_vault(&ctx, cmd),
+        Command::Unlock(a) => vault_cmd::run_unlock(&ctx, a),
         Command::Ssh(cmd) => ssh_cmd::run_ssh(&ctx, cmd),
         Command::Schedule(cmd) => schedule_cmd::run_schedule(&ctx, cmd),
         Command::Status(a) => schedule_cmd::run_status(&ctx, a),

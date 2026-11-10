@@ -18,6 +18,7 @@ use crate::MirrorError;
 use crate::manifest::{Entry, Kind};
 use crate::plan::{Action, Plan};
 use crate::repo::FileError;
+use flux_core::sync::Locked;
 use flux_fs::fsops::{
     ApplyPolicy, Copier, apply_metadata, apply_metadata_fd, make_special, make_tree_writable,
     remove_force,
@@ -38,6 +39,8 @@ pub struct ExecCtx<'a> {
     pub progress: &'a Progress,
     pub report: Reporter<'a>,
     pub continue_on_errors: bool,
+    /// How source files are opened to be copied.
+    pub opener: &'a flux_fs::fsops::SourceOpener,
 }
 
 #[derive(Debug, Default)]
@@ -79,7 +82,7 @@ impl State<'_> {
             message: fe.message.clone(),
         });
         self.ctx.progress.warnings.fetch_add(1, Relaxed);
-        self.errors.lock().unwrap().push(fe);
+        self.errors.locked().push(fe);
         if !self.ctx.continue_on_errors {
             self.abort.store(true, Relaxed);
         }
@@ -193,7 +196,7 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
         return Err(MirrorError::Cancelled);
     }
     if st.abort.load(Relaxed) {
-        let first = st.errors.lock().unwrap().first().cloned();
+        let first = st.errors.locked().first().cloned();
         return Err(MirrorError::Aborted(
             first
                 .map(|f| format!("{}: {}", f.path, f.message))
@@ -216,7 +219,7 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
 
     Ok(ExecResult {
         failed: st.failed.into_iter().map(AtomicBool::into_inner).collect(),
-        errors: st.errors.into_inner().unwrap(),
+        errors: st.errors.into_value(),
         copied_files: st.copied_files.into_inner(),
         copied_bytes: st.copied_bytes.into_inner(),
         linked_files: st.linked_files.into_inner(),
@@ -292,7 +295,8 @@ fn copy_from_source(st: &State<'_>, e: &Entry, resume: bool) -> io::Result<()> {
         .open(&dst)?;
     let n = {
         let _turn = st.ctx.gate.enter(e.size);
-        st.ctx.copier.copy_to(&src, &output, st.ctx.progress)?
+        let input = st.ctx.opener.open(&src)?;
+        st.ctx.copier.copy_from(input, &output, st.ctx.progress)?
     };
     if n != e.size {
         (st.ctx.report)(Event::Warning {

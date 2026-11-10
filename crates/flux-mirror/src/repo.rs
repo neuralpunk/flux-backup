@@ -264,7 +264,7 @@ impl MirrorRepo {
             .filter(|s| s.id.starts_with(spec) || s.name.as_deref() == Some(spec))
             .collect();
         match matches.len() {
-            1 => Ok(matches.into_iter().next().unwrap()),
+            1 => Ok(matches.into_iter().next().expect("one match")),
             0 => Err(MirrorError::SnapshotNotFound(spec.into())),
             n => Err(MirrorError::Ambiguous(spec.into(), n)),
         }
@@ -305,7 +305,10 @@ pub fn snapshot_manifest(snapshot_dir: &Path) -> PathBuf {
 pub fn read_meta(snapshot_dir: &Path) -> Result<SnapshotMeta, MirrorError> {
     let p = snapshot_dir.join(META);
     let text = fs::read_to_string(&p).map_err(|e| MirrorError::io(&p, e))?;
-    serde_json::from_str(&text).map_err(|e| MirrorError::Corrupt(format!("{}: {e}", p.display())))
+    let meta: SnapshotMeta = serde_json::from_str(&text)
+        .map_err(|e| MirrorError::Corrupt(format!("{}: {e}", p.display())))?;
+    meta.check_format().map_err(MirrorError::Corrupt)?;
+    Ok(meta)
 }
 
 pub fn write_meta(snapshot_dir: &Path, meta: &SnapshotMeta) -> Result<(), MirrorError> {

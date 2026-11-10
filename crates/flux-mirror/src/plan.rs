@@ -45,7 +45,9 @@ where
             loop {
                 let ord = match p.peek() {
                     None => break,
-                    Some(Err(_)) => return Err(p.next().unwrap().unwrap_err()),
+                    Some(Err(_)) => {
+                        return Err(p.next().expect("peeked").expect_err("peeked an error"));
+                    }
                     Some(Ok(pe)) => pe.path.as_slice().cmp(&e.path),
                 };
                 match ord {

@@ -50,6 +50,11 @@ export function protection(p: ProfileSummary, s: BackupStatus | undefined, perce
     };
   }
   if (danger) return { tone: "bad", protected: false, short: shortOf(danger.text, lastGood), detail: withHint(danger) };
+  // Runs, but none that made a backup (the first one was stopped, or skipped): there is
+  // no copy, so it protects nothing, whatever else is fine.
+  if (!lastGood) {
+    return { tone: "warn", protected: false, short: "Not backed up yet", detail: warning ? withHint(warning) : "No backup has finished yet." };
+  }
   if (warning) return { tone: "warn", protected: true, short: `Check · ${lastGood ? ago(lastGood) : "never"}`, detail: withHint(warning) };
   if (r?.status === "completed_with_errors") {
     return { tone: "warn", protected: true, short: `Some files skipped · ${ago(r.finished)}`, detail: "The last backup skipped files it couldn't read; they're listed in Activity." };

@@ -17,11 +17,29 @@
   }
 
   const rows = $derived(app.profiles.map((p) => ({ p, s: protection(p, app.statuses[p.id], percent(p), app.jobs[p.id]?.progress?.phase === "waiting") })));
-  const mine = $derived(rows.filter((r) => r.p.scope !== "system"));
-  const system = $derived(rows.filter((r) => r.p.scope === "system"));
+
+  // Filters: which backups missed runs, failed, aren't verified by a restore test, have a
+  // copy kept elsewhere, or are short of space.
+  type FilterKey = "missed" | "failed" | "unverified" | "offsite" | "low_space";
+  const kinds = (p: ProfileSummary) => app.statuses[p.id]?.health.map((h) => h.kind) ?? [];
+  const filters: { key: FilterKey; label: string; hint: string; test: (p: ProfileSummary) => boolean }[] = [
+    { key: "missed", label: "Missed", hint: "Backups that haven't run when they should have (overdue, or the drive wasn't there)", test: (p) => kinds(p).some((k) => k === "overdue" || k === "unplugged" || k === "source_missing") },
+    { key: "failed", label: "Failed", hint: "The last backup failed, or a place it's copied to did", test: (p) => p.last_run?.status === "failed" || kinds(p).some((k) => k === "failing" || k === "destination_failing") },
+    { key: "unverified", label: "Unverified", hint: "No restore test has passed recently", test: (p) => !!app.statuses[p.id]?.unverified || kinds(p).some((k) => k === "restore_test_failed" || k === "unverified") },
+    { key: "offsite", label: "Offsite", hint: "A copy is kept somewhere else", test: (p) => !!p.offsite || !!p.destinations?.some((d) => d.offsite) },
+    { key: "low_space", label: "Low space", hint: "Little space left where the backups go", test: (p) => kinds(p).includes("low_space") },
+  ];
+  let filter = $state<FilterKey | null>(null);
+  const shown = $derived(filter ? rows.filter((r) => filters.find((f) => f.key === filter)!.test(r.p)) : rows);
+  const mine = $derived(shown.filter((r) => r.p.scope !== "system"));
+  const system = $derived(shown.filter((r) => r.p.scope === "system"));
   const total = $derived(rows.length);
   const safe = $derived(rows.filter((r) => r.s.protected).length);
-  const attention = $derived(rows.filter((r) => r.s.tone === "bad" || r.s.tone === "warn" || r.s.tone === "idle"));
+  // Most serious first: the headline speaks of a failure before a warning.
+  const severity: Record<string, number> = { bad: 0, warn: 1, idle: 2 };
+  const attention = $derived(
+    rows.filter((r) => r.s.tone === "bad" || r.s.tone === "warn" || r.s.tone === "idle").sort((a, b) => severity[a.s.tone]! - severity[b.s.tone]!),
+  );
   const running = $derived(rows.filter((r) => r.p.running));
   const tone = $derived<Tone>(attention.some((r) => r.s.tone === "bad") ? "bad" : attention.length ? "warn" : running.length ? "run" : "ok");
 
@@ -74,6 +92,37 @@
 
 </script>
 
+<style>
+  .chip-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 13px;
+    color: var(--c-fg-2);
+    background: var(--c-surface-3);
+    transition: background-color 120ms, color 120ms;
+  }
+  .chip-filter:hover:not(:disabled) {
+    color: var(--c-fg);
+  }
+  .chip-filter[aria-pressed="true"] {
+    background: color-mix(in oklab, var(--c-primary) 28%, var(--c-surface-3));
+    color: var(--c-fg);
+    font-weight: 500;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c-primary) 55%, transparent);
+  }
+  .chip-filter:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .chip-filter .num {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+  }
+</style>
+
 {#snippet backupRow(p: ProfileSummary, s: Protection)}
   {@const st = app.statuses[p.id]}
   {@const good = lastGood(p, st)}
@@ -97,8 +146,15 @@
       {#if st}<HistoryStrip days={st.days} />{/if}
     </span>
     <span class="hidden min-w-0 text-[12.5px] @min-[760px]:col-start-3 @min-[760px]:row-start-1 @min-[760px]:block @min-[1020px]:col-start-4">
-      <span class="block truncate"><span class="text-fg-muted">Last good copy</span>{" "}<span class="num {s.tone === 'bad' ? 'text-danger' : 'text-fg'}">{good ?? "none yet"}</span></span>
-      <span class="block truncate"><span class="text-fg-muted">Next</span>{" "}<span class="num text-fg">{nextRun(p, st)}</span></span>
+      <!-- The status line already says when, unless the last good copy is older than that. -->
+      {#if !good || !s.short.includes(good)}
+        <span class="block truncate"><span class="text-fg-muted">Last good copy</span>{" "}<span class="num {s.tone === 'bad' ? 'text-danger' : 'text-fg'}">{good ?? "none yet"}</span></span>
+      {/if}
+      {#if p.running}
+        <span class="block truncate text-fg">Backing up now</span>
+      {:else}
+        <span class="block truncate"><span class="text-fg-muted">Next</span>{" "}<span class="num text-fg">{nextRun(p, st)}</span></span>
+      {/if}
     </span>
     <span class="col-start-3 row-start-1 self-center @min-[760px]:col-start-4 @min-[1020px]:col-start-5"><Icon name="chevronRight" size={16} class="text-fg-muted" /></span>
   </button>
@@ -147,14 +203,29 @@
         <h2 class="text-[13px] font-semibold text-fg-2">Your backups</h2>
         <span class="text-[12.5px] text-fg-muted">Last 30 days · taller bars copied more</span>
       </div>
+      {#if rows.length > 1}
+        <div class="mb-2.5 flex flex-wrap gap-1.5" role="group" aria-label="Show only">
+          <button class="chip-filter" aria-pressed={filter === null} onclick={() => (filter = null)}>All <span class="num">{rows.length}</span></button>
+          {#each filters as f (f.key)}
+            {@const n = rows.filter((r) => f.test(r.p)).length}
+            <button class="chip-filter" aria-pressed={filter === f.key} disabled={n === 0 && filter !== f.key} title={f.hint} onclick={() => (filter = filter === f.key ? null : f.key)}>
+              {f.label} <span class="num">{n}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
       <div class="rows">
         {#each mine as r (r.p.id)}
           {@render backupRow(r.p, r.s)}
+        {:else}
+          {#if filter}<p class="row text-[13px] text-fg-muted">None of your backups.</p>{/if}
         {/each}
-        <button class="row row-link text-fg-2" onclick={() => app.newProfile(false)}>
-          <span class="glyph"><Icon name="plus" size={13} /></span>
-          <span class="font-medium">Set up another backup</span>
-        </button>
+        {#if !filter}
+          <button class="row row-link text-fg-2" onclick={() => app.newProfile(false)}>
+            <span class="glyph"><Icon name="plus" size={13} /></span>
+            <span class="font-medium">Set up another backup</span>
+          </button>
+        {/if}
       </div>
     </section>
 

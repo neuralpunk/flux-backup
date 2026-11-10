@@ -1,0 +1,32 @@
+[package]
+name = "flux-vault-recover"
+description = "Read Flux Backup Vaults without Flux: list, restore and verify snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# A second, independent reader of the Vault format: it shares no code with flux-vault
+# (its tests check the two agree), has no configuration, and few dependencies, so it
+# builds as a static binary that runs on any Linux.
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+serde_bytes.workspace = true
+postcard.workspace = true
+blake3.workspace = true
+chacha20poly1305 = "0.11"
+argon2 = "0.6"
+base64 = "0.23"
+hex = "0.4"
+ruzstd = "0.9"
+
+[dev-dependencies]
+flux-core.workspace = true
+flux-fs.workspace = true
+flux-runner.workspace = true
+flux-vault.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

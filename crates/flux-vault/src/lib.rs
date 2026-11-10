@@ -7,6 +7,8 @@
 //! * [`check::check`]: verify structure and (optionally) every byte
 //! * [`gc::prune`]: apply retention and reclaim space
 
+#![deny(clippy::unwrap_used)]
+
 pub mod backend;
 pub mod backup;
 pub mod check;
@@ -14,6 +16,7 @@ pub mod crypto;
 pub mod format;
 pub mod gc;
 pub mod pack;
+pub mod replicate;
 pub mod repo;
 
 use std::io;
@@ -46,24 +49,51 @@ pub enum VaultError {
     PasswordRequired,
     #[error("wrong password (no key of this Vault opens with it)")]
     WrongPassword,
+    #[error("this Vault's password works only together with its unlock file, which wasn't found")]
+    UnlockFileNeeded,
     #[error("this Vault is not encrypted; it has no passwords")]
     NotEncrypted,
+    #[error("an empty password protects nothing; choose one")]
+    EmptyPassword,
     #[error("no key {0:?} in this Vault")]
     NoSuchKey(String),
     #[error("refusing to remove the last key: the Vault would become unreadable")]
     LastKey,
-    #[error("another Flux job is using the Vault at {0}")]
-    Locked(String),
+    #[error("another Flux job is using the Vault at {place}{}", held(held_by))]
+    Locked {
+        place: String,
+        /// Who holds it, when their lock file says ("alice@laptop, process 42, since …").
+        held_by: Vec<String>,
+    },
     #[error("Vault is damaged: {0}")]
     Corrupt(String),
     #[error("snapshot {0:?} not found")]
     SnapshotNotFound(String),
+    #[error(
+        "snapshot {0} can't be read ({1}), so nothing was deleted: its data would be taken for unused. Try again; if it stays unreadable, delete that snapshot first"
+    )]
+    UnreadableSnapshot(String, String),
     #[error("{0:?} matches {1} snapshots; be more specific")]
     Ambiguous(String, usize),
     #[error("cancelled; data stored so far is reused by the next run")]
     Cancelled,
     #[error("stopped at the first error (continue_on_errors is off): {0}")]
     Aborted(String),
+    #[error(
+        "couldn't store data in the Vault ({0}); no snapshot was made, and what was stored is reused by the next run"
+    )]
+    Store(String),
+}
+
+fn held(by: &[String]) -> String {
+    if by.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ({}). If that job is no longer running, `flux unlock` removes its lock",
+            by.join("; ")
+        )
+    }
 }
 
 impl VaultError {
@@ -83,7 +113,7 @@ pub fn local_root(target: &Path) -> PathBuf {
 /// A Vault snapshot as a restore source.
 pub struct VaultSource<'a> {
     repo: &'a VaultRepo,
-    entries: Vec<(Entry, Vec<crypto::BlobId>)>,
+    entries: Vec<(Entry, format::Content)>,
     content: std::collections::HashMap<Vec<u8>, usize>,
 }
 
@@ -116,15 +146,19 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
         _copier: &Copier,
         progress: &Progress,
     ) -> io::Result<u64> {
-        use std::io::Write;
-        let mut out = out;
+        use std::os::unix::fs::FileExt;
         let i = *self
             .content
             .get(&e.path)
             .ok_or_else(|| io::Error::other("not in snapshot"))?;
         let index = self.repo.index().map_err(io::Error::other)?;
+        let content = &self.entries[i].1;
+        // The data goes into the runs between the holes; the holes are never written, so
+        // they stay holes (the file is new and empty), and `set_len` keeps a trailing one.
+        let mut runs = content.data_runs(e.size).into_iter();
+        let mut run = runs.next().unwrap_or((0, 0));
         let mut n = 0u64;
-        for id in &self.entries[i].1 {
+        for id in &content.blobs {
             if progress.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
@@ -133,14 +167,35 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
             })?;
             let data = pack::read_blob(self.repo.backend(), &self.repo.crypto, loc)
                 .map_err(io::Error::other)?;
-            out.write_all(&data)?;
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                if run.1 == 0 {
+                    run = runs.next().ok_or_else(|| {
+                        io::Error::other(format!(
+                            "{}: more data than the file holds",
+                            e.rel_path().display()
+                        ))
+                    })?;
+                }
+                let take = rest.len().min(run.1 as usize);
+                out.write_all_at(&rest[..take], run.0)?;
+                run = (run.0 + take as u64, run.1 - take as u64);
+                rest = &rest[take..];
+            }
             n += data.len() as u64;
             progress
                 .bytes_done
                 .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
+        let holes = content.hole_bytes();
+        if holes > 0 {
+            out.set_len(e.size)?;
+            progress
+                .bytes_done
+                .fetch_add(holes, std::sync::atomic::Ordering::Relaxed);
+        }
         out.sync_all()?;
-        Ok(n)
+        Ok(n + holes)
     }
 }
 

@@ -26,7 +26,8 @@ use flux_runner::repo::{AnyRepo, RepoError};
 
 use crate::{Ctx, output};
 
-/// Exit status when a backup finished but some files could not be backed up.
+/// Exit status when a backup finished but some files could not be backed up, or the
+/// backup to one of the profile's other destinations failed.
 pub const EXIT_PARTIAL: u8 = 4;
 
 #[derive(Args)]
@@ -58,6 +59,9 @@ pub struct BackupArgs {
 #[derive(Args)]
 pub struct SnapshotsArgs {
     pub profile: String,
+    /// Only snapshots with this tag (any case).
+    #[arg(long)]
+    pub tag: Option<String>,
 }
 
 #[derive(Args)]
@@ -275,6 +279,8 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
         Err(e) => {
             if ctx.json {
                 output::print_json(&record)?;
+            } else {
+                print_destinations(&record);
             }
             return Err(e.into());
         }
@@ -363,13 +369,42 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
         for h in record.hooks.iter().filter(|h| !h.success) {
             println!("  hook failed: {}", h.command);
         }
+        print_destinations(&record);
     }
+    let destination_failed = record
+        .destinations
+        .iter()
+        .any(|d| d.status == flux_runner::RunStatus::Failed);
     Ok(match out {
         BackupOutcome::Created { snapshot, .. } if snapshot.status != SnapshotStatus::Complete => {
             ExitCode::from(EXIT_PARTIAL)
         }
+        _ if destination_failed => ExitCode::from(EXIT_PARTIAL),
         _ => ExitCode::SUCCESS,
     })
+}
+
+/// How the backup went at the profile's other destinations.
+fn print_destinations(record: &flux_runner::RunRecord) {
+    use flux_runner::RunStatus as S;
+    for d in &record.destinations {
+        let snap = d.snapshot.as_deref().unwrap_or("-");
+        match d.status {
+            S::Completed => println!("✓ {}: snapshot {snap} created", d.name),
+            S::CompletedWithErrors => {
+                println!("⚠ {}: snapshot {snap} created with problems", d.name)
+            }
+            S::Unchanged => println!("✓ {}: nothing changed since snapshot {snap}", d.name),
+            S::DryRun => println!("  {}: dry run", d.name),
+            S::Cancelled => println!("  {}: stopped", d.name),
+            S::Skipped => println!("  {}: skipped", d.name),
+            S::Failed => println!(
+                "✗ {}: failed: {}",
+                d.name,
+                d.error.as_deref().unwrap_or("unknown error")
+            ),
+        }
+    }
 }
 
 /// How the CLI asks for a Vault password: on the terminal, if there is one.
@@ -383,15 +418,27 @@ pub fn repo_for(ctx: &Ctx, profile: &str) -> anyhow::Result<(ProfileId, Profile,
 
 pub fn run_snapshots(ctx: &Ctx, args: SnapshotsArgs) -> anyhow::Result<ExitCode> {
     let (_, _, repo) = repo_for(ctx, &args.profile)?;
-    let snaps = repo.snapshots()?;
+    let mut snaps = repo.snapshots()?;
+    if let Some(t) = &args.tag {
+        let t = t.trim().to_lowercase();
+        snaps.retain(|s| s.tags.iter().any(|x| x.to_lowercase() == t));
+    }
     if ctx.json {
         output::print_json(&snaps)?;
         return Ok(ExitCode::SUCCESS);
     }
     if snaps.is_empty() {
-        println!("No snapshots yet.");
+        println!(
+            "{}",
+            if args.tag.is_some() {
+                "No snapshots with that tag."
+            } else {
+                "No snapshots yet."
+            }
+        );
         return Ok(ExitCode::SUCCESS);
     }
+    let any_labels = snaps.iter().any(|s| !s.tags.is_empty() || s.note.is_some());
     let rows: Vec<Vec<String>> = snaps
         .iter()
         .rev()
@@ -410,15 +457,23 @@ pub fn run_snapshots(ctx: &Ctx, args: SnapshotsArgs) -> anyhow::Result<ExitCode>
                     (None, true) => "(pinned)".into(),
                     (None, false) => String::new(),
                 },
+                labels(s),
             ]
         })
+        .map(|mut r: Vec<String>| {
+            if !any_labels {
+                r.pop();
+            }
+            r
+        })
         .collect();
-    output::table(
-        &[
-            "ID", "WHEN", "STATUS", "FILES", "SIZE", "CHANGES", "COPIED", "NAME",
-        ],
-        &rows,
-    );
+    let mut header = vec![
+        "ID", "WHEN", "STATUS", "FILES", "SIZE", "CHANGES", "COPIED", "NAME",
+    ];
+    if any_labels {
+        header.push("TAGS / NOTE");
+    }
+    output::table(&header, &rows);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -435,6 +490,15 @@ pub fn run_info(ctx: &Ctx, args: InfoArgs) -> anyhow::Result<ExitCode> {
         ("snapshot", s.id.clone()),
         ("name", s.name.clone().unwrap_or_else(|| "—".into())),
         ("pinned", if s.pinned { "yes" } else { "no" }.into()),
+        (
+            "tags",
+            if s.tags.is_empty() {
+                "—".into()
+            } else {
+                s.tags.join(", ")
+            },
+        ),
+        ("note", s.note.clone().unwrap_or_else(|| "—".into())),
         ("started", when(s.started)),
         ("duration", duration(secs)),
         ("status", status(&s)),
@@ -641,6 +705,11 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
         None => None,
     };
     let remove_n = removing.as_ref().map_or(0, |p| p.remove);
+    if !args.dry_run && !args.yes {
+        for note in removing.iter().flat_map(|p| &p.exact_notes) {
+            println!("note: {note}");
+        }
+    }
     if remove_n > 0 && !args.dry_run && !args.yes {
         let p = removing.as_ref().expect("counted");
         for path in &p.remove_paths {
@@ -721,6 +790,9 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             for path in &p.remove_paths {
                 println!("remove {}", path.display());
             }
+            for note in &p.exact_notes {
+                println!("note: {note}");
+            }
             println!(
                 "{} items not in the snapshot would be removed{}.",
                 group(p.remove),
@@ -739,6 +811,9 @@ pub fn run_restore(ctx: &Ctx, args: RestoreArgs) -> anyhow::Result<ExitCode> {
             snap.id,
             group(out.skipped_identical)
         );
+        for note in &out.exact_notes {
+            println!("  note: {note}");
+        }
         if out.removed > 0 {
             println!(
                 "  removed {} {} that weren't in the snapshot",
@@ -838,6 +913,20 @@ fn mode_string(mode: u32) -> String {
     s
 }
 
+/// "#taxes #release · before the upgrade" (shortened), for the snapshot list.
+fn labels(s: &flux_fs::snapshot::SnapshotMeta) -> String {
+    let tags: Vec<String> = s.tags.iter().map(|t| format!("#{t}")).collect();
+    let note = s.note.as_deref().map(|n| {
+        let line = n.lines().next().unwrap_or_default();
+        if line.chars().count() > 40 || n.lines().count() > 1 {
+            format!("{}…", line.chars().take(40).collect::<String>())
+        } else {
+            line.to_owned()
+        }
+    });
+    tags.into_iter().chain(note).collect::<Vec<_>>().join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,4 +941,187 @@ mod tests {
         assert_eq!(duration(5.25), "5.2s");
         assert_eq!(duration(125.0), "2m 05s");
     }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ChecksumArg {
+    Sha256,
+    Blake3,
+}
+
+#[derive(Args)]
+#[command(after_help = "The archive's kind comes from its name:\n  \
+    .tar.zst  keeps everything: owners, permissions, times, links, extended attributes and ACLs\n  \
+    .zip      for sharing: files, folders, times and basic permissions only\n\n\
+    Examples:\n  \
+    flux export home ~/home.tar.zst\n  \
+    flux export home ~/photos-2025.zip ~/Pictures/2025 --snapshot 3f2a91\n  \
+    flux export home /mnt/usb/docs.tar.zst ~/Documents --checksums sha256")]
+pub struct ExportArgs {
+    pub profile: String,
+    /// The archive to write (it mustn't exist): NAME.tar.zst or NAME.zip.
+    pub archive: PathBuf,
+    /// Only these files or folders, by their original path (default: everything).
+    pub paths: Vec<PathBuf>,
+    #[arg(long, short, default_value = "latest")]
+    pub snapshot: String,
+    /// Also write the files' checksums next to the archive (ARCHIVE.sha256 for
+    /// `sha256sum -c`, ARCHIVE.b3 for `b3sum -c`).
+    #[arg(long, value_name = "KIND")]
+    pub checksums: Option<ChecksumArg>,
+}
+
+pub fn run_export(ctx: &Ctx, args: ExportArgs) -> anyhow::Result<ExitCode> {
+    use flux_runner::archive::{self, Checksums, ExportRequest, Format};
+    let name = args.archive.to_string_lossy().into_owned();
+    let Some(format) = Format::from_name(&name) else {
+        bail!("name the archive NAME.tar.zst (keeps everything) or NAME.zip (for sharing)");
+    };
+    let (id, profile) = load_profile(ctx, &args.profile)?;
+    let repo = AnyRepo::open(&ctx.paths, &id, &profile, Some(ASK))?;
+    let snap = repo.find(&args.snapshot)?;
+    let paths = args
+        .paths
+        .into_iter()
+        .map(absolutize)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let out = absolutize(args.archive)?;
+    let progress = Arc::new(Progress::new());
+    install_ctrlc(&progress);
+    let live = LiveProgress::start(
+        progress.clone(),
+        !ctx.json && std::io::stderr().is_terminal(),
+    );
+    let report = |ev: Event| {
+        if let Event::Warning { path, message } = ev {
+            live.println(format!(
+                "warning: {path}{}{message}",
+                if path.is_empty() { "" } else { ": " }
+            ));
+        }
+    };
+    let result = archive::export(
+        &repo,
+        &ExportRequest {
+            snapshot: &snap,
+            paths,
+            format,
+            out,
+            checksums: args.checksums.map(|c| match c {
+                ChecksumArg::Sha256 => Checksums::Sha256,
+                ChecksumArg::Blake3 => Checksums::Blake3,
+            }),
+        },
+        &progress,
+        &report,
+    );
+    drop(live);
+    let o = result.map_err(|e| anyhow::anyhow!(e))?;
+    if ctx.json {
+        output::print_json(&o)?;
+    } else {
+        println!(
+            "Exported {} file{} ({}) from snapshot {} into {} ({}).",
+            o.files,
+            if o.files == 1 { "" } else { "s" },
+            ByteSize(o.bytes).display_approx(),
+            snap.id,
+            o.archive.display(),
+            ByteSize(o.size).display_approx()
+        );
+        if let Some(m) = &o.manifest {
+            println!("Checksums: {}", m.display());
+        }
+        for l in &o.left_out {
+            println!("Note: {l}.");
+        }
+        if format == Format::Zip {
+            println!("{}", archive::ZIP_LIMITS);
+        }
+    }
+    Ok(if o.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{} files couldn't be read from the backup.", o.errors.len());
+        ExitCode::from(EXIT_PARTIAL)
+    })
+}
+
+#[derive(Args)]
+#[command(after_help = "Examples:\n  \
+    flux explain home ~/Downloads/film.mkv\n  \
+    flux explain home ~/Projects/app/node_modules ~/.cache\n  \
+    flux explain home ~/Projects --list      # each item in the folder, with totals")]
+pub struct ExplainArgs {
+    pub profile: String,
+    /// Files or folders (they needn't exist: a path ending in / is judged as a folder).
+    #[arg(required = true)]
+    pub paths: Vec<PathBuf>,
+    /// List what's in the folder, each item backed up or left out, with what's in and out
+    /// below it.
+    #[arg(long, short)]
+    pub list: bool,
+}
+
+pub fn run_explain(ctx: &Ctx, args: ExplainArgs) -> anyhow::Result<ExitCode> {
+    use flux_fs::coverage::{self, Rules};
+    let (_, profile) = load_profile(ctx, &args.profile)?;
+    let rules = Rules::of(&profile)?;
+    let mut out = Vec::new();
+    for p in args.paths {
+        let slash = p.as_os_str().as_bytes().ends_with(b"/");
+        let mut abs = absolutize(p)?;
+        if slash {
+            abs.as_mut_os_string().push("/");
+        }
+        if args.list {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let c = coverage::list(&rules, &abs, Some(deadline))
+                .map_err(|e| anyhow::anyhow!("{}: {e}", abs.display()))?;
+            if ctx.json {
+                out.push(serde_json::to_value(&c)?);
+                continue;
+            }
+            println!("{}\n  {}", c.path.display(), c.why);
+            for i in &c.items {
+                let mark = if i.backed_up { "✓" } else { "✗" };
+                let size = if i.dir {
+                    let mut s = format!("{} in", ByteSize(i.bytes_in).display_approx());
+                    if i.bytes_out > 0 || i.files_out > 0 {
+                        s.push_str(&format!(", {} out", ByteSize(i.bytes_out).display_approx()));
+                    }
+                    s
+                } else {
+                    ByteSize(i.size).display_approx()
+                };
+                println!(
+                    "  {mark} {}{}  ({size})",
+                    i.name,
+                    if i.dir { "/" } else { "" }
+                );
+                if !i.backed_up {
+                    println!("      {}", i.why);
+                }
+            }
+            if c.partial {
+                println!("  (totals counted for 30 seconds only)");
+            }
+        } else {
+            let why = coverage::explain(&rules, &abs);
+            if ctx.json {
+                out.push(serde_json::json!({
+                    "path": abs,
+                    "backed_up": why.included(),
+                    "why": why,
+                    "text": why.text(&abs),
+                }));
+            } else {
+                println!("{}\n  {}", abs.display(), why.text(&abs));
+            }
+        }
+    }
+    if ctx.json {
+        output::print_json(&out)?;
+    }
+    Ok(ExitCode::SUCCESS)
 }

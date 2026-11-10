@@ -2,7 +2,7 @@
 // path: api.ts imports it lazily only when Tauri isn't present.
 
 import type { DirEntry, Found, Issue, JobMessage, Listing, Overview, PreviewRow, Profile, ProfileSummary, RunRecord, SnapshotMeta, SnapshotStats } from "./types";
-import { ApiError } from "./types";
+import { type TestReport, type Destination, type Webhook, ApiError } from "./types";
 
 const DAY = 86_400_000;
 const now = Date.now();
@@ -60,12 +60,20 @@ function snapshotSeries(profile: string, count: number, everyMs: number, vault: 
 
 const snapshots: Record<string, SnapshotMeta[]> = {
   home: snapshotSeries("home", 34, DAY, false),
+  "home+usb": snapshotSeries("home+usb", 12, 3 * DAY, true),
   docs: snapshotSeries("docs", 48, DAY / 6, true),
   photos: snapshotSeries("photos", 6, 7 * DAY, true, 9 * DAY),
   plain: snapshotSeries("plain", 14, DAY, false, 2 * 3_600_000),
   borg: snapshotSeries("borg", 26, DAY / 2, false, 5 * 3_600_000),
   "system:etc": snapshotSeries("system:etc", 21, DAY, false, 5 * 3_600_000),
 };
+// A few notes and tags, as someone would add them.
+{
+  const h = snapshots.home!;
+  Object.assign(h[h.length - 3]!, { note: "Before upgrading to Fedora 46", tags: ["upgrade"] });
+  Object.assign(h[h.length - 12]!, { note: "Tax papers scanned and filed", tags: ["taxes", "paperwork"] });
+  Object.assign(h[h.length - 20]!, { tags: ["taxes"] });
+}
 
 function run(profile: string, s: SnapshotMeta | undefined, status: RunRecord["status"], error: string | null = null): RunRecord {
   const started = s ? s.started : iso(now - 2 * DAY);
@@ -98,6 +106,45 @@ profiles[2]!.last_run = run("photos", undefined, "failed", "backup target /run/m
 profiles[3]!.last_run = run("plain", snapshots.plain!.at(-1), "completed");
 profiles[4]!.last_run = run("borg", snapshots.borg!.at(-1), "completed");
 profiles[5]!.last_run = run("system:etc", snapshots["system:etc"]!.at(-1), "completed");
+// The home folder also goes to a USB stick (Vault) and, offsite, to the office NAS (rsync).
+profiles[0]!.destinations = [
+  { id: "home+usb", name: "usb", label: "USB stick", engine: "vault", target: "/run/media/me/STICK", remote: false, offsite: false },
+  { id: "home+office", name: "office", label: "Office NAS", engine: "rsync", target: "ssh://me@office-nas/srv/flux", remote: true, offsite: true },
+];
+profiles[0]!.last_run!.destinations = [
+  { name: "usb", status: "completed", snapshot: snapshots["home+usb"]!.at(-1)!.id },
+  { name: "office", status: "failed", error: "ssh: connect to host office-nas port 22: No route to host" },
+];
+
+/** Demo: the Projects backup found what looks like ransomware. */
+function demoUnusual() {
+  const s = snapshots.plain!;
+  const files = Array.from({ length: 48 }, (_, i) => `/home/me/Projects/thesis/chapter${i + 1}.odt`);
+  return {
+    signals: ["48 files renamed to end in .locked", "3 files that look like ransom notes (HOW_TO_DECRYPT.txt)"],
+    affected: files.flatMap((f) => [f, `${f}.locked`]).concat(["/home/me/Projects/HOW_TO_DECRYPT.txt"]),
+    affected_total: 99,
+    by_folder: [["/home/me/Projects/thesis", 96], ["/home/me/Projects", 3]] as [string, number][],
+    by_extension: [["locked", 48], ["odt", 48], ["txt", 3]] as [string, number][],
+    snapshot: s.at(-1)!.id,
+    before: s.at(-2)!.id,
+  };
+}
+let unusualDismissed = false;
+
+/** Demo restore tests, newest first. */
+const restoreTests: Record<string, unknown[]> = {
+  home: [{ started: new Date(now - 3 * DAY).toISOString(), finished: new Date(now - 3 * DAY + 4000).toISOString(), snapshot: "", mode: "random_files", result: "passed", picked: 10, tested: 10, bytes: 3_250_000, stopped_early: false, problems: [], problems_total: 0 }],
+};
+
+/** Every profile, and each destination as a profile of its own (`home+usb`). */
+function allProfiles(): ProfileSummary[] {
+  const out = [...profiles];
+  for (const p of profiles)
+    for (const d of p.destinations ?? [])
+      out.push({ ...p, id: d.id, name: `${p.name} → ${d.label}`, engine: d.engine, target: d.target, remote: d.remote, offsite: d.offsite, destinations: [], last_run: null, running: false });
+  return out;
+}
 
 /** Demo: system profiles need "authenticating" first. */
 let systemUnlocked = false;
@@ -108,11 +155,69 @@ let prefs = {
   scheduler: "systemd" as "systemd" | "cron",
   one_at_a_time: false,
   diff_tool: null as string | null,
+  webhooks: [{ url: "https://ntfy.sh/flux-laptop-backups", preset: "ntfy" }] as Webhook[],
 };
 const DIFF_TOOLS: [string, string][] = [["meld", "Meld"]];
 let pausedUntil: string | null | undefined =
   typeof location !== "undefined" && new URLSearchParams(location.search).get("paused") === "1" ? iso(Date.now() + 9 * 3_600_000) : undefined;
 let autostartOn = false;
+const readinessAnswers: Record<string, boolean> = {};
+let vaultUpgraded = false;
+const demoTemplates: { id: string; name: string; line: string; icon: string; own: boolean }[] = [
+  { id: "own:work-laptop", name: "Work laptop", line: "/home/me/work, /home/me/Documents. Daily.", icon: "copy", own: true },
+];
+
+/** A small home folder for the coverage view: [name, folder?, size]. */
+const DEMO_TREE: Record<string, [string, boolean, number][]> = {
+  "/home/me": [
+    [".cache", true, 3_800_000_000],
+    [".local", true, 1_200_000_000],
+    ["Documents", true, 2_400_000_000],
+    ["Downloads", true, 14_600_000_000],
+    ["Music", true, 38_000_000_000],
+    ["Pictures", true, 61_000_000_000],
+    ["Projects", true, 9_100_000_000],
+    ["Videos", true, 120_000_000_000],
+    [".bashrc", false, 3_700],
+  ],
+  "/home/me/Projects": [
+    ["flux", true, 2_100_000_000],
+    ["site", true, 640_000_000],
+    ["notes.md", false, 12_000],
+  ],
+  "/home/me/Projects/site": [
+    ["node_modules", true, 412_000_000],
+    ["src", true, 4_100_000],
+    ["dist", true, 9_800_000],
+    ["package.json", false, 1_200],
+  ],
+};
+
+/** The demo's idea of a backup's rules: enough of gitignore to show the tester. */
+function demoVerdict(prof: Profile, path: string): { in: boolean; text: string } {
+  const home = "/home/me";
+  const source = prof.sources.paths.map((p) => p.replace(/^~/, home)).find((s) => path === s || path.startsWith(`${s.replace(/\/$/, "")}/`));
+  if (!source) return { in: false, text: "Not backed up: it isn't in any of the folders this backup takes." };
+  const parts = path.slice(source.length).split("/").filter(Boolean);
+  let at = source;
+  for (const [i, part] of parts.entries()) {
+    at = `${at}/${part}`;
+    const last = i === parts.length - 1;
+    for (const raw of prof.sources.exclude) {
+      const pat = raw.trim();
+      if (!pat || pat.startsWith("!")) continue;
+      const dirOnly = pat.endsWith("/");
+      const body = pat.replace(/\/$/, "").replace(/^~/, home);
+      const glob = new RegExp(`^${body.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")}$`);
+      const hit = body.startsWith("/") ? glob.test(at) : glob.test(part);
+      if (hit && (!dirOnly || !last || DEMO_TREE[at] !== undefined || !part.includes("."))) {
+        return { in: false, text: at === path ? `Left out by the rule ${raw}.` : `Left out: it's in ${at}, which the rule ${raw} leaves out.` };
+      }
+    }
+    if (prof.sources.exclude_caches && part === ".cache") return { in: false, text: `Left out: ${at} is marked as a cache folder (it holds a CACHEDIR.TAG).` };
+  }
+  return { in: true, text: `Backed up: it's in ${source}.` };
+}
 const prefsView = () => ({
   notify_success: prefs.notify_success,
   default_exclude: prefs.default_exclude ?? FLUX_EXCLUDE,
@@ -124,6 +229,7 @@ const prefsView = () => ({
   cron_problem: typeof location !== "undefined" && new URLSearchParams(location.search).get("cron") === "0" ? "cron isn't installed. Install it (on Fedora, the cronie package) and start it, or keep systemd timers." : null,
   cron_running: true,
   diff_tool: prefs.diff_tool,
+  webhooks: prefs.webhooks,
   diff_tool_used: prefs.diff_tool === "" ? null : prefs.diff_tool ? ([prefs.diff_tool, DIFF_TOOLS.find(([c]) => c === prefs.diff_tool)?.[1] ?? prefs.diff_tool] as [string, string]) : DIFF_TOOLS[0]!,
   diff_tools: DIFF_TOOLS,
 });
@@ -134,7 +240,7 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).get(
 let unlocked = new Set<string>(["home", "photos", "plain"]);
 
 function locked(id: string) {
-  const p = profiles.find((x) => x.id === id);
+  const p = allProfiles().find((x) => x.id === id);
   return (p?.engine === "vault" || p?.engine === "borg") && !unlocked.has(id);
 }
 
@@ -153,7 +259,7 @@ function tools() {
 }
 
 function recoveryKit(id: string) {
-  const p = profiles.find((x) => x.id === id)!;
+  const p = allProfiles().find((x) => x.id === id)!;
   const newest = snapshots[id]?.at(-1)?.id ?? "2026-11-07_20-00-00";
   if (p.engine === "borg") {
     const repo = "ssh://me@nas/srv/flux/flux-borg/nyx/me/borg/repo";
@@ -391,6 +497,12 @@ function fullProfile(p: ProfileSummary): Profile {
 const stored: Record<string, Profile> = Object.fromEntries(profiles.map((p) => [p.id, fullProfile(p)]));
 stored["system:etc"]!.sources = { ...stored["system:etc"]!.sources, paths: ["/etc", "/root", "/usr/local"], exclude: ["/root/.cache/"] };
 stored["system:etc"]!.options.notify = false;
+stored.home!.destinations = [
+  { name: "usb", label: "USB stick", engine: "vault", target: { kind: "local", path: "/run/media/me/STICK", fs_uuid: "3C11-77AB" }, offsite: false, vault: { compression_level: 3, encryption: true, password_source: { from: "keyring" } } },
+  { name: "office", label: "Office NAS", engine: "rsync", target: { kind: "ssh", host: "office-nas", user: "me", port: null, path: "/srv/flux", identity_file: null, bandwidth_limit: null }, offsite: true },
+];
+// The documents backup also takes the scans on an external disk, recognised by its UUID.
+stored["docs"]!.sources = { ...stored["docs"]!.sources, paths: ["/home/me/Documents", "/mnt/scans"], volumes: [{ path: "/mnt/scans", fs_uuid: "5B3E-0C17", when_missing: "skip" }] };
 
 function validate(p: Profile): Issue[] {
   const v: Issue[] = [];
@@ -463,7 +575,7 @@ const shutdownAfter: Record<string, boolean> = {};
 
 function simulateBackup(id: string, shutdown = false) {
   shutdownAfter[id] = shutdown;
-  const p = profiles.find((x) => x.id === id)!;
+  const p = allProfiles().find((x) => x.id === id)!;
   p.running = true;
   const total = 1_840_000_000;
   const started = Date.now();
@@ -510,12 +622,14 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
   await delay(120);
   const id = args.id as string;
   const needsUnlock = () => {
-    const p = profiles.find((x) => x.id === id);
+    const p = allProfiles().find((x) => x.id === id);
     if ((p?.engine === "vault" || p?.engine === "borg") && !unlocked.has(id)) throw new ApiError("password_required", `The backups of “${p.name}” are locked.`);
   };
   if (id?.startsWith("system:") && !systemUnlocked) throw new ApiError("locked", "Authenticate to manage system backups.");
   switch (cmd) {
     case "profiles":
+      // `?empty=1`: a new computer, no backups yet (the welcome screen).
+      if (typeof location !== "undefined" && new URLSearchParams(location.search).get("empty") === "1") return [];
       return structuredClone(profiles.filter((p) => p.scope === "user" || systemUnlocked));
     case "system_status":
       return { available: true, unlocked: systemUnlocked };
@@ -535,7 +649,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return `/etc/flux-backup/keys/${id.replace("system:", "")}`;
     case "overview": {
       if (locked(id)) throw new ApiError("password_required", "The Vault is locked.");
-      const p = profiles.find((x) => x.id === id)!;
+      const p = allProfiles().find((x) => x.id === id)!;
       const s = snapshots[id] ?? [];
       const o: Overview = {
         profile: structuredClone(p),
@@ -553,15 +667,22 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         health:
           id === "photos"
             ? [
-                { level: "warning", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." },
+                { level: "warning", kind: "unplugged", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." },
               ]
             : [],
       };
       if (id === "photos") o.recent_runs.unshift(p.last_run!);
+      if (id === "home" && o.recent_runs[0]) o.recent_runs[0].destinations = p.last_run?.destinations;
+      if (id === "plain" && !unusualDismissed) {
+        o.unusual = demoUnusual();
+        o.health = [{ level: "danger", kind: "unusual", text: `Unusual changes in snapshot ${o.unusual.snapshot}: ${o.unusual.signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }, ...o.health];
+      }
+      const tests = (restoreTests[id] ?? []) as TestReport[];
+      o.restore_test = { every: stored[id]?.restore_test?.every ?? (id === "home" ? "month" : "off"), last: tests[0] ?? null, last_passed: tests.find((t) => t?.result !== "failed")?.started ?? null };
       return o;
     }
     case "status": {
-      const p = profiles.find((x) => x.id === id)!;
+      const p = allProfiles().find((x) => x.id === id)!;
       const s = snapshots[id] ?? [];
       const stored = p.engine === "vault" || p.engine === "borg";
       const day = (t: number) => {
@@ -578,7 +699,19 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         next_run: p.schedule.startsWith("manual") ? null : iso(now + (id === "docs" || id === "borg" ? 1 : 5) * 3_600_000),
         timer_active: !p.schedule.startsWith("manual"),
         last_good: s.at(-1)?.finished ?? null,
-        health: id === "photos" ? [{ level: "warning", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." }] : [],
+        health:
+          id === "photos"
+            ? [{ level: "warning", kind: "unplugged", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." }]
+            : id === "home"
+              ? [{ level: "warning", kind: "destination_failing", text: "The copy on Office NAS failed in the last backup.", hint: "Check that Office NAS is reachable; the other places are fine." }]
+              : id === "docs"
+              ? [{ level: "warning", kind: "source_missing", text: "The drive with scans wasn't connected for the last 2 backups. Its files were kept as they were before; changes since then aren't backed up.", hint: "Connect the drive with /mnt/scans before the next backup." }]
+              : id === "plain" && !unusualDismissed
+                ? [{ level: "danger", kind: "unusual", text: `Unusual changes in snapshot ${demoUnusual().snapshot}: ${demoUnusual().signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }]
+                : id === "borg"
+                  ? [{ level: "warning", kind: "low_space", text: "Only 3.1 GiB free where the backups go.", hint: "Free up space (Maintenance), keep fewer snapshots, or use a bigger drive." }]
+                  : [],
+        unverified: id === "docs" || id === "plain",
         days,
       };
     }
@@ -593,19 +726,19 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       unlocked = new Set([...unlocked, id]);
       return null;
     case "backup_now":
-      if (profiles.find((x) => x.id === id)?.running) throw new ApiError("busy", "A backup is already running.");
+      if (allProfiles().find((x) => x.id === id)?.running) throw new ApiError("busy", "A backup is already running.");
       if (id === "photos")
         throw new ApiError("not_connected", "Archive isn't connected: nothing is mounted at /run/media/me/Archive. Plug in the drive, then back up again.");
       simulateBackup(id, !!args.shutdown);
       return { running: true };
     case "shutdown_after":
-      if (!profiles.find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
+      if (!allProfiles().find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
       shutdownAfter[id] = !!args.on;
       return null;
     case "cancel_shutdown":
       return null;
     case "cancel":
-      if (!profiles.find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
+      if (!allProfiles().find((x) => x.id === id)?.running) throw new ApiError("not_running", "This backup isn't running any more.");
       return null;
     case "restore":
       for (let i = 1; i <= 8; i++) {
@@ -627,6 +760,104 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         p.options.notify = false;
       }
       return { id: "", profile: p, issues: [] };
+    }
+    case "vault_format": {
+      const p = allProfiles().find((x) => x.id === id);
+      return p?.engine === "vault" ? { format: id === "photos" && !vaultUpgraded ? 1 : 2, newest: 2 } : null;
+    }
+    case "upgrade_vault":
+      vaultUpgraded = true;
+      return { format: 2, newest: 2 };
+    case "storage": {
+      needsUnlock();
+      const p = allProfiles().find((x) => x.id === id);
+      const n = (snapshots[id] ?? []).length;
+      const latest = 86_400_000_000;
+      if (p?.engine === "vault" || p?.engine === "borg")
+        return {
+          snapshots: n,
+          latest_bytes: latest,
+          latest_files: 184_000,
+          logical_bytes: latest * n,
+          stored_bytes: 121_000_000_000,
+          dedup_saved: latest * n - 139_000_000_000,
+          compression_saved: 18_000_000_000,
+          shared_with: id === "docs" ? 1 : 0,
+          basis: p.engine === "vault" ? "Measured from the Vault's index: each piece of data is stored once, compressed and encrypted." : "Borg's own statistics (borg info).",
+        };
+      return {
+        snapshots: n,
+        latest_bytes: latest,
+        latest_files: 184_000,
+        logical_bytes: latest * n,
+        stored_bytes: 131_000_000_000,
+        dedup_saved: latest * n - 131_000_000_000,
+        compression_saved: null,
+        shared_with: 0,
+        basis: "Unchanged files are shared between snapshots (hard links); the space is what each snapshot copied, so it's an estimate.",
+      };
+    }
+    case "templates": {
+      const own = demoTemplates.map((t) => ({ ...t }));
+      return args.system
+        ? [
+            { id: "system", name: "System settings", line: "This computer's configuration (/etc, /root, /usr/local, /opt and /srv), daily.", icon: "shield", own: false },
+            { id: "blank", name: "Start from nothing", line: "Choose every folder and setting yourself.", icon: "plus", own: false },
+            ...own,
+          ]
+        : [
+            { id: "home", name: "Home folder", line: "Everything in your home folder, without caches and the trash. Daily.", icon: "home", own: false },
+            { id: "documents", name: "Documents", line: "Your documents and desktop, every hour: lose an hour of work at most.", icon: "file", own: false },
+            { id: "photos", name: "Photos", line: "Your pictures, daily, and kept for years: a snapshot a month for two years, one a year for ten.", icon: "layers", own: false },
+            { id: "development", name: "Development", line: "Your projects, every hour, without dependencies and build output (node_modules, target, .venv…).", icon: "terminal", own: false },
+            { id: "blank", name: "Start from nothing", line: "Choose every folder and setting yourself.", icon: "plus", own: false },
+            ...own,
+          ];
+    }
+    case "new_from_template": {
+      const e = (await handle("new_profile", { system: args.system })) as { id: string; profile: Profile; issues: Issue[] };
+      const p = e.profile;
+      switch (args.template) {
+        case "documents":
+          Object.assign(p, { name: "Documents" });
+          p.sources.paths = ["/home/me/Documents", "/home/me/Desktop"];
+          p.sources.exclude = ["*.tmp", "~$*", ".~lock.*#"];
+          p.schedule = { ...p.schedule, trigger: "interval", every: "1h", on_calendar: null };
+          break;
+        case "photos":
+          Object.assign(p, { name: "Photos" });
+          p.sources.paths = ["/home/me/Pictures"];
+          p.sources.exclude = [".thumbnails/", "*.tmp"];
+          break;
+        case "development":
+          Object.assign(p, { name: "Projects" });
+          p.sources.paths = ["/home/me/Projects"];
+          p.sources.exclude = ["node_modules/", "target/", "build/", "dist/", ".venv/", "__pycache__/", "*.o", "*.pyc", "*.tmp"];
+          p.schedule = { ...p.schedule, trigger: "interval", every: "1h", on_calendar: null };
+          break;
+        case "blank":
+          Object.assign(p, { name: "" });
+          p.sources.paths = [];
+          p.sources.exclude = [];
+          break;
+        case "home":
+        case "system":
+          break;
+        default:
+          Object.assign(p, { name: "Work" });
+          p.sources.paths = ["/home/me/work", "/home/me/Documents"];
+      }
+      return e;
+    }
+    case "save_template": {
+      const name = args.name as string;
+      demoTemplates.push({ id: `own:${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name, line: "/home/me/work, /home/me/Documents. Daily.", icon: "copy", own: true });
+      return handle("templates", {});
+    }
+    case "delete_template": {
+      const i = demoTemplates.findIndex((t) => t.id === args.template);
+      if (i >= 0) demoTemplates.splice(i, 1);
+      return handle("templates", { system: args.system });
     }
     case "backintime_profiles": {
       // Demo: Back In Time is set up, with two profiles (?bit=0 hides them).
@@ -655,7 +886,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       const issues = validate(p);
       if (issues.some((i) => i.severity === "error")) return { id, issues, saved: false, schedule: null };
       stored[id] = structuredClone(p);
-      const existing = profiles.find((x) => x.id === id);
+      const existing = allProfiles().find((x) => x.id === id);
       const target = p.target.kind === "local" ? p.target.path : `ssh://${p.target.host}${p.target.path}`;
       const schedule = p.schedule.trigger === "manual" ? "manual" : p.schedule.trigger === "interval" ? `every ${p.schedule.every}` : (p.schedule.on_calendar ?? "");
       if (existing) Object.assign(existing, { name: p.name, engine: p.engine, target, schedule });
@@ -698,12 +929,14 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       if (!snap) throw new ApiError("error", "snapshot not found");
       if (args.setName) snap.name = (args.name as string | null) || null;
       if (args.pinned != null) snap.pinned = args.pinned as boolean;
+      if (args.setNote) snap.note = ((args.note as string | null) ?? "").trim() || null;
+      if (args.tags) snap.tags = [...new Set((args.tags as string[]).map((t) => t.trim()).filter(Boolean))];
       return structuredClone(snap);
     }
     case "delete_snapshot": {
       const gone = snapshots[id]?.find((x) => x.id === args.snapshot);
       snapshots[id] = (snapshots[id] ?? []).filter((x) => x.id !== args.snapshot);
-      const e = profiles.find((p) => p.id === id)?.engine;
+      const e = allProfiles().find((p) => p.id === id)?.engine;
       return e === "vault" || e === "borg" ? (gone?.stats.stored_bytes ?? 0) : null;
     }
     case "compare":
@@ -729,8 +962,34 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         size_limit: args.new ? null : "4GB",
       };
     case "runs": {
-      const list = [...(snapshots[id] ?? [])].reverse().map((x, i) => (i === 2 ? { ...run(id, x, "unchanged"), stats: null } : run(id, x, x.status === "complete" ? "completed" : "completed_with_errors")));
-      const p = profiles.find((x) => x.id === id);
+      const vault = allProfiles().find((x) => x.id === id)?.engine === "vault";
+      const perf = (i: number) => ({
+        phases: [
+          { name: "Preparing", secs: 0.4 },
+          { name: "Scanning", secs: 6.2 + (i % 3) },
+          { name: "Comparing", secs: 1.1 },
+          { name: "Copying", secs: 38.5 + i * 2 },
+          { name: "Finalizing", secs: 2.3 },
+        ],
+        stages: vault
+          ? [
+              { name: "Reading files", secs: 21.4 },
+              { name: "Cutting into chunks", secs: 9.8 },
+              { name: "Finding what's already stored", secs: 6.1 },
+              { name: "Compressing and encrypting", secs: 44.7 },
+              { name: "Writing and uploading", secs: 12.9 },
+            ]
+          : [],
+        writes: vault ? 46 : 0,
+        bytes_written: vault ? 731_000_000 : 0,
+        write_ms: vault ? 280 : null,
+        throughput: 58_000_000,
+      });
+      const list = [...(snapshots[id] ?? [])]
+        .reverse()
+        .map((x, i) => (i === 2 ? { ...run(id, x, "unchanged"), stats: null } : run(id, x, x.status === "complete" ? "completed" : "completed_with_errors")))
+        .map((r, i): RunRecord => ({ ...r, performance: perf(i) }));
+      const p = allProfiles().find((x) => x.id === id);
       if (p?.last_run?.status === "failed") list.unshift(p.last_run);
       return list;
     }
@@ -757,7 +1016,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       await delay(400);
       return `/home/me/.cache/flux-backup/opened/${args.snapshot}/${(args.path as string).split("/").pop()}`;
     case "duplicate_profile": {
-      const src = profiles.find((x) => x.id === id)!;
+      const src = allProfiles().find((x) => x.id === id)!;
       const copy = { ...structuredClone(src), id: `${id}-copy`, name: `${src.name} (copy)`, last_run: null };
       profiles.push(copy);
       stored[copy.id] = { ...structuredClone(stored[id]!), name: copy.name };
@@ -870,7 +1129,184 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       };
     }
     case "diagnostics":
-      return `Flux Backup diagnostics\n\nFlux Backup 0.2.0 (demo)\n--- profile ${id} ---\n…`;
+      return `Flux Backup diagnostics\n\nFlux Backup ${__APP_VERSION__} (demo)\n--- profile ${id} ---\n…`;
+    case "about":
+      return {
+        version: __APP_VERSION__,
+        cli: { path: "/usr/bin/flux", version: __APP_VERSION__ },
+        helper: { path: "/usr/libexec/flux-backup/flux-helper", version: __APP_VERSION__ },
+        mismatch: false,
+        os: "Fedora Linux 45 (Workstation Edition)",
+        kernel: "7.2.15-300.fc45.x86_64",
+        webkit: "2.54.0",
+      };
+    case "open_link":
+      return null;
+    case "time_hashing": {
+      const h = args.hashing as { level: string; memory_mib?: number; passes?: number };
+      const cost = h.level === "strong" ? 4 * 4 : h.level === "maximum" ? 16 * 6 : h.level === "custom" ? ((h.memory_mib ?? 64) / 64) * (h.passes ?? 3) : 3;
+      return Math.round(cost * 95);
+    }
+    case "vault_security": {
+      const p = allProfiles().find((x) => x.id === id);
+      const v = p?.engine === "vault" ? (stored[id]?.vault ?? null) : null;
+      if (!v) throw new ApiError("error", "Only encrypted Vault backups have these settings.");
+      const open = unlocked.has(id);
+      return {
+        keys: [
+          { id: "8f3a51c2d07e4b19", label: "initial", created: "2026-10-02T09:14:00Z", current: open, hashing: { level: "standard" }, unlock_file: !!v.unlock_file },
+          { id: "c41d9e07a2b65f38", label: "spare, in the safe", created: "2026-10-02T09:20:00Z", current: false, hashing: { level: "standard" }, unlock_file: false },
+        ],
+        unlocked: open,
+        hashing: v.hashing ?? { level: "standard" },
+        unlock_file: v.unlock_file ?? null,
+        unlock_file_present: !!v.unlock_file,
+        unlock_ms: 290,
+      };
+    }
+    case "strengthen_key":
+      if (!unlocked.has(id)) throw new ApiError("password_required", "Unlock the backups first: this needs the Vault's password.");
+      return null;
+    case "set_unlock_file":
+      if (!unlocked.has(id)) throw new ApiError("password_required", "Unlock the backups first: this needs the Vault's password.");
+      return { unlock_file: args.path ?? null, without_file: args.path ? [{ id: "c41d9e07a2b65f38", label: "spare, in the safe", created: "2026-10-02T09:20:00Z", current: false, hashing: { level: "standard" }, unlock_file: false }] : [] };
+    case "restore_test": {
+      needsUnlock();
+      const snap = snapshots[id]?.at(-1);
+      const report = { started: new Date().toISOString(), finished: new Date().toISOString(), snapshot: snap?.id ?? "", mode: "random_files", result: "passed", picked: 10, tested: 10, bytes: 4_718_592, stopped_early: false, problems: [], problems_total: 0 };
+      restoreTests[id] = [report, ...(restoreTests[id] ?? [])];
+      return report;
+    }
+    case "set_webhooks":
+      prefs = { ...prefs, webhooks: args.webhooks as Webhook[] };
+      return prefsView();
+    case "test_webhook":
+      return 200;
+    case "explain": {
+      const prof = args.profile as Profile;
+      const path = (args.path as string).replace(/^~(?=\/|$)/, "/home/me");
+      if (!path.startsWith("/")) throw new ApiError("error", "Type a full path, starting with / or ~/.");
+      const v = demoVerdict(prof, path);
+      return { path, backed_up: v.in, text: v.text };
+    }
+    case "coverage": {
+      const prof = args.profile as Profile;
+      const dir = (args.dir as string).replace(/\/$/, "") || "/";
+      const here = demoVerdict(prof, dir);
+      const kids = DEMO_TREE[dir] ?? [];
+      await new Promise((r) => setTimeout(r, 200));
+      const items = kids.map(([name, isDir, size]) => {
+        const path = `${dir}/${name}`;
+        const v = here.in ? demoVerdict(prof, path) : { in: false, text: here.text };
+        const out = !v.in;
+        const total = isDir ? size : 0;
+        const innerOut = isDir && v.in && name === "Projects" ? 412_000_000 : 0;
+        return {
+          name,
+          path,
+          dir: isDir,
+          size: isDir ? 0 : size,
+          backed_up: v.in,
+          why: v.text,
+          files_in: out ? 0 : isDir ? Math.round(total / 400_000) + 1 : 1,
+          bytes_in: out ? 0 : total - innerOut || (isDir ? 0 : size),
+          files_out: out ? (isDir ? Math.round(total / 400_000) + 1 : 1) : innerOut ? 18_400 : 0,
+          bytes_out: out ? total || size : innerOut,
+        };
+      });
+      return { path: dir, backed_up: here.in, why: here.text, items, partial: false };
+    }
+    case "export_snapshot": {
+      const zip = args.format === "zip";
+      const paths = args.paths as string[];
+      const what = paths.length === 1 ? `-${paths[0]!.split("/").pop()}` : "";
+      const archive = `${args.dir}/${id}-2026-11-09-0830${what}.${zip ? "zip" : "tar.zst"}`;
+      await new Promise((r) => setTimeout(r, 600));
+      return {
+        archive,
+        size: zip ? 48_200_000 : 41_700_000,
+        files: 1_284,
+        bytes: 63_400_000,
+        manifest: args.checksums ? `${archive}.${args.checksums === "sha256" ? "sha256" : "b3"}` : null,
+        left_out: zip ? ["3 symbolic links left out"] : [],
+        errors: [],
+      };
+    }
+    case "find_backups": {
+      // A drive with an encrypted Vault (password "demo") and a Mirror backup.
+      const vaultOpen = args.password === "demo";
+      const t = args.target as { kind: string; path?: string };
+      const where = t.kind === "local" ? t.path : "server";
+      const found = [
+        {
+          engine: "mirror",
+          kept: { host: "old-laptop", user: "me", profile: "photos" },
+          location: `${where}/flux-backup/old-laptop/me/photos`,
+          name: "Photo library",
+          sources: ["/home/me/Pictures"],
+          saved: true,
+          snapshots: 41,
+          newest: iso(Date.now() - 3 * 86_400_000),
+          here: false,
+        },
+        ...(vaultOpen
+          ? [
+              {
+                engine: "vault",
+                kept: { host: "old-laptop", user: "me", profile: "home" },
+                location: `${where}/flux-vault`,
+                name: "Home folder",
+                sources: ["/home/me"],
+                saved: true,
+                snapshots: 128,
+                newest: iso(Date.now() - 2 * 86_400_000),
+                here: false,
+              },
+            ]
+          : []),
+      ];
+      return { found, vault_locked: !vaultOpen, wrong_password: !!args.password && !vaultOpen };
+    }
+    case "recover":
+      return { id: (args.kept as { profile: string }).profile === "photos" ? "photos" : "home", note: null };
+    case "readiness":
+    case "set_readiness": {
+      if (cmd === "set_readiness") readinessAnswers[`${id}:${args.key}`] = args.yes as boolean;
+      const p = profiles.find((x) => x.id === id);
+      const encrypted = p?.engine === "vault" || p?.engine === "borg";
+      const asked = (k: string) => readinessAnswers[`${id}:${k}`] ?? false;
+      return [
+        { key: "settings", ok: true, asked: false, title: "Its settings are kept with the backups", detail: `A copy of the folders, exclusions and rules, ${p?.engine === "vault" ? "in the Vault, encrypted" : "next to them"}: on a new computer, Recover an existing backup finds it.` },
+        ...(encrypted
+          ? [{ key: "password_elsewhere", ok: asked("password_elsewhere"), asked: true, title: "The password is kept somewhere other than this computer", detail: "Without it, nobody can open these backups, you included. It's in this computer's keyring, which goes with the computer: keep it in a password manager or on paper too." }]
+          : []),
+        { key: "restore_test", ok: id === "home", asked: false, title: "A restore test has passed", detail: id === "home" ? "Files were last restored and checked on 2 November 2026." : "Test a restore now on the Overview: Flux restores a few files to a temporary folder and checks them." },
+        { key: "offsite", ok: false, asked: false, title: "A copy is kept somewhere else", detail: "A fire or a theft takes a computer and the drive next to it together. Add a place that's kept elsewhere in Settings › Also keep copies elsewhere." },
+      ];
+    }
+    case "dismiss_unusual":
+      unusualDismissed = true;
+      return null;
+    case "restore_tests":
+      return restoreTests[id] ?? [];
+    case "add_destination": {
+      const d = args.destination as Destination;
+      const base = stored[id]!;
+      base.destinations = [...(base.destinations ?? []), d];
+      const summary = profiles.find((x) => x.id === id)!;
+      summary.destinations = [...(summary.destinations ?? []), { id: `${id}+${d.name}`, name: d.name, label: d.label ?? d.name, engine: d.engine, target: d.target.kind === "local" ? d.target.path : `ssh://${d.target.host}${d.target.path}`, remote: d.target.kind === "ssh", offsite: !!d.offsite }];
+      return structuredClone(base);
+    }
+    case "remove_destination": {
+      const base = stored[id]!;
+      base.destinations = (base.destinations ?? []).filter((x) => x.name !== args.name);
+      const summary = profiles.find((x) => x.id === id)!;
+      summary.destinations = (summary.destinations ?? []).filter((x) => x.name !== args.name);
+      return structuredClone(base);
+    }
+    case "lock_vault":
+      unlocked.delete(id);
+      return null;
     case "export_formats":
       return [
         { id: "flux", label: "Flux Backup profile", description: "This profile as a file, to import on another computer or keep as a copy.", works_with: "Flux Backup (flux profile import)" },
@@ -880,7 +1316,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         { id: "borg", label: "Borg script", description: "A script that runs the same backup with borg create.", works_with: "Borg 1.2 to 1.4" },
       ];
     case "export_profile": {
-      const p = profiles.find((x) => x.id === id)!;
+      const p = allProfiles().find((x) => x.id === id)!;
       const f = args.format as string;
       const notes = f === "flux" ? [] : ["Pinned and named snapshots are a Flux feature; other tools' retention may remove them.", "The schedule (at *-*-* 20:00:00) isn't part of the export: run it from cron or a systemd timer."];
       const contents =

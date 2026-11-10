@@ -11,16 +11,17 @@ use jiff::Timestamp;
 use rayon::prelude::*;
 
 use flux_core::Profile;
-use flux_core::progress::{Event, Phase, Progress, Reporter};
+use flux_core::progress::{Event, Phase, Progress, Reporter, Stage};
 use flux_fs::entry::{Entry, Kind};
 use flux_fs::outcome::{BackupOutcome, PlanStats};
 use flux_fs::snapshot::{FileError, SnapshotMeta, SnapshotStats, SnapshotStatus};
 
 use crate::VaultError;
 use crate::crypto::{BlobId, hex_id, random};
-use crate::format::{BlobKind, IndexFile, Node, SnapshotRecord, Tree};
+use crate::format::{BlobKind, Content, Hole, IndexFile, Node, SnapshotRecord, Tree};
 use crate::pack::{Packer, encode_blob, write_index};
 use crate::repo::{Owner, VaultRepo};
+use flux_core::sync::Locked;
 
 const MAX_STORED_ERRORS: usize = 1000;
 
@@ -34,6 +35,9 @@ pub struct BackupRequest<'a> {
     /// Where to keep the latest snapshot's file list between runs (Flux's cache), so the
     /// next backup needn't rebuild it from the repository's trees. `None`: always rebuild.
     pub cache_dir: Option<PathBuf>,
+    /// Sources whose drive isn't connected (left out of `profile`): their files are kept
+    /// from the previous snapshot instead of looking deleted.
+    pub keep: Vec<PathBuf>,
 }
 
 /// Blobs this run has stored or decided to store (dedup within the run). Split into
@@ -56,11 +60,7 @@ impl<'a> Seen<'a> {
 
     /// True if the blob must be stored now (first time anyone sees it).
     fn claim(&self, id: &BlobId) -> bool {
-        !self.index.contains(id)
-            && self.new[id[0] as usize % SEEN_SHARDS]
-                .lock()
-                .expect("seen lock")
-                .insert(*id)
+        !self.index.contains(id) && self.new[id[0] as usize % SEEN_SHARDS].locked().insert(*id)
     }
 }
 
@@ -106,14 +106,37 @@ pub fn backup(
         },
         None => Vec::new(),
     };
+    if !req.keep.is_empty()
+        && let Some(p) = &parent
+    {
+        let kept = flux_fs::scan::carry_over(
+            &mut entries,
+            parent_flat.iter().map(|(e, _)| e.clone()),
+            &req.keep,
+        );
+        let names: Vec<String> = req.keep.iter().map(|p| p.display().to_string()).collect();
+        report(Event::Info {
+            message: format!(
+                "kept {kept} items of {} from snapshot {}: the drive isn't connected",
+                names.join(" and "),
+                p.meta.id
+            ),
+        });
+    }
     let index = repo.index()?;
-    // Which files can reuse the parent's content without being read?
-    let reusable: HashMap<&[u8], &(Entry, Vec<BlobId>)> = parent_flat
+    let tree_format = repo.tree_format();
+    // Which files can reuse the parent's content without being read? (Format 1 can't keep
+    // holes; its snapshots never have any, so this is only a guard.)
+    let reusable: HashMap<&[u8], &(Entry, Content)> = parent_flat
         .iter()
-        .filter(|(e, c)| e.kind == Kind::File && c.iter().all(|b| index.contains(b)))
+        .filter(|(e, c)| {
+            e.kind == Kind::File
+                && c.blobs.iter().all(|b| index.contains(b))
+                && (tree_format >= 2 || c.holes.is_empty())
+        })
         .map(|pe| (pe.0.path.as_slice(), pe))
         .collect();
-    let mut content: Vec<Option<Vec<BlobId>>> = vec![None; entries.len()];
+    let mut content: Vec<Option<Content>> = vec![None; entries.len()];
     let mut to_read = Vec::new();
     for (i, e) in entries.iter_mut().enumerate() {
         if e.kind != Kind::File {
@@ -182,7 +205,8 @@ pub fn backup(
     progress.bytes_total.store(stats.copy_bytes, Relaxed);
     let level = profile.vault.as_ref().map_or(3, |v| v.compression_level);
     let seen = Seen::new(&index);
-    let data_packer = Packer::new(repo.backend(), &repo.crypto);
+    let data_packer =
+        Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs).timed(&progress.timings);
     let read_bytes = AtomicU64::new(0);
     // Sources on a spinning disk: read large files two at a time (no seeking between many).
     let gate = flux_fs::disk::IoGate::for_paths(profile.sources.paths.iter().map(|p| p.as_path()));
@@ -194,8 +218,12 @@ pub fn backup(
             ),
         });
     }
+    let opener = flux_fs::fsops::SourceOpener::new(
+        &flux_fs::scan::normalize_sources(&profile.sources.paths),
+        profile.options.symlinks != flux_core::profile::SymlinkMode::Preserve,
+    );
     let failures: Mutex<Vec<(usize, FileError)>> = Mutex::new(Vec::new());
-    let results: Vec<(usize, Vec<BlobId>, u64)> = pool.install(|| {
+    let results: Vec<(usize, Content, u64)> = pool.install(|| {
         to_read
             .par_iter()
             .filter_map(|&i| {
@@ -205,12 +233,20 @@ pub fn backup(
                 let e = &entries[i];
                 let r = {
                     let _turn = gate.enter(e.size);
-                    store_file(repo, &seen, &data_packer, e, level, progress)
+                    store_file(
+                        repo,
+                        &seen,
+                        (&data_packer, &opener),
+                        e,
+                        level,
+                        tree_format >= 2,
+                        progress,
+                    )
                 };
                 progress.entries_done.fetch_add(1, Relaxed);
                 match r {
-                    Ok((blobs, n)) => {
-                        read_bytes.fetch_add(n, Relaxed);
+                    Ok((c, data, n)) => {
+                        read_bytes.fetch_add(data, Relaxed);
                         if n != e.size {
                             report(Event::Warning {
                                 path: e.abs_path().display().to_string(),
@@ -220,7 +256,7 @@ pub fn backup(
                                 ),
                             });
                         }
-                        Some((i, blobs, n))
+                        Some((i, c, n))
                     }
                     Err(err) => {
                         let fe = FileError {
@@ -232,7 +268,7 @@ pub fn backup(
                             message: fe.message.clone(),
                         });
                         progress.warnings.fetch_add(1, Relaxed);
-                        failures.lock().expect("failures lock").push((i, fe));
+                        failures.locked().push((i, fe));
                         None
                     }
                 }
@@ -243,11 +279,13 @@ pub fn backup(
         // Packs written so far have no index and are removed by the next prune.
         return Err(VaultError::Cancelled);
     }
-    for (i, blobs, n) in results {
-        content[i] = Some(blobs);
+    // A pack that couldn't be written took the data of files that seemed to succeed.
+    data_packer.check()?;
+    for (i, c, n) in results {
+        content[i] = Some(c);
         entries[i].size = n; // what was actually stored
     }
-    let failures = failures.into_inner().expect("failures lock");
+    let failures = failures.into_value();
     if !failures.is_empty() && !profile.options.continue_on_errors {
         return Err(VaultError::Aborted(failures[0].1.message.clone()));
     }
@@ -259,8 +297,17 @@ pub fn backup(
     report(Event::Phase {
         phase: Phase::Finalizing,
     });
-    let tree_packer = Packer::new(repo.backend(), &repo.crypto);
-    let root = build_trees(repo, &seen, &tree_packer, &entries, &content, &failed)?;
+    let tree_packer =
+        Packer::padded(repo.backend(), &repo.crypto, repo.pad_packs).timed(&progress.timings);
+    let root = build_trees(
+        repo,
+        &seen,
+        &tree_packer,
+        &entries,
+        &content,
+        &failed,
+        tree_format,
+    )?;
 
     let mut packs = data_packer.finish()?;
     let tree_bytes = tree_packer.bytes_written.load(Relaxed);
@@ -270,6 +317,7 @@ pub fn backup(
         .map(|b| u64::from(b.length))
         .sum();
     packs.extend(tree_packer.finish()?);
+    undisturbed(repo, &index, &packs)?;
     if !packs.is_empty() {
         // Every pack on disk before the index that names them (one sync, not two per pack).
         repo.backend()
@@ -291,7 +339,7 @@ pub fn backup(
     errors.truncate(MAX_STORED_ERRORS);
     let copied_files = (to_read.len() - failed.len()) as u64;
     let meta = SnapshotMeta {
-        format: crate::format::FORMAT,
+        format: tree_format,
         id: hex::encode(random::<8>()?),
         profile: req.owner.profile.clone(),
         host: req.owner.host.clone(),
@@ -305,7 +353,18 @@ pub fn backup(
         },
         name: req.name.clone(),
         pinned: false,
-        sources: profile.sources.paths.clone(),
+        sources: {
+            let mut all: Vec<PathBuf> = profile
+                .sources
+                .paths
+                .iter()
+                .chain(&req.keep)
+                .cloned()
+                .collect();
+            all.sort();
+            all.dedup();
+            all
+        },
         stats: SnapshotStats {
             entries: stats.entries - failed.len() as u64,
             files: stats.files - failed.len() as u64,
@@ -330,21 +389,31 @@ pub fn backup(
         errors,
         errors_total,
         flux_version: flux_core::VERSION.to_owned(),
+        sources_missing: req
+            .keep
+            .iter()
+            .map(|p| flux_fs::snapshot::SourceMissing {
+                path: p.clone(),
+                kept_from: parent.as_ref().map(|r| r.meta.id.clone()),
+            })
+            .collect(),
+        note: None,
+        tags: Vec::new(),
     };
     // The new snapshot's file list for the next run, exactly as `flatten` would return it.
     if let Some(f) = &flat_cache {
-        let flat: Vec<(Entry, Vec<BlobId>)> = entries
+        let flat: Vec<(Entry, Content)> = entries
             .iter()
             .enumerate()
             .filter(|(i, _)| !failed.contains(i))
             .map(|(i, e)| {
                 let entry = Node::from_entry(e, Vec::new()).to_entry(e.path.clone());
-                let blobs = if e.kind == Kind::File {
+                let c = if e.kind == Kind::File {
                     content[i].clone().unwrap_or_default()
                 } else {
-                    Vec::new()
+                    Content::default()
                 };
-                (entry, blobs)
+                (entry, c)
             })
             .collect();
         save_flat(f, repo, &root_hex, &flat);
@@ -353,6 +422,7 @@ pub fn backup(
         meta: meta.clone(),
         tree: root_hex,
         parent: parent.map(|p| p.meta.id),
+        tree_format,
     })?;
     progress.set_phase(Phase::Done);
     report(Event::Phase { phase: Phase::Done });
@@ -362,35 +432,70 @@ pub fn backup(
     })
 }
 
-/// Chunk one file and store new chunks. Returns (blob ids, bytes read).
+/// Chunk one file and store new chunks. Returns (its content, data bytes read, the file's
+/// length as stored: the data plus the holes).
+///
+/// `sparse` (format 2): a file with holes has only its data read and stored, and the holes
+/// recorded. Format 1 reads every file densely (holes as zeros), as Flux before 1.0 did.
 ///
 /// Files up to the maximum chunk size are read whole and chunked in memory. Most files are
 /// small, and fastcdc's streaming chunker allocates a max-size (8 MiB) buffer per file,
 /// which would dominate the run. Both chunkers cut at the same points.
+#[allow(clippy::too_many_arguments)]
 fn store_file(
     repo: &VaultRepo,
     seen: &Seen<'_>,
-    packer: &Packer<'_>,
+    (packer, opener): (&Packer<'_>, &flux_fs::fsops::SourceOpener),
     e: &Entry,
     level: u8,
+    sparse: bool,
     progress: &Progress,
-) -> Result<(Vec<BlobId>, u64), VaultError> {
+) -> Result<(Content, u64, u64), VaultError> {
     let path = e.abs_path();
     let io_err = |err: std::io::Error| VaultError::io(&path.display().to_string(), err);
-    let mut f = File::open(&path).map_err(io_err)?;
+    let f = opener.open(&path).map_err(io_err)?;
+    let runs = if sparse {
+        flux_fs::fsops::data_segments(&f, e.size).map_err(io_err)?
+    } else {
+        None
+    };
+    let holes: Vec<Hole> = runs
+        .as_deref()
+        .map(|r| Content::holes_between(r, e.size))
+        .unwrap_or_default();
+    let hole_bytes: u64 = holes.iter().map(|h| h.len).sum();
+    // Holes count as done at once, as Mirror's sparse copy counts them.
+    progress.bytes_done.fetch_add(hole_bytes, Relaxed);
+    let data_len = e.size - hole_bytes;
+    let reader = || -> Result<Box<dyn std::io::Read + Send>, VaultError> {
+        let f = f.try_clone().map_err(io_err)?;
+        Ok(match &runs {
+            Some(r) => Box::new(Segments::new(f, r.clone())),
+            None => {
+                use std::io::Seek;
+                let mut f = f;
+                f.rewind().map_err(io_err)?;
+                Box::new(f)
+            }
+        })
+    };
     let c = &repo.config.chunker;
     let (min, avg, max) = (c.min as usize, c.avg as usize, c.max as usize);
     let seed = repo.crypto.chunk_seed();
     let level1 = fastcdc::v2020::Normalization::Level1;
     let mut blobs = Vec::new();
     let mut total = 0u64;
+    let timings = &progress.timings;
     let mut store = |data: &[u8]| -> Result<(), VaultError> {
         if progress.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
-        let id = repo.crypto.blob_id(data);
+        let id = timings.time(Stage::Dedup, || repo.crypto.blob_id(data));
         if seen.claim(&id) {
-            let (_, sealed) = encode_blob(&repo.crypto, data, level)?;
+            // Claimed: other files now count on this blob being stored.
+            let (_, sealed) = timings
+                .time(Stage::Compress, || encode_blob(&repo.crypto, data, level))
+                .inspect_err(|e| packer.fail(e))?;
             packer.add(BlobKind::Data, id, data.len(), &sealed)?;
         }
         blobs.push(id);
@@ -398,34 +503,48 @@ fn store_file(
         progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
         Ok(())
     };
+    let done = |blobs: Vec<BlobId>, total: u64, holes: Vec<Hole>| {
+        // A sparse file that changed while being read: its holes were found before the
+        // read and no longer describe what was read (one could end past the new size,
+        // which no reader of the snapshot accepts). It isn't stored this time.
+        if !holes.is_empty() && total != data_len {
+            return Err(io_err(std::io::Error::other(
+                "a sparse file that changed while being backed up; it is backed up next time",
+            )));
+        }
+        let n = total + hole_bytes;
+        Ok((Content { blobs, holes }, total, n))
+    };
 
-    if e.size as usize <= max {
+    if data_len as usize <= max {
         use std::io::Read;
-        let mut data = Vec::with_capacity(e.size as usize + 1);
+        let mut data = Vec::with_capacity(data_len as usize + 1);
         // Read at most max+1 bytes: if the file grew past the limit, fall through to streaming.
-        (&mut f)
-            .take(max as u64 + 1)
-            .read_to_end(&mut data)
-            .map_err(io_err)?;
+        timings.time(Stage::Read, || {
+            reader()?
+                .take(max as u64 + 1)
+                .read_to_end(&mut data)
+                .map_err(io_err)
+        })?;
         if data.len() <= max {
             if data.is_empty() {
-                return Ok((Vec::new(), 0));
+                return done(Vec::new(), 0, holes);
             }
-            for chunk in
+            let cuts: Vec<_> = timings.time(Stage::Chunk, || {
                 fastcdc::v2020::FastCDC::with_level_and_seed(&data, min, avg, max, level1, seed)
-            {
+                    .collect()
+            });
+            for chunk in cuts {
                 store(&data[chunk.offset..chunk.offset + chunk.length])?;
             }
-            return Ok((blobs, total));
+            return done(blobs, total, holes);
         }
-        use std::io::Seek;
-        f.rewind().map_err(io_err)?;
     }
     // Larger files: this thread reads and cuts the next batch of chunks while the pool's
     // other threads hash, compress and encrypt the batch before it, so one big file (a
     // disk image, a video) no longer runs on a single core. Chunks keep their order.
     let mut chunks = fastcdc::v2020::StreamCDC::with_level_and_seed(
-        BufReader::with_capacity(1 << 20, f),
+        BufReader::with_capacity(1 << 20, reader()?),
         min,
         avg,
         max,
@@ -433,6 +552,7 @@ fn store_file(
         seed,
     );
     let mut read_batch = || -> Result<Vec<Vec<u8>>, VaultError> {
+        let t = std::time::Instant::now();
         let mut batch = Vec::new();
         let mut bytes = 0;
         while bytes < STREAM_BATCH {
@@ -441,6 +561,8 @@ fn store_file(
             bytes += chunk.data.len();
             batch.push(chunk.data);
         }
+        // Reading a big file and cutting it happen together here.
+        timings.add(Stage::Read, t.elapsed());
         Ok(batch)
     };
     let mut current = read_batch()?;
@@ -452,9 +574,14 @@ fn store_file(
             current
                 .par_iter()
                 .map(|data| -> Result<(BlobId, Option<Vec<u8>>), VaultError> {
-                    let id = repo.crypto.blob_id(data);
+                    let id = timings.time(Stage::Dedup, || repo.crypto.blob_id(data));
                     let sealed = if seen.claim(&id) {
-                        Some(encode_blob(&repo.crypto, data, level)?.1)
+                        Some(
+                            timings
+                                .time(Stage::Compress, || encode_blob(&repo.crypto, data, level))
+                                .inspect_err(|e| packer.fail(e))?
+                                .1,
+                        )
                     } else {
                         None
                     };
@@ -472,7 +599,114 @@ fn store_file(
         }
         current = next?;
     }
-    Ok((blobs, total))
+    done(blobs, total, holes)
+}
+
+/// Before a backup commits: is what it stored, and what it counted on, still there?
+///
+/// A backup holds a lock while it runs, but another computer can take that lock for stale
+/// (this one slept or lost its connection for longer than a lock lives, or the clocks
+/// disagree) and prune the Vault meanwhile: the packs this run wrote aren't in any index
+/// yet, so they'd be deleted as left over, and data it deduplicated against may be gone.
+/// A snapshot written after that would name data that doesn't exist. So: every index file
+/// this run started from must still be there (a prune that removed or moved data replaces
+/// them), and so must every pack it wrote.
+fn undisturbed(
+    repo: &VaultRepo,
+    index: &crate::pack::Index,
+    packs: &[crate::format::IndexPack],
+) -> Result<(), VaultError> {
+    let gone = |what: &str| {
+        VaultError::Store(format!(
+            "{what} was removed from the Vault while this backup ran (another computer pruned it, taking this backup's lock for abandoned)"
+        ))
+    };
+    let backend = repo.backend();
+    let now: HashSet<String> = backend
+        .list("index")
+        .map_err(|e| VaultError::io("index", e))?
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    if index.files.iter().any(|f| !now.contains(f)) {
+        return Err(gone("data this backup counted on"));
+    }
+    // A few packs: ask for each. Many: one listing is cheaper.
+    let present: Option<HashSet<String>> = if packs.len() > 32 {
+        Some(
+            backend
+                .list("data")
+                .map_err(|e| VaultError::io("data", e))?
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    for p in packs {
+        let hex = hex_id(&p.pack);
+        let there = match &present {
+            Some(names) => names.contains(&hex),
+            None => {
+                let path = crate::backend::pack_path(&hex);
+                backend
+                    .exists(&path)
+                    .map_err(|e| VaultError::io(&path, e))?
+            }
+        };
+        if !there {
+            return Err(gone("data this backup had stored"));
+        }
+    }
+    Ok(())
+}
+
+/// The data of a sparse file, its runs read one after the other (the holes left out).
+struct Segments {
+    file: File,
+    runs: std::vec::IntoIter<(u64, u64)>,
+    /// (file offset, bytes left) of the run being read.
+    current: Option<(u64, u64)>,
+}
+
+impl Segments {
+    fn new(file: File, runs: Vec<(u64, u64)>) -> Self {
+        Self {
+            file,
+            runs: runs.into_iter(),
+            current: None,
+        }
+    }
+}
+
+impl std::io::Read for Segments {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        loop {
+            let (off, left) = match self.current {
+                Some((_, 0)) | None => match self.runs.next() {
+                    Some(r) => {
+                        self.current = Some(r);
+                        continue;
+                    }
+                    None => return Ok(0),
+                },
+                Some(c) => c,
+            };
+            let want = buf.len().min(left as usize);
+            let n = self.file.read_at(&mut buf[..want], off)?;
+            // The file shrank while being read: this run ends here.
+            self.current = Some(if n == 0 {
+                (off, 0)
+            } else {
+                (off + n as u64, left - n as u64)
+            });
+            if n > 0 {
+                return Ok(n);
+            }
+        }
+    }
 }
 
 /// The cached file list of the latest snapshot, one file per repository and owner.
@@ -481,13 +715,14 @@ fn flat_cache_path(dir: &Path, repo: &VaultRepo, owner: &Owner) -> PathBuf {
         "{}\0{}\0{}\0{}",
         repo.config.id, owner.profile, owner.host, owner.user
     );
+    // "flat2": the list holds holes since format 2; older lists are left alone (and unused).
     dir.join(format!(
-        "flat-{}",
+        "flat2-{}",
         &blake3::hash(key.as_bytes()).to_hex()[..24]
     ))
 }
 
-type Flat = Vec<(Entry, Vec<BlobId>)>;
+type Flat = Vec<(Entry, Content)>;
 
 /// The file list cached in `cache_dir` for `owner`'s snapshot with root tree `tree`, if any
 /// (what the next backup will use instead of [`VaultRepo::flatten`]).
@@ -532,8 +767,9 @@ fn build_trees(
     seen: &Seen<'_>,
     packer: &Packer<'_>,
     entries: &[Entry],
-    content: &[Option<Vec<BlobId>>],
+    content: &[Option<Content>],
     failed: &HashSet<usize>,
+    tree_format: u32,
 ) -> Result<BlobId, VaultError> {
     fn parent_of(p: &[u8]) -> &[u8] {
         p.iter()
@@ -567,7 +803,9 @@ fn build_trees(
                     .to_vec();
                 let mut n = Node::from_entry(e, name);
                 if e.kind == Kind::File {
-                    n.content = content[i].clone().unwrap_or_default();
+                    let c = content[i].clone().unwrap_or_default();
+                    n.content = c.blobs;
+                    n.holes = c.holes;
                 }
                 if e.kind == Kind::Dir {
                     n.subtree = subtree.get(e.path.as_slice()).copied();
@@ -576,8 +814,9 @@ fn build_trees(
             })
             .collect();
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
-        let bytes = postcard::to_allocvec(&Tree { nodes })
-            .map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        let bytes = Tree { nodes }
+            .encode(tree_format)
+            .map_err(|e| VaultError::Corrupt(format!("tree format {tree_format}: {e}")))?;
         let id = repo.crypto.blob_id(&bytes);
         if seen.claim(&id) {
             let (_, sealed) = encode_blob(&repo.crypto, &bytes, 3)?;

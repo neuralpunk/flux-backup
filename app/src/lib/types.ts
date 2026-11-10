@@ -53,6 +53,12 @@ export interface SnapshotMeta {
   errors: FileError[];
   errors_total: number;
   flux_version: string;
+  /** Sources whose drive wasn't connected for this snapshot. */
+  sources_missing?: { path: string; kept_from?: string | null }[];
+  /** The user's note; never affects retention. */
+  note?: string | null;
+  /** The user's tags; never affect retention. */
+  tags?: string[];
 }
 
 export interface RunRecord {
@@ -67,6 +73,33 @@ export interface RunRecord {
   error: string | null;
   stats: SnapshotStats | null;
   warnings: number;
+  /** Sources whose drive wasn't connected. */
+  sources_missing?: string[];
+  /** How the backup went at the profile's other destinations. */
+  destinations?: DestinationRun[];
+  /** Where the time went (the performance inspector). */
+  performance?: Performance | null;
+}
+
+export interface DestinationRun {
+  name: string;
+  status: RunStatus;
+  snapshot?: string | null;
+  error?: string | null;
+  stats?: SnapshotStats | null;
+}
+
+/** One more place a profile's backups go (browse it as its own id, `home+nas`). */
+export interface DestinationSummary {
+  id: string;
+  name: string;
+  label: string;
+  engine: Engine;
+  target: string;
+  remote: boolean;
+  offsite: boolean;
+  /** A copy of the main destination's backup. */
+  replica?: boolean;
 }
 
 export interface ProfileSummary {
@@ -88,6 +121,10 @@ export interface ProfileSummary {
   errors: string[];
   last_run: RunRecord | null;
   running: boolean;
+  /** The main destination is kept away from here. */
+  offsite?: boolean;
+  /** More places the backups go. */
+  destinations?: DestinationSummary[];
 }
 
 export interface Overview {
@@ -106,11 +143,67 @@ export interface Overview {
   health: Health[];
   /** Free space, its history and forecast (local targets). */
   space: Space | null;
+  /** Restore tests: the setting and the latest. */
+  restore_test?: { every: TestEvery; last: TestReport | null; last_passed: string | null };
+  /** Unusual changes found and not yet dismissed. */
+  unusual?: UnusualReport | null;
+}
+
+/** What unusual-change detection found in a backup. */
+export interface UnusualReport {
+  signals: string[];
+  affected: string[];
+  affected_total: number;
+  by_folder: [string, number][];
+  by_extension: [string, number][];
+  /** The snapshot with the changes, and the one before it (kept). */
+  snapshot: string;
+  before?: string | null;
+}
+
+export type TestEvery = "off" | "backup" | "week" | "month";
+export type TestMode = "random_files" | "percent" | "full" | "rolling";
+
+/** `[restore_test]` in a profile. */
+export interface RestoreTestSettings {
+  every?: TestEvery;
+  mode?: TestMode;
+  files?: number;
+  percent?: number;
+  window?: string | null;
+  max_runtime?: string | null;
+  max_read?: string | null;
+  compare_with_source?: boolean;
+}
+
+export interface TestProblem {
+  path: string;
+  problem: "could_not_restore" | "size_differs" | "content_differs" | "metadata_differs" | "differs_from_source";
+  detail?: string | null;
+}
+
+/** A restore test's report. */
+export interface TestReport {
+  started: string;
+  finished: string;
+  snapshot: string;
+  mode: TestMode;
+  result: "passed" | "warning" | "failed";
+  picked: number;
+  tested: number;
+  bytes: number;
+  stopped_early: boolean;
+  problems: TestProblem[];
+  problems_total: number;
+  error?: string | null;
 }
 
 /** A health warning, in words. */
 export interface Health {
   level: "warning" | "danger";
+  /** What it's about: overdue, failing, low_space, unplugged, source_missing,
+   * destination_failing, restore_test_failed, unverified, unusual. */
+  kind?: string;
   text: string;
   /** What to do about it. */
   hint: string | null;
@@ -135,6 +228,8 @@ export interface BackupStatus {
   health: Health[];
   /** The last 30 days, oldest first. */
   days: Day[];
+  /** Restore tests are on and none passed within their interval. */
+  unverified?: boolean;
 }
 
 /** What a profile being set up would back up. */
@@ -210,6 +305,8 @@ export interface RestoreOutcome {
   would_write: string[];
   /** Exact restores: items not in the snapshot that were removed (or moved aside). */
   removed?: number;
+  /** Exact restores: why some folders were left as they are. */
+  exact_notes?: string[];
 }
 
 /** A path found in any snapshot. */
@@ -257,6 +354,8 @@ export interface RestorePreview {
   /** Exact restores: items not in the snapshot that would be removed, and the first few. */
   remove?: number;
   remove_paths?: string[];
+  /** Exact restores: why some folders are left as they are. */
+  exact_notes?: string[];
 }
 
 /** Scheduled backups paused until a moment, or until resumed (`until: null`). */
@@ -265,6 +364,8 @@ export interface Pause {
 }
 
 export interface Preferences {
+  /** Webhooks told about every backup. */
+  webhooks?: Webhook[];
   notify_success: boolean;
   default_exclude: string[];
   default_exclude_custom: boolean;
@@ -385,6 +486,8 @@ export interface Profile {
     exclude_caches: boolean;
     exclude_if_present?: string[];
     one_file_system: boolean;
+    /** Sources on a drive of their own (recorded when saved with the drive connected). */
+    volumes?: SourceVolume[];
   };
   retention: {
     enabled: boolean;
@@ -399,6 +502,12 @@ export interface Profile {
     keep_named: boolean;
     min_free_space?: string | null;
     min_free_inodes_percent?: number | null;
+    /** Never fewer complete snapshots than this (missing: 1). */
+    safety_floor?: number;
+    /** Missing: "hold". */
+    after_problems?: "hold" | "prune";
+    keep_history_days?: number | null;
+    keep_history_runs?: number | null;
   };
   schedule: {
     trigger: "manual" | "calendar" | "interval";
@@ -423,11 +532,18 @@ export interface Profile {
     threads: number;
   };
   hooks?: { pre_backup?: string[]; post_backup?: string[]; on_error?: string[]; timeout?: string | null };
-  vault?: { compression_level: number; encryption: boolean; password_source: PasswordSource } | null;
+  vault?: VaultOptions | null;
   rsync?: { extra_args?: string[] } | null;
   borg?: BorgOptions | null;
   /** Upkeep after scheduled backups (absent: the defaults). */
   maintenance?: { verify_monthly: boolean; free_space_weekly: boolean };
+  offsite?: boolean;
+  destinations?: Destination[];
+  network?: NetworkRules;
+  restore_test?: RestoreTestSettings;
+  /** Missing: "normal". */
+  unusual_changes?: "off" | "normal" | "high";
+  webhooks?: Webhook[];
 }
 
 export type BorgEncryption = "repokey-blake2" | "repokey" | "none";
@@ -588,4 +704,258 @@ export interface BitProfile {
   latest: string | null;
   /** Its destination is there now (a drive: connected). */
   connected: boolean;
+}
+
+/** One installed program of Flux Backup (the `flux` command, the helper). */
+export interface Component {
+  path: string;
+  /** `null` when it couldn't be run. */
+  version: string | null;
+}
+
+/** What the About dialog shows. */
+export interface About {
+  version: string;
+  cli: Component;
+  /** `null` when no helper is installed (system backups unavailable). */
+  helper: Component | null;
+  /** The `flux` command or the helper reports another version than the app. */
+  mismatch: boolean;
+  os: string;
+  kernel: string;
+  /** The WebKitGTK version drawing the window (app only). */
+  webkit?: string | null;
+}
+
+/** The project's pages the app can open. */
+export type LinkName = "website" | "guide" | "issues" | "source" | "changes";
+
+/** How hard a Vault password is hashed (Argon2id). */
+export type PasswordHashing =
+  | { level: "standard" }
+  | { level: "strong" }
+  | { level: "maximum" }
+  | { level: "custom"; memory_mib: number; passes: number; threads: number };
+
+export interface VaultOptions {
+  compression_level: number;
+  encryption: boolean;
+  password_source: PasswordSource;
+  /** Missing: standard. */
+  hashing?: PasswordHashing;
+  hide_sizes?: boolean;
+  lock_after_minutes?: number | null;
+  unlock_file?: string | null;
+  /** Keep flux-vault-recover next to the Vault on a drive (missing: yes). */
+  keep_recovery_tool?: boolean;
+}
+
+/** One password (key slot) of a Vault. */
+export interface KeyInfo {
+  id: string;
+  label: string;
+  created: string;
+  /** The one that opened the Vault in the app. */
+  current: boolean;
+  hashing: PasswordHashing;
+  unlock_file: boolean;
+}
+
+export interface VaultSecurity {
+  keys: KeyInfo[];
+  unlocked: boolean;
+  hashing: PasswordHashing;
+  unlock_file: string | null;
+  unlock_file_present: boolean;
+  unlock_ms: number;
+}
+
+export interface UnlockFileResult {
+  unlock_file: string | null;
+  /** Other passwords that still open the Vault without the file. */
+  without_file: KeyInfo[];
+}
+
+export type WhenMissing = "skip" | "wait" | "fail";
+
+/** A source on a drive of its own, and what a backup does when that drive isn't there. */
+export interface SourceVolume {
+  path: string;
+  fs_uuid: string;
+  when_missing: WhenMissing;
+  /** With "wait": how long at most ("1h"); missing: 1 hour. */
+  wait_for?: string | null;
+}
+
+/** One more destination, as stored in the profile. */
+export interface Destination {
+  name: string;
+  label?: string | null;
+  engine: Engine;
+  target: Target;
+  offsite?: boolean;
+  /** "replicate": copied from the main destination after each run. */
+  mode?: "independent" | "replicate";
+  vault?: VaultOptions | null;
+  rsync?: unknown;
+  borg?: unknown;
+}
+
+/** A profile's or destination's id → the profile's id and the destination's name. */
+export function splitDestination(id: string): [string, string | null] {
+  const i = id.indexOf("+");
+  return i < 0 ? [id, null] : [id.slice(0, i), id.slice(i + 1)];
+}
+
+/** `[network]`: Wi-Fi rules and upload limits by time of day (backups to a server). */
+export interface NetworkRules {
+  wifi_only?: string[];
+  wifi_never?: string[];
+  bandwidth?: BandwidthWindow[];
+}
+
+export interface BandwidthWindow {
+  /** `*`, `Mon..Fri`, `Sat,Sun`… */
+  days: string;
+  /** `HH:MM` */
+  from: string;
+  to: string;
+  /** `"2MB"`; missing: unlimited. */
+  limit?: string | null;
+}
+
+export type WebhookPreset = "json" | "ntfy" | "gotify" | "slack" | "discord" | "healthchecks";
+export type WebhookEvent = "started" | "succeeded" | "warning" | "failed" | "skipped" | "restore_test_failed" | "unusual_changes" | "low_space";
+
+/** A webhook: where to tell how backups go, off this computer. */
+export interface Webhook {
+  url: string;
+  preset?: WebhookPreset;
+  /** Empty: failures, warnings, unusual changes and failed restore tests. */
+  events?: WebhookEvent[];
+  headers?: string[];
+  enabled?: boolean;
+}
+
+/** The names a backup is kept under: the computer, user and profile that made it. */
+export interface KeptAs {
+  host: string;
+  user: string;
+  profile: string;
+}
+
+/** A backup found on a drive or a server (Recover an existing backup). */
+export interface FoundBackup {
+  engine: Engine;
+  kept: KeptAs;
+  location: string;
+  name: string;
+  sources: string[];
+  /** Its settings were kept with it. */
+  saved: boolean;
+  snapshots: number | null;
+  newest: string | null;
+  /** Made on this computer by this user. */
+  here: boolean;
+}
+
+export interface BackupSearch {
+  found: FoundBackup[];
+  /** There's an encrypted Vault: its backups are listed with its password. */
+  vault_locked: boolean;
+  wrong_password: boolean;
+}
+
+/** After recovering: only get files back, or carry on backing up from here. */
+export type RecoverThen = "restore" | "carry_on";
+
+/** One line of the recovery readiness checklist. */
+export interface ReadinessCheck {
+  key: string;
+  ok: boolean;
+  /** Only you can tell: tick it. */
+  asked: boolean;
+  title: string;
+  detail: string;
+}
+
+/** Snapshot export: .tar.zst keeps everything, ZIP is for sharing. */
+export type ArchiveFormat = "tar_zst" | "zip";
+export type ChecksumKind = "sha256" | "blake3";
+
+export interface ExportOutcome {
+  archive: string;
+  size: number;
+  files: number;
+  bytes: number;
+  manifest: string | null;
+  /** What the format couldn't hold, in words. */
+  left_out: string[];
+  errors: string[];
+}
+
+/** The rule tester's answer: is a path backed up, and why. */
+export interface Explained {
+  path: string;
+  backed_up: boolean;
+  text: string;
+}
+
+/** One item of a folder in the coverage view. */
+export interface CoverageItem {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  backed_up: boolean;
+  why: string;
+  files_in: number;
+  bytes_in: number;
+  files_out: number;
+  bytes_out: number;
+}
+
+export interface Coverage {
+  path: string;
+  backed_up: boolean;
+  why: string;
+  items: CoverageItem[];
+  /** The totals stopped at the time limit. */
+  partial: boolean;
+}
+
+/** Where setting up a backup starts. */
+export interface Template {
+  /** `home`, `documents`…, or `own:<name>`. */
+  id: string;
+  name: string;
+  line: string;
+  icon: string;
+  own: boolean;
+}
+
+/** Where a run's time went. */
+export interface Performance {
+  /** Wall-clock seconds of each phase, in order. */
+  phases: { name: string; secs: number }[];
+  /** Seconds per stage of the work, summed over threads. */
+  stages?: { name: string; secs: number }[];
+  writes: number;
+  bytes_written: number;
+  write_ms?: number | null;
+  /** Bytes of files processed per second while copying. */
+  throughput?: number | null;
+}
+
+/** What a backup's snapshots hold, what they take, and what dedup and compression save. */
+export interface Storage {
+  snapshots: number;
+  latest_bytes: number;
+  latest_files: number;
+  logical_bytes: number;
+  stored_bytes: number | null;
+  dedup_saved: number | null;
+  compression_saved: number | null;
+  shared_with: number;
+  basis: string;
 }

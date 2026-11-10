@@ -68,3 +68,18 @@ pub fn local_target(dir: &Path) -> Option<SshTarget> {
         program,
     })
 }
+
+/// Create an executable script at `path` (a fake `shutdown`, `nmcli`, `flux`… for tests),
+/// without this multithreaded process ever holding it open for writing: a child forked
+/// meanwhile by another test would share the descriptor until its exec, and running the
+/// script would fail with "Text file busy". `install`, a process of its own, creates it.
+pub fn executable(path: &Path, text: &str) -> bool {
+    let src = path.with_extension("script-text");
+    std::fs::write(&src, text).is_ok()
+        && std::process::Command::new("install")
+            .args(["-m", "0755"])
+            .arg(&src)
+            .arg(path)
+            .status()
+            .is_ok_and(|s| s.success())
+}

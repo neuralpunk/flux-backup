@@ -2,7 +2,7 @@
 //! use this for everything except taking backups (see [`crate::run_backup`]).
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -13,7 +13,7 @@ use flux_compat::rsync::{RsyncRepo, RsyncSource};
 use flux_core::profile::{Engine, Profile, Retention, Target};
 use flux_core::progress::{Progress, Reporter};
 use flux_core::retention::Decision;
-use flux_core::{Paths, ProfileId, sys, target_check};
+use flux_core::{Paths, ProfileId, target_check};
 use flux_fs::entry::Entry;
 use flux_fs::outcome::CheckSummary;
 use flux_fs::restore::{RestoreError, RestoreOutcome, RestoreRequest};
@@ -22,6 +22,7 @@ use flux_mirror::MirrorError;
 use flux_mirror::remote::{RemoteMirror, RemoteSource};
 use flux_mirror::repo::MirrorRepo;
 use flux_transport::{SftpPool, SshTarget};
+use flux_vault::crypto::UnlockSecret;
 use flux_vault::{Owner, VaultError, VaultRepo};
 
 use crate::password::{self, Ask, PasswordError, Purpose};
@@ -44,6 +45,16 @@ pub enum RepoError {
     NotInSnapshot(PathBuf, String),
     #[error("profile {0} has no backups yet")]
     Empty(String),
+    #[error(
+        "this Vault's password works only together with its unlock file, {0}, which isn't there: connect the drive or stick it's on"
+    )]
+    UnlockFileMissing(PathBuf),
+    #[error("can't read the unlock file {0}: {1}")]
+    UnlockFile(PathBuf, std::io::Error),
+    #[error(
+        "this backup is set to be encrypted, but the Vault at {0} says it is not. Nothing was written. If the Vault never was encrypted, turn encryption off for this backup (`encryption = false` under [vault] in its settings). If it was, someone has changed the Vault: don't back up to it until you know why"
+    )]
+    NotEncrypted(String),
 }
 
 impl RepoError {
@@ -88,12 +99,23 @@ pub fn sftp_pool(paths: &Paths, profile: &Profile, batch: bool) -> Option<Arc<Sf
     Some(Arc::new(SftpPool::new(t, SFTP_SESSIONS)))
 }
 
-/// Owner of a profile's snapshots in a (shared) Vault.
-pub fn owner_for(id: &ProfileId) -> Owner {
+/// Owner of a profile's snapshots in a (shared) Vault: this computer and user, or the
+/// ones a recovered backup was made as ([`Profile::kept_as`]).
+pub fn owner_for(id: &ProfileId, profile: &Profile) -> Owner {
+    let k = profile.kept_as(id);
     Owner {
-        profile: id.to_string(),
-        host: sys::hostname(),
-        user: sys::username(),
+        profile: k.profile,
+        host: k.host,
+        user: k.user,
+    }
+}
+
+/// Owner of the snapshots a profile sees: a copy of the main destination
+/// ([`Profile::replica`]) holds the main profile's snapshots.
+pub fn owner_of(id: &ProfileId, profile: &Profile) -> Owner {
+    match id.split_destination() {
+        Some((base, _)) if profile.replica => owner_for(&base, profile),
+        _ => owner_for(id, profile),
     }
 }
 
@@ -116,12 +138,98 @@ pub fn vault_backend(
             Target::Ssh {
                 bandwidth_limit, ..
             },
-        ) => Box::new(flux_vault::backend::SftpBackend::new(
-            p,
-            root.display().to_string(),
-            bandwidth_limit.map(|b| b.bytes()),
-        )),
+        ) => {
+            let b = flux_vault::backend::SftpBackend::new(
+                p,
+                root.display().to_string(),
+                bandwidth_limit.map(|b| b.bytes()),
+            );
+            if profile.network.bandwidth.is_empty() {
+                Box::new(b)
+            } else {
+                // Limits by time of day: asked as the backup runs.
+                let (network, default) = (profile.network.clone(), *bandwidth_limit);
+                Box::new(b.with_rate(Box::new(move || {
+                    let now = jiff::Zoned::now().datetime();
+                    network.limit_at(&now, default).map(|b| b.bytes())
+                })))
+            }
+        }
         _ => Box::new(flux_vault::LocalBackend::new(&root)),
+    }
+}
+
+/// The profile with its server target's upload limit set to the one in force now (from
+/// `[network] bandwidth`), for engines that take the limit when they start.
+pub fn with_bandwidth_now(profile: &Profile) -> std::borrow::Cow<'_, Profile> {
+    let Target::Ssh {
+        bandwidth_limit, ..
+    } = &profile.target
+    else {
+        return std::borrow::Cow::Borrowed(profile);
+    };
+    if profile.network.bandwidth.is_empty() {
+        return std::borrow::Cow::Borrowed(profile);
+    }
+    let now = profile
+        .network
+        .limit_at(&jiff::Zoned::now().datetime(), *bandwidth_limit);
+    let mut p = profile.clone();
+    if let Target::Ssh {
+        bandwidth_limit, ..
+    } = &mut p.target
+    {
+        *bandwidth_limit = now;
+    }
+    std::borrow::Cow::Owned(p)
+}
+
+/// The largest unlock file Flux reads (any file works as one; Flux makes 64-byte ones).
+const UNLOCK_FILE_MAX: u64 = 1 << 20;
+
+/// The secret of the profile's unlock file, if it has one and the file is there.
+pub fn unlock_secret(profile: &Profile) -> Result<Option<UnlockSecret>, RepoError> {
+    let Some(path) = profile.vault.as_ref().and_then(|v| v.unlock_file.as_ref()) else {
+        return Ok(None);
+    };
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(RepoError::UnlockFile(path.clone(), e)),
+        Ok(m) if !m.is_file() || m.len() > UNLOCK_FILE_MAX => {
+            return Err(RepoError::UnlockFile(
+                path.clone(),
+                std::io::Error::other("not a file of at most 1 MiB"),
+            ));
+        }
+        Ok(_) => {}
+    }
+    let bytes = std::fs::read(path).map_err(|e| RepoError::UnlockFile(path.clone(), e))?;
+    Ok(Some(flux_vault::crypto::unlock_secret(&bytes)))
+}
+
+/// Create a new unlock file at `path` (64 random bytes, private, never overwriting).
+pub fn create_unlock_file(path: &Path) -> Result<UnlockSecret, RepoError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes: [u8; 64] = flux_vault::crypto::random().map_err(VaultError::from)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| RepoError::UnlockFile(path.to_owned(), e))?;
+    f.write_all(&bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| RepoError::UnlockFile(path.to_owned(), e))?;
+    Ok(flux_vault::crypto::unlock_secret(&bytes))
+}
+
+/// Apply the profile's Vault settings that matter while writing: the password hashing for
+/// new passwords, and padding.
+fn configure(repo: &mut VaultRepo, profile: &Profile) {
+    if let Some(v) = &profile.vault {
+        repo.kdf = flux_vault::crypto::KdfParams::of(v.hashing);
+        repo.pad_packs = v.hide_sizes && v.encryption;
     }
 }
 
@@ -148,19 +256,63 @@ pub fn open_vault(
         } else {
             None
         };
-        return Ok(VaultRepo::init(
+        let unlock = if encrypted {
+            unlock_secret(profile)?
+        } else {
+            None
+        };
+        let mut repo = VaultRepo::init_with(
             backend(),
             pw.as_deref().map(|s| s.as_str()),
-            flux_vault::crypto::KdfParams::DEFAULT,
-        )?);
+            profile
+                .vault
+                .as_ref()
+                .map_or(flux_vault::crypto::KdfParams::DEFAULT, |v| {
+                    flux_vault::crypto::KdfParams::of(v.hashing)
+                }),
+            unlock,
+        )?;
+        configure(&mut repo, profile);
+        return Ok(repo);
     }
     // Only ask for a password if the repository is actually encrypted.
-    match VaultRepo::open(backend(), None) {
+    let mut repo = match VaultRepo::open(backend(), None) {
         Err(VaultError::PasswordRequired) => {
             let pw = password::obtain(id, profile, Purpose::Open, ask)?;
-            Ok(VaultRepo::open(backend(), Some(&pw))?)
+            open_vault_with(backend(), profile, &pw)?
         }
-        r => Ok(r?),
+        r => r?,
+    };
+    // Whether a Vault is encrypted is read from the Vault itself, which whoever holds the
+    // drive or server can rewrite. A backup that is meant to be encrypted never goes on
+    // in the clear.
+    if encrypted && !repo.config.encrypted {
+        return Err(RepoError::NotEncrypted(backend().describe()));
+    }
+    configure(&mut repo, profile);
+    Ok(repo)
+}
+
+/// Open an existing encrypted Vault with `password` and the profile's unlock file (if it
+/// has one). A missing unlock file is [`RepoError::UnlockFileMissing`], naming it.
+pub fn open_vault_with(
+    backend: Box<dyn flux_vault::Backend>,
+    profile: &Profile,
+    password: &str,
+) -> Result<VaultRepo, RepoError> {
+    let unlock = unlock_secret(profile)?;
+    match VaultRepo::open_with(backend, Some(password), unlock) {
+        Err(VaultError::UnlockFileNeeded) => Err(
+            match profile.vault.as_ref().and_then(|v| v.unlock_file.clone()) {
+                Some(f) => RepoError::UnlockFileMissing(f),
+                None => VaultError::UnlockFileNeeded.into(),
+            },
+        ),
+        r => {
+            let mut repo = r?;
+            configure(&mut repo, profile);
+            Ok(repo)
+        }
     }
 }
 
@@ -224,8 +376,8 @@ impl AnyRepo {
         match (profile.engine, &profile.target) {
             (Engine::Mirror, Target::Ssh { path, .. }) => {
                 let pool = sftp_pool(paths, profile, ask.is_none()).expect("ssh target");
-                let root =
-                    RemoteMirror::locate(path, &sys::hostname(), &sys::username(), id.as_str());
+                let k = profile.kept_as(id);
+                let root = RemoteMirror::locate(path, &k.host, &k.user, &k.profile);
                 match RemoteMirror::open(pool, root, &paths.cache_dir) {
                     Ok(r) => Ok(AnyRepo::MirrorRemote(Box::new(r))),
                     Err(MirrorError::NoRepository(_)) => Err(RepoError::Empty(id.to_string())),
@@ -239,7 +391,7 @@ impl AnyRepo {
             },
             (Engine::Vault, _) => Ok(AnyRepo::Vault {
                 repo: Box::new(open_vault(paths, id, profile, false, ask)?),
-                owner: owner_for(id),
+                owner: owner_of(id, profile),
             }),
             (Engine::Rsync, _) => {
                 match RsyncRepo::open_profile(paths, id, profile, ask.is_none()) {
@@ -281,6 +433,16 @@ impl AnyRepo {
             AnyRepo::Rsync(r) => r.find(spec)?,
             AnyRepo::Borg(r) => r.find(spec)?,
         })
+    }
+
+    /// Whether `id` is the full id of a Vault snapshot whose record is damaged: it isn't
+    /// listed and can't be restored, and pruning refuses to delete anything while it's
+    /// there. It can be deleted by that id.
+    pub fn is_damaged_snapshot(&self, id: &str) -> bool {
+        match self {
+            AnyRepo::Vault { repo, .. } => repo.is_damaged_record(id),
+            _ => false,
+        }
     }
 
     /// The snapshot's entries, sorted by path.
@@ -344,7 +506,13 @@ impl AnyRepo {
                     progress,
                     report,
                 )?;
-                let out = flux_fs::restore::restore(&source, req, progress, report).map_err(map);
+                let out = flux_fs::restore::restore(&source, req, progress, report)
+                    .map_err(map)
+                    .map(|mut out| {
+                        // What borg couldn't extract whole wasn't restored: say so.
+                        out.errors.extend(source.errors.iter().cloned());
+                        out
+                    });
                 drop(source);
                 out
             }
@@ -358,14 +526,24 @@ impl AnyRepo {
         name: Option<Option<String>>,
         pinned: Option<bool>,
     ) -> Result<SnapshotMeta, RepoError> {
-        let apply = |m: &mut SnapshotMeta| {
-            if let Some(n) = &name {
-                m.name = n.clone();
-            }
-            if let Some(p) = pinned {
-                m.pinned = p;
-            }
-        };
+        self.change(
+            id,
+            &flux_fs::snapshot::SnapshotChange {
+                name,
+                pinned,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Change a snapshot's name, pin, note or tags (stored with the snapshot, whatever
+    /// the engine: Borg keeps them in the archive's comment).
+    pub fn change(
+        &self,
+        id: &str,
+        change: &flux_fs::snapshot::SnapshotChange,
+    ) -> Result<SnapshotMeta, RepoError> {
+        let apply = |m: &mut SnapshotMeta| change.apply(m);
         match self {
             AnyRepo::Mirror(r) => {
                 let _l = r.lock()?;
@@ -420,6 +598,18 @@ impl AnyRepo {
                 Ok(None)
             }
             AnyRepo::Borg(r) => Ok(r.delete(ids, report)?),
+        }
+    }
+
+    /// Give back the space of data no snapshot uses any more (what forgotten snapshots
+    /// leave behind in a Vault), without forgetting any snapshot. The bytes freed; `None`
+    /// for formats that free space as snapshots go.
+    pub fn free_unused(&self, report: Reporter<'_>) -> Result<Option<u64>, RepoError> {
+        match self {
+            AnyRepo::Vault { repo, .. } => {
+                Ok(Some(flux_vault::gc::collect(repo, report)?.bytes_freed))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -569,5 +759,153 @@ pub fn scan_live(
 impl From<RepoError> for io::Error {
     fn from(e: RepoError) -> Self {
         io::Error::other(e)
+    }
+}
+
+#[cfg(test)]
+mod bandwidth_tests {
+    use super::*;
+    use flux_core::network::BandwidthWindow;
+
+    #[test]
+    fn engines_get_the_limit_in_force() {
+        let mut p = Profile::new(
+            "t",
+            Target::Ssh {
+                host: "nas".into(),
+                user: None,
+                port: None,
+                path: "/srv".into(),
+                identity_file: None,
+                ssh_options: Vec::new(),
+                bandwidth_limit: Some("10MB".parse().unwrap()),
+            },
+            vec!["/home/me".into()],
+        );
+        assert!(matches!(
+            with_bandwidth_now(&p),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Two windows that cover the whole day, at 1 MB/s: whatever the time now.
+        let w = |from: &str, to: &str| BandwidthWindow {
+            days: "*".into(),
+            from: from.into(),
+            to: to.into(),
+            limit: Some("1MB".parse().unwrap()),
+        };
+        p.network.bandwidth = vec![w("00:00", "12:00"), w("12:00", "00:00")];
+        let now = with_bandwidth_now(&p);
+        let Target::Ssh {
+            bandwidth_limit, ..
+        } = &now.target
+        else {
+            unreachable!()
+        };
+        assert_eq!(bandwidth_limit.map(|b| b.bytes()), Some(1_000_000));
+        // Local targets are left alone.
+        p.target = Target::Local {
+            path: "/mnt".into(),
+            fs_uuid: None,
+        };
+        assert!(matches!(
+            with_bandwidth_now(&p),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+}
+
+/// What a backup's snapshots hold and what they take where they're kept.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Storage {
+    pub snapshots: usize,
+    /// The files of the newest snapshot.
+    pub latest_bytes: u64,
+    pub latest_files: u64,
+    /// Every snapshot as a full copy would take.
+    pub logical_bytes: u64,
+    /// The space they take (`None`: not known).
+    pub stored_bytes: Option<u64>,
+    /// What storing each piece once saves (Vault, Borg), or sharing unchanged files
+    /// between snapshots (Mirror, rsync).
+    pub dedup_saved: Option<u64>,
+    /// What compression saves on top.
+    pub compression_saved: Option<u64>,
+    /// The numbers are for a repository other backups share (a Vault): how many others.
+    pub shared_with: usize,
+    /// How it was measured, in words.
+    pub basis: String,
+}
+
+impl AnyRepo {
+    /// What the snapshots hold, what they take, and what deduplication and compression
+    /// save.
+    pub fn storage(&self) -> Result<Storage, RepoError> {
+        let snaps = self.snapshots()?;
+        let latest = snaps.iter().max_by_key(|s| s.started);
+        let mut st = Storage {
+            snapshots: snaps.len(),
+            latest_bytes: latest.map_or(0, |s| s.stats.total_bytes),
+            latest_files: latest.map_or(0, |s| s.stats.files),
+            logical_bytes: snaps.iter().map(|s| s.stats.total_bytes).sum(),
+            ..Default::default()
+        };
+        match self {
+            AnyRepo::Vault { repo, owner } => {
+                let index = repo.index()?;
+                let (mut raw, mut stored_data) = (0u64, 0u64);
+                for loc in index.map.values() {
+                    if loc.entry.kind == flux_vault::format::BlobKind::Data {
+                        raw += u64::from(loc.entry.raw_length);
+                        stored_data += u64::from(loc.entry.length);
+                    }
+                }
+                // A Vault is shared: its pieces are counted for every backup using it.
+                let records = repo.records()?;
+                let mut owners: Vec<(String, String, String)> = records
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.meta.profile.clone(),
+                            r.meta.host.clone(),
+                            r.meta.user.clone(),
+                        )
+                    })
+                    .collect();
+                owners.sort();
+                owners.dedup();
+                let others = owners
+                    .iter()
+                    .filter(|o| (&o.0, &o.1, &o.2) != (&owner.profile, &owner.host, &owner.user))
+                    .count();
+                if others > 0 {
+                    st.logical_bytes = records.iter().map(|r| r.meta.stats.total_bytes).sum();
+                }
+                st.stored_bytes = repo
+                    .backend()
+                    .list("data")
+                    .ok()
+                    .map(|l| l.iter().map(|(_, size)| size).sum());
+                st.dedup_saved = Some(st.logical_bytes.saturating_sub(raw));
+                st.compression_saved = Some(raw.saturating_sub(stored_data));
+                st.shared_with = others;
+                st.basis = "Measured from the Vault's index: each piece of data is stored once, compressed and encrypted.".into();
+            }
+            AnyRepo::Borg(r) => {
+                let s = r.repo_stats()?;
+                st.logical_bytes = s.total_size.max(st.logical_bytes);
+                st.stored_bytes = Some(s.unique_csize);
+                st.dedup_saved = Some(s.total_size.saturating_sub(s.unique_size));
+                st.compression_saved = Some(s.unique_size.saturating_sub(s.unique_csize));
+                st.basis = "Borg's own statistics (borg info).".into();
+            }
+            AnyRepo::Mirror(_) | AnyRepo::MirrorRemote(_) | AnyRepo::Rsync(_) => {
+                // Each snapshot stored what it copied; the rest is shared with the one before.
+                let copied: u64 = snaps.iter().map(|s| s.stats.copied_bytes).sum();
+                st.stored_bytes = Some(copied.min(st.logical_bytes));
+                st.dedup_saved = Some(st.logical_bytes.saturating_sub(copied));
+                st.basis = "Unchanged files are shared between snapshots (hard links); the space is what each snapshot copied, so it's an estimate.".into();
+            }
+        }
+        Ok(st)
     }
 }

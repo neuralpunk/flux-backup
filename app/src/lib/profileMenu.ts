@@ -37,6 +37,7 @@ export function profileMenu(p: ProfileSummary): MenuEntry[] {
       ? [{ label: "Recovery guide", icon: "lifebuoy" as const, onselect: () => (app.dialog = { kind: "recovery", id: p.id }) }]
       : []),
     { label: "Duplicate", icon: "copy", onselect: () => void app.duplicateProfile(p.id) },
+    { label: "Save as a template…", icon: "layers", hint: "New backups can start from its settings", onselect: () => (app.dialog = { kind: "save-template", id: p.id }) },
     { label: "Export…", icon: "download", onselect: () => (app.dialog = { kind: "export", id: p.id }) },
     "separator",
     app.pause

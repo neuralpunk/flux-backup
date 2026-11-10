@@ -1,48 +1,8 @@
-// Flux Backup website: theme switch, copy buttons, comment colouring, guide contents.
+// Flux Backup website: copy buttons, the landing page's motion, the guide's contents.
 // Everything here is an enhancement; the pages read fine without JavaScript.
 
 (function () {
   "use strict";
-
-  // ---------- Theme: Dark / Light / Auto (the same three choices as the app) ----------
-
-  var KEY = "flux-site-theme";
-  var root = document.documentElement;
-
-  function storedTheme() {
-    try {
-      var v = localStorage.getItem(KEY);
-      return v === "dark" || v === "light" ? v : "auto";
-    } catch (e) {
-      return "auto";
-    }
-  }
-
-  function applyTheme(choice) {
-    if (choice === "auto") root.removeAttribute("data-theme");
-    else root.setAttribute("data-theme", choice);
-    document.querySelectorAll(".theme-switch button").forEach(function (b) {
-      b.setAttribute("aria-pressed", String(b.dataset.theme === choice));
-    });
-  }
-
-  applyTheme(storedTheme());
-
-  document.querySelectorAll(".theme-switch").forEach(function (sw) {
-    sw.classList.add("ready");
-    sw.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-theme]");
-      if (!btn) return;
-      var choice = btn.dataset.theme;
-      try {
-        if (choice === "auto") localStorage.removeItem(KEY);
-        else localStorage.setItem(KEY, choice);
-      } catch (err) {
-        /* storage blocked: the choice lasts for this page only */
-      }
-      applyTheme(choice);
-    });
-  });
 
   // ---------- Code blocks: dim comments, add a copy button ----------
 
@@ -123,7 +83,7 @@
     });
     var toc = document.querySelector(".toc");
     var currentId = null;
-    var LINE = 120;
+    var LINE = 110;
 
     function update() {
       var current = sections[0];
@@ -152,6 +112,114 @@
     window.addEventListener("scroll", update, { passive: true });
     window.addEventListener("resize", update);
     update();
+  }
+
+  // ---------- Home: motion ----------
+  // Reveals as things enter; the opening's progress (--p) as it scrolls; screens that
+  // settle into place (--v); a paragraph whose words light as they pass the middle; and
+  // numbers that count up once. All of it is skipped for reduced motion.
+
+  var still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if ("IntersectionObserver" in window && !still) {
+    var reveal = new IntersectionObserver(
+      function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) {
+            e.target.classList.add("in");
+            reveal.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12 },
+    );
+    document.querySelectorAll(".r").forEach(function (el) {
+      reveal.observe(el);
+    });
+  } else {
+    document.querySelectorAll(".r").forEach(function (el) {
+      el.classList.add("in");
+    });
+  }
+
+  var words = [];
+  document.querySelectorAll("[data-words]").forEach(function (p) {
+    p.innerHTML = p.innerHTML.replace(/(<[^>]+>)|([^\s<]+)/g, function (m, tag, w) {
+      return tag ? tag : '<span class="w">' + w + "</span>";
+    });
+    words = words.concat(Array.prototype.slice.call(p.querySelectorAll(".w")));
+  });
+  var rises = Array.prototype.slice.call(document.querySelectorAll("[data-rise]"));
+  var scales = Array.prototype.slice.call(document.querySelectorAll("[data-scale]"));
+
+  function frame() {
+    var vh = window.innerHeight;
+    rises.forEach(function (s) {
+      var r = s.getBoundingClientRect();
+      var p = still ? 1 : Math.min(1, Math.max(0, -r.top / Math.max(1, r.height - vh)));
+      s.style.setProperty("--p", p.toFixed(4));
+    });
+    scales.forEach(function (s) {
+      var b = s.getBoundingClientRect();
+      var v = still ? 1 : Math.min(1, Math.max(0, (vh - b.top) / (vh * 0.75)));
+      s.style.setProperty("--v", v.toFixed(3));
+    });
+    words.forEach(function (w) {
+      w.classList.toggle("lit", still || w.getBoundingClientRect().top < vh * 0.6);
+    });
+  }
+
+  if (rises.length || scales.length || words.length) {
+    var ticking = false;
+    window.addEventListener(
+      "scroll",
+      function () {
+        if (ticking) return;
+        ticking = true;
+        requestAnimationFrame(function () {
+          ticking = false;
+          frame();
+        });
+      },
+      { passive: true },
+    );
+    window.addEventListener("resize", frame);
+    frame();
+  }
+
+  // [data-go]: gets .go once in view (the speed bars run); its [data-count] numbers count up.
+  var goers = document.querySelectorAll("[data-go]");
+  if (goers.length && "IntersectionObserver" in window) {
+    var counter = new IntersectionObserver(
+      function (entries) {
+        entries.forEach(function (e) {
+          if (!e.isIntersecting) return;
+          counter.unobserve(e.target);
+          e.target.classList.add("go");
+          if (still) return;
+          e.target.querySelectorAll("[data-count]").forEach(function (el) {
+            var to = parseFloat(el.dataset.count);
+            var dp = (el.dataset.count.split(".")[1] || "").length;
+            var t0 = performance.now();
+            function step(now) {
+              var k = Math.min(1, (now - t0) / 1500);
+              var eased = 1 - Math.pow(1 - k, 4);
+              el.textContent = (to * eased).toFixed(dp);
+              if (k < 1) requestAnimationFrame(step);
+            }
+            requestAnimationFrame(step);
+          });
+        });
+      },
+      { threshold: 0.35 },
+    );
+    goers.forEach(function (el) {
+      counter.observe(el);
+    });
+  } else {
+    goers.forEach(function (el) {
+      el.classList.add("go");
+    });
   }
 
   // Close the mobile contents list after picking a section.

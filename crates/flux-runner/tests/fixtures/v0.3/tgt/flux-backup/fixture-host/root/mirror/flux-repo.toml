@@ -1,0 +1,6 @@
+format = 1
+engine = "mirror"
+profile = "mirror"
+host = "fixture-host"
+user = "root"
+created = "2026-11-09T16:31:32.516923069Z"

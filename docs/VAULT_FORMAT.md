@@ -1,4 +1,11 @@
-# Vault repository format, version 1
+# Vault repository format, version 2
+
+Format 2 (Flux 1.0) keeps holes in sparse files and adds `tree_format` to snapshot
+records. Format 1 (Flux 0.1–0.3) is described alongside: 1.0 reads it, and keeps writing
+format 1 to a format 1 Vault until `flux vault upgrade` moves it to format 2 (so computers
+still on an older Flux can keep using a shared Vault). The upgrade changes only `config`;
+the snapshots already stored stay as they were and stay readable. Flux refuses a format
+newer than it knows, with a message saying to update.
 
 A Vault is a content-addressed, deduplicating, compressed and (optionally) encrypted
 store of snapshots. One Vault lives at `<target>/flux-vault/` and may hold snapshots from
@@ -14,10 +21,17 @@ flux-vault/
 ├── data/<xx>/<pack-id>    pack files; <xx> = first two hex digits of the pack id
 ├── index/<index-id>       which blob is in which pack, where
 ├── snapshots/<snap-id>    snapshot records
+├── profiles/<key>         the settings of each backup using the Vault (sealed JSON
+│                          {profile, host, user, text}; <key> is 32 hex digits of the
+│                          BLAKE3 of "host\nuser\nprofile"); see FORMATS.md
+├── locks/<lock-id>        lock files, one per holder (every backend)
 └── lock                   flock(2) target (local backend)
 ```
 
-All ids are lowercase hex. Files are written to a temporary name and renamed into place,
+Every object but `config` and the key slots starts with a tag byte: `0` plain (an
+unencrypted Vault), `1` sealed. An encrypted Vault never writes a plain object, and
+readers refuse one there: it could have been put in place of a sealed one by someone
+with the drive. All ids are lowercase hex. Files are written to a temporary name and renamed into place,
 so readers never see partial files. Nothing is modified in place except snapshot records
 (rename-replaced when a snapshot is named or pinned).
 
@@ -36,13 +50,24 @@ A **key slot** (`keys/<16 hex>`) is JSON:
 ```json
 { "kdf": "argon2id", "m_kib": 65536, "t": 3, "p": 4,
   "salt": "<16 bytes, base64>", "nonce": "<24 bytes, base64>",
-  "ciphertext": "<72 + 16 bytes, base64>", "created": "<RFC 3339>", "label": "…" }
+  "ciphertext": "<72 + 16 bytes, base64>", "created": "<RFC 3339>", "label": "…",
+  "unlock_file": true }
 ```
 
-`KEK = Argon2id(password, salt, m_kib, t, p, 32 bytes)` and
+`KEK = Argon2id(input, salt, m_kib, t, p, 32 bytes)` and
 `ciphertext = XChaCha20-Poly1305(KEK, nonce, master, aad = "flux-vault-key-v1:" + repo id)`.
+`input` is the password, or, for a slot with `"unlock_file": true`, the password, a NUL
+byte and the lowercase hex of `BLAKE3-derive_key("flux-vault unlock file v1", file)`, where
+`file` is the whole content of an unlock file (any file; Flux makes them of 64 random
+bytes). `unlock_file` is left out when false, so other slots are exactly as before 1.0.
+A slot that needs a file can't be opened by an older Flux.
+
 Opening tries every slot. Adding or changing a password adds or removes a slot, and never
-re-encrypts data.
+re-encrypts data. Each slot has its own Argon2id cost: the presets are *standard* (64 MiB,
+3 passes, 4 lanes), *strong* (256 MiB, 4, 4) and *maximum* (1 GiB, 6, 4), and any of
+8–4096 MiB, 1–20 passes and 1–16 lanes can be used. Strengthening a password, or adding or
+removing its unlock file, writes a new slot for the same master key and then removes the
+old one.
 
 Every **stored object** (blob, pack header, index file, snapshot record) is:
 
@@ -84,6 +109,13 @@ The header object (encrypted like any object) holds a postcard-encoded list of
 the whole file, so `check --read-data` can verify a pack without any key. Packs hold either
 data or tree blobs, never both, and are closed at ~16 MiB.
 
+With *hide file sizes* on (encrypted Vaults), random bytes between the last blob and the
+header object bring the whole pack to its **Padmé** length (Nikitin et al., 2019): with
+`E = ⌊log₂ L⌋` and `S = ⌊log₂ E⌋ + 1`, the length `L` is rounded up to a multiple of
+`2^(E−S)`, which leaves about log₂ log₂ L bits of the length and costs at most about 12%
+(3% for a full pack). Readers find the header from the end and blobs by their offsets, so
+padded packs need nothing new from them; any Flux reads them.
+
 ## Index
 
 `index/<16 hex>` is an object whose payload is postcard
@@ -99,24 +131,74 @@ xattrs/ACLs, symlink target, device number, source inode for hard links), plus:
 
 * files: `content`, the ordered list of data blob ids
 * directories: `subtree`, the tree blob id
+* format 2 only, last: `holes`, a list of `{ offset, len }` (u64 each), the runs of a
+  sparse file that hold no data, sorted, not overlapping, not empty, inside the file
+
+A file is its data (the content blobs, concatenated) laid into the ranges between its
+holes, in order; the holes read as zeros. With no holes, the data is the whole file.
+Format 1 nodes have no `holes` field and always store the whole file as data. The two
+encodings differ, so a tree written in one format never has the id of a tree in the other
+(except the empty tree, which reads the same in both).
+
+The backup finds holes with `SEEK_DATA`/`SEEK_HOLE` (only for files with fewer blocks
+allocated than their size), chunks only the data, and records the holes. Restores write
+the data at its offsets and leave the holes unwritten, so the restored file is sparse too.
 
 The root tree represents `/`. Unchanged directories produce identical tree blobs, so they
 cost nothing in later snapshots. A snapshot whose root tree id equals its parent's changed
 nothing.
 
 A **snapshot record** (`snapshots/<16 hex>`) is an object whose payload is JSON
-`{ "meta": SnapshotMeta, "tree": "<root tree id>", "parent": "<snapshot id>|null" }`. It
-contains the profile, host, user, times, status, name, pin, statistics and per-file errors.
+`{ "meta": SnapshotMeta, "tree": "<root tree id>", "parent": "<snapshot id>|null",
+"tree_format": 2 }`. It contains the profile, host, user, times, status, name, pin,
+statistics and per-file errors. `tree_format` says how this snapshot's trees are encoded;
+it is left out when 1, so format 1 records look exactly as Flux 0.3 wrote them, and a
+missing `tree_format` means 1. `meta.format` is the same number. Every tree of a snapshot
+is written in its tree format (a backup writes all of its trees).
 
 ## Concurrency and crash safety
 
-* Backup and restore take a **shared** lock. Prune, key changes and `check` take an
-  **exclusive** one.
+* Backup and restore take a **shared** lock. Prune, key changes, `check` and the format
+  upgrade take an **exclusive** one.
+* A lock is a JSON file in `locks/` (`{ host, user, pid, exclusive, time, machine }`), written to
+  a temporary name and renamed, checked again after writing (so two clients racing for
+  an exclusive lock can't both win), refreshed every 5 minutes, and removed on release.
+  Every backend writes and respects them, so a Vault reached both on a local disk and
+  over SFTP (a NAS used from two computers) has one lock. Locally Flux also takes
+  `flock(2)` on `lock`, as before 1.0. A lock is stale, and ignored, when it hasn't been
+  refreshed for 30 minutes, or when it was taken on this computer by a process that no
+  longer runs. "This computer" is `machine`: the first 12 bytes, in hex, of
+  `BLAKE3-derive_key("flux-backup 1.0 lock machine token", machine-id)`, where
+  `machine-id` is the trimmed content of `/etc/machine-id`. The host name alone doesn't
+  say so (two computers can share one), and a lock without `machine` (written before
+  1.0, or where there is no machine id) is stale only by its age. `flux unlock` removes
+  stale locks (`--force`: all of them).
 * Backup order: packs → index → snapshot record. A crash leaves packs no index references.
-  Prune deletes them (it holds the exclusive lock, so no backup can be mid-way).
+  Prune deletes them (it holds the exclusive lock, so no backup can be mid-way). A pack
+  that can't be written ends the backup: no index, no record. Before the index is written
+  the backup checks that every index file it started from and every pack it wrote is
+  still there, and stops if not: another computer that took its lock for stale (this one
+  slept, or the clocks disagree) may have pruned meanwhile.
+* Prune reads every snapshot record before it deletes anything, and deletes nothing if
+  one can't be read (its data would look unused).
 * Prune order: delete snapshot records → write repacked packs → write the new index
   (superseding all old ones) → delete old index files → delete unused packs. After a crash,
   every snapshot still present is fully readable.
+
+## Copies (replicas)
+
+A copy of a Vault is the same repository in another place: `config`, `keys/`, `index/`,
+`snapshots/` and `data/` copied as files, never decrypted. Each replication copies, under
+the source's shared lock and the copy's exclusive lock: packs missing from the copy (by
+name and size; a pack's name is its hash, so a pack never changes), then index files,
+then snapshot records that are missing or differ (naming, pinning, notes and tags rewrite
+them), keys, and `config` last. The index files and snapshot records to copy are listed
+before the packs are, so a backup finishing on the source meanwhile is left whole for the
+next replication. Then it removes what the source no longer has: snapshot records, index
+files, packs, keys, in that order, after reading the source's `config` again: if it is
+gone or different (the drive was pulled out), nothing is removed. An interrupted replication leaves a copy
+that is still readable, and the next one finishes it. A place that holds a different
+Vault (another repository id) is never written to.
 
 ## Threat model (summary)
 
@@ -125,8 +207,9 @@ The whole program's threat model, including SSH, system backups and restores, is
 
 Protects the **confidentiality and integrity of contents and metadata** against someone
 who can read or modify the backup target: a stolen drive, an untrusted NAS or server.
-It does not hide the number and approximate sizes of packs, the number of snapshots, or
-when they were written. It does not stop an attacker with write access from deleting
+It does not hide the number and approximate sizes of packs (exact sizes, unless *hide
+file sizes* pads them), the number of blobs in a pack (the header's length), the number of
+snapshots, or when they were written. It does not stop an attacker with write access from deleting
 data; integrity checks detect such changes, but nothing can prevent them. Security rests on
-the password: Argon2id with 64 MiB of memory makes guessing costly, but not impossible
-for weak passwords.
+the password: Argon2id (64 MiB by default, up to 1 GiB) makes guessing costly, but not
+impossible for weak passwords; an unlock file adds a second thing an attacker needs.

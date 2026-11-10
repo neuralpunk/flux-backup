@@ -66,6 +66,109 @@ pub struct Progress {
     cancel: AtomicBool,
     started: Instant,
     phase_started: Mutex<Instant>,
+    /// Where the time goes, for the performance inspector.
+    pub timings: Timings,
+}
+
+/// A stage of the work, timed across threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Reading files (and, for big files, cutting them into chunks as they're read).
+    Read,
+    /// Cutting files into chunks.
+    Chunk,
+    /// Hashing chunks to find the ones already stored (deduplication).
+    Dedup,
+    /// Compressing and encrypting new chunks.
+    Compress,
+    /// Writing to the backup drive or uploading to the server.
+    Write,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 5] = [
+        Stage::Read,
+        Stage::Chunk,
+        Stage::Dedup,
+        Stage::Compress,
+        Stage::Write,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::Read => "Reading files",
+            Stage::Chunk => "Cutting into chunks",
+            Stage::Dedup => "Finding what's already stored",
+            Stage::Compress => "Compressing and encrypting",
+            Stage::Write => "Writing and uploading",
+        }
+    }
+}
+
+/// Time spent per stage (summed over threads, so it can exceed the run's length), the
+/// wall-clock time of each phase, and the storage's writes.
+#[derive(Debug, Default)]
+pub struct Timings {
+    stages: [AtomicU64; 5],
+    /// Writes to the storage, and the bytes in them.
+    pub writes: AtomicU64,
+    pub bytes_written: AtomicU64,
+    phases: Mutex<Vec<(String, f64)>>,
+}
+
+impl Timings {
+    pub fn add(&self, stage: Stage, d: std::time::Duration) {
+        let i = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
+        self.stages[i].fetch_add(d.as_nanos().min(u128::from(u64::MAX)) as u64, Relaxed);
+    }
+
+    /// Run `f`, counting its time to `stage`.
+    pub fn time<T>(&self, stage: Stage, f: impl FnOnce() -> T) -> T {
+        let t = Instant::now();
+        let out = f();
+        self.add(stage, t.elapsed());
+        out
+    }
+
+    /// A write of `bytes` that took `d`.
+    pub fn wrote(&self, bytes: u64, d: std::time::Duration) {
+        self.add(Stage::Write, d);
+        self.writes.fetch_add(1, Relaxed);
+        self.bytes_written.fetch_add(bytes, Relaxed);
+    }
+
+    /// Seconds per stage (stages never timed are left out).
+    pub fn stages(&self) -> Vec<(Stage, f64)> {
+        Stage::ALL
+            .iter()
+            .zip(&self.stages)
+            .map(|(s, n)| (*s, n.load(Relaxed) as f64 / 1e9))
+            .filter(|(_, secs)| *secs > 0.0)
+            .collect()
+    }
+
+    /// Seconds per phase, in order (a phase entered twice adds up), with `extra` steps
+    /// (a restore test, the unusual-change check) the runner times itself.
+    pub fn phases(&self) -> Vec<(String, f64)> {
+        self.phases.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// Put the phases back as they were (after something reused the progress, like a
+    /// restore test after a backup).
+    pub fn restore_phases(&self, phases: Vec<(String, f64)>) {
+        if let Ok(mut p) = self.phases.lock() {
+            *p = phases;
+        }
+    }
+
+    pub fn record_phase(&self, name: &str, secs: f64) {
+        if let Ok(mut p) = self.phases.lock() {
+            match p.iter_mut().find(|(n, _)| n == name) {
+                Some(e) => e.1 += secs,
+                None => p.push((name.to_owned(), secs)),
+            }
+        }
+    }
 }
 
 impl Default for Progress {
@@ -82,6 +185,7 @@ impl Default for Progress {
             cancel: AtomicBool::new(false),
             started: now,
             phase_started: Mutex::new(now),
+            timings: Timings::default(),
         }
     }
 }
@@ -109,9 +213,15 @@ impl Progress {
     }
 
     pub fn set_phase(&self, p: Phase) {
-        self.phase.store(p as u8, Relaxed);
+        let before = Phase::from_u8(self.phase.swap(p as u8, Relaxed));
         if let Ok(mut t) = self.phase_started.lock() {
-            *t = Instant::now();
+            let spent = t.elapsed().as_secs_f64();
+            if before != p && before != Phase::Done {
+                self.timings.record_phase(before.label(), spent);
+            }
+            if before != p {
+                *t = Instant::now();
+            }
         }
     }
 

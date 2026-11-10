@@ -7,7 +7,7 @@
 
   let { profile, name, onunlocked, onclose }: { profile: string; name: string; onunlocked: () => void; onclose: () => void } = $props();
   const system = $derived(isSystem(profile));
-  const borg = $derived(app.profiles.find((p) => p.id === profile)?.engine === "borg");
+  const borg = $derived(app.profileOrDestination(profile)?.engine === "borg");
   /** "password" / "passphrase", "Vault" / "repository": the words of each engine. */
   const pw = $derived(borg ? "passphrase" : "password");
   const what = $derived(borg ? "Borg repository" : "Vault");
