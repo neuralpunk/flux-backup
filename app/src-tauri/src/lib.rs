@@ -41,6 +41,7 @@ pub fn run() {
         }
         session::Start::First(bus) => bus,
     };
+    autostart::refresh();
     let on_close = paths.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

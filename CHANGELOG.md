@@ -4,6 +4,15 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Start at login** no longer opens a blank "Could not connect to localhost" window.
+  An entry written by a development build now names the installed app, and the app
+  repairs an existing entry that points at a copy it can't start from (a dev build, or
+  an AppImage that has moved).
+
 ## [1.2.0] - 2026-11-11
 
 A release for the person backing up their own computer, about the moments that matter.
