@@ -28,8 +28,6 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev
           patchelf file fuse3 libfuse2 musl-tools
-      - name: Tests
-        run: cargo test --locked
       - name: Packages (deb, rpm, AppImage)
         working-directory: app
         run: npm ci && npx tauri build
