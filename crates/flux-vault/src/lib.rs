@@ -182,38 +182,66 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
             .ok_or_else(|| io::Error::other("not in snapshot"))?;
         let index = self.repo.index().map_err(io::Error::other)?;
         let content = &self.entries[i].1;
+        let locs = content
+            .blobs
+            .iter()
+            .map(|id| {
+                index.get(id).ok_or_else(|| {
+                    io::Error::other(format!("data blob {} is missing", crypto::hex_id(id)))
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        // A window of chunks at a time (about RESTORE_WINDOW of stored data): the next is
+        // read and decrypted while this one is written.
+        let mut windows = Vec::new();
+        let (mut from, mut bytes) = (0, 0u64);
+        for (i, l) in locs.iter().enumerate() {
+            bytes += u64::from(l.entry.length);
+            if bytes >= RESTORE_WINDOW || i + 1 == locs.len() {
+                windows.push(from..i + 1);
+                (from, bytes) = (i + 1, 0);
+            }
+        }
+        let read = |w: &std::ops::Range<usize>| self.repo.read_blobs(&locs[w.clone()]);
         // The data goes into the runs between the holes; the holes are never written, so
         // they stay holes (the file is new and empty), and `set_len` keeps a trailing one.
         let mut runs = content.data_runs(e.size).into_iter();
         let mut run = runs.next().unwrap_or((0, 0));
         let mut n = 0u64;
-        for id in &content.blobs {
+        let mut write = |blobs: Vec<Vec<u8>>| -> io::Result<()> {
+            for data in blobs {
+                let mut rest = &data[..];
+                while !rest.is_empty() {
+                    if run.1 == 0 {
+                        run = runs.next().ok_or_else(|| {
+                            io::Error::other(format!(
+                                "{}: more data than the file holds",
+                                e.rel_path().display()
+                            ))
+                        })?;
+                    }
+                    let take = rest.len().min(run.1 as usize);
+                    out.write_all_at(&rest[..take], run.0)?;
+                    run = (run.0 + take as u64, run.1 - take as u64);
+                    rest = &rest[take..];
+                }
+                n += data.len() as u64;
+                progress
+                    .bytes_done
+                    .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        };
+        let mut next = windows.first().map(read);
+        for w in 1..=windows.len() {
             if progress.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
-            let loc = index.get(id).ok_or_else(|| {
-                io::Error::other(format!("data blob {} is missing", crypto::hex_id(id)))
-            })?;
-            let data = self.repo.read_blob(loc).map_err(io::Error::other)?;
-            let mut rest = &data[..];
-            while !rest.is_empty() {
-                if run.1 == 0 {
-                    run = runs.next().ok_or_else(|| {
-                        io::Error::other(format!(
-                            "{}: more data than the file holds",
-                            e.rel_path().display()
-                        ))
-                    })?;
-                }
-                let take = rest.len().min(run.1 as usize);
-                out.write_all_at(&rest[..take], run.0)?;
-                run = (run.0 + take as u64, run.1 - take as u64);
-                rest = &rest[take..];
-            }
-            n += data.len() as u64;
-            progress
-                .bytes_done
-                .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            let Some(this) = next.take() else { break };
+            let this = this.map_err(io::Error::other)?;
+            let (following, written) = rayon::join(|| windows.get(w).map(read), || write(this));
+            written?;
+            next = following;
         }
         let holes = content.hole_bytes();
         if holes > 0 {
@@ -226,6 +254,9 @@ impl flux_fs::restore::RestoreSource for VaultSource<'_> {
         Ok(n + holes)
     }
 }
+
+/// How much stored data a restore reads for a file at once (see `write_file`).
+const RESTORE_WINDOW: u64 = 8 << 20;
 
 /// The entry at `path` (no leading slash) of a Vault snapshot, if there is one: read by
 /// walking down to it, not by listing the snapshot.

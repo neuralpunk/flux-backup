@@ -779,6 +779,84 @@ impl VaultRepo {
         crate::pack::decode_blob(&self.crypto, sealed, &loc.entry)
     }
 
+    /// The blobs at `locs`, in order, for reading a file back. The blobs of one pack are
+    /// read in one go where they lie close together (a file's chunks mostly do: a backup
+    /// packs them as it reads the file), and all of them are decrypted and checked in
+    /// parallel. Restoring a file read each chunk alone, after the one before was
+    /// decrypted and written: from a USB SSD that reads 550–700 MiB/s, about 350.
+    ///
+    /// From a server, each blob as [`VaultRepo::read_blob`] reads it (a pack wanted again
+    /// is fetched whole, once: many small files cost a few round trips, not one each),
+    /// in parallel.
+    pub fn read_blobs(&self, locs: &[&crate::pack::Loc]) -> Result<Vec<Vec<u8>>, VaultError> {
+        use rayon::prelude::*;
+        if self.backend.remote() {
+            return locs.par_iter().map(|l| self.read_blob(l)).collect();
+        }
+        // Per pack: the span from its first to its last blob wanted, read whole if it isn't
+        // much more than the blobs (else each blob alone).
+        let mut by_pack: Vec<(BlobId, Vec<usize>)> = Vec::new();
+        for (i, l) in locs.iter().enumerate() {
+            match by_pack.iter_mut().find(|(p, _)| *p == l.pack) {
+                Some((_, v)) => v.push(i),
+                None => by_pack.push((l.pack, vec![i])),
+            }
+        }
+        let mut reads: Vec<(BlobId, u64, u64, Vec<usize>)> = Vec::new();
+        for (pack, idx) in by_pack {
+            let start = idx
+                .iter()
+                .map(|&i| u64::from(locs[i].entry.offset))
+                .min()
+                .unwrap_or(0);
+            let end = idx
+                .iter()
+                .map(|&i| u64::from(locs[i].entry.offset) + u64::from(locs[i].entry.length))
+                .max()
+                .unwrap_or(0);
+            let needed: u64 = idx.iter().map(|&i| u64::from(locs[i].entry.length)).sum();
+            if end - start <= needed + needed.max(1 << 20) {
+                reads.push((pack, start, end - start, idx));
+            } else {
+                reads.extend(idx.into_iter().map(|i| {
+                    let e = &locs[i].entry;
+                    (pack, u64::from(e.offset), u64::from(e.length), vec![i])
+                }));
+            }
+        }
+        let spans: Vec<(u64, Vec<u8>, Vec<usize>)> = reads
+            .into_par_iter()
+            .map(|(pack, start, len, idx)| {
+                let path = crate::backend::pack_path(&hex_id(&pack));
+                let bytes = self
+                    .backend
+                    .read_range(&path, start, len)
+                    .map_err(|e| VaultError::io(&path, e))?;
+                Ok((start, bytes, idx))
+            })
+            .collect::<Result<_, VaultError>>()?;
+        let mut sealed: Vec<Option<&[u8]>> = vec![None; locs.len()];
+        for (start, bytes, idx) in &spans {
+            for &i in idx {
+                let e = &locs[i].entry;
+                let from = (u64::from(e.offset) - start) as usize;
+                sealed[i] = Some(bytes.get(from..from + e.length as usize).ok_or_else(|| {
+                    VaultError::Corrupt(format!(
+                        "pack {} is shorter than its index says",
+                        hex_id(&locs[i].pack)
+                    ))
+                })?);
+            }
+        }
+        sealed
+            .into_par_iter()
+            .zip(locs.par_iter())
+            .map(|(s, l)| {
+                crate::pack::decode_blob(&self.crypto, s.expect("every blob was read"), &l.entry)
+            })
+            .collect()
+    }
+
     /// A tree blob, in tree format `format` (its snapshot record's `tree_format`).
     pub fn load_tree(&self, id: &BlobId, format: u32) -> Result<Tree, VaultError> {
         let index = self.index()?;

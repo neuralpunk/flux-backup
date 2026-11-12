@@ -232,8 +232,16 @@ impl Backend for LocalBackend {
     fn read_range(&self, path: &str, offset: u64, len: u64) -> io::Result<Vec<u8>> {
         let mut f = File::open(self.path(path))?;
         f.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; len as usize];
-        f.read_exact(&mut buf)?;
+        // Read into the buffer's room, not over zeros written first (a restore reads
+        // megabytes at a time).
+        let mut buf = Vec::with_capacity(len as usize);
+        f.take(len).read_to_end(&mut buf)?;
+        if buf.len() as u64 != len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{path}: shorter than expected"),
+            ));
+        }
         Ok(buf)
     }
 

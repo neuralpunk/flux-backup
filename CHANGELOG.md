@@ -41,6 +41,12 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   (there is no upgrade to format 3: every piece would have to be encrypted again);
   *flux-vault-recover* reads both. Flux 1.2 and earlier can't open a format 3 Vault and
   say to update.
+- **Restoring large files from a Vault is faster.** A file's pieces that lie together
+  on the drive are read in one go, decrypted on several cores at once, and the next
+  stretch is read while the last is written; before, each piece was read only after the
+  one before it was decrypted and written. Restoring 65 GiB from a USB SSD took 147
+  seconds instead of 164; one 4 GiB file went from about 400 to 440 MiB/s, close to what
+  the drive reads.
 
 ## [1.2.1] - 2026-11-12
 

@@ -4269,3 +4269,25 @@ The item phase 107 left: the sources were scanned for the look and again for the
       (user time halved in both); wall time the drive's. Into tmpfs, 10 GiB of large
       files: 52 → 46 CPU-s, 1510 → 1565 MiB/s. Check of the test Vault: 0 problems; a
       full restore, 150,414 items
+
+### Phase 158 — Restores read ahead, and in parallel (2026-11-12)
+- [x] Measured: from a Vault in tmpfs, one 4 GiB file restored at ~1.2 GiB/s and four at
+      1.5–2.6 GiB/s (the internal disk's writes and the final flush set the pace); from
+      the USB SSD, one 4 GiB file at 330–390 MiB/s where the drive reads the same packs
+      at 546–697 MiB/s: each chunk was read alone, after the one before was decrypted,
+      checked and written
+- [x] `VaultRepo::read_blobs`: a window's blobs grouped by pack, each pack's span read in
+      one go when it isn't much more than the blobs (≤ twice, or 1 MiB more; a file's
+      chunks can be a little out of order in a pack since Phase 151), else blob by
+      blob; every blob decrypted and checked in parallel. From a server, `read_blob`'s
+      pack cache as before (a test caught one round trip per small file), in parallel
+- [x] `VaultSource::write_file`: windows of about 8 MiB stored (`RESTORE_WINDOW`), the next
+      read (`rayon::join`) while this one is written. `LocalBackend::read_range` reads
+      into a buffer's room instead of over zeros written first
+- [x] Measured (Phase 157's build in turns, cold cache): one 4 GiB file from the USB SSD
+      404 → 440 MiB/s (wall time includes flushing the restored file); the whole 65 GiB
+      164 → 147 s (405 → 453 MiB/s). CPU 78 → 96 s (decrypting on several threads, and
+      threads waiting for the drive)
+- [x] Checks: `a_big_file_restores_across_windows_and_packs` (40 MiB and 9 MiB + 12,345 B,
+      several packs), the remote-restore round-trip test, the workspace's tests (37),
+      clippy

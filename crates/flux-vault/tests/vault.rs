@@ -1377,3 +1377,23 @@ fn a_restore_from_a_server_fetches_packs_not_blobs() {
         "{r} single blobs fetched, {w} whole packs (of {packs})"
     );
 }
+
+/// A file of many chunks in several packs restores exactly: read a window at a time, the
+/// blobs of a pack in one read, decrypted in parallel, the next window read while this
+/// one is written.
+#[test]
+fn a_big_file_restores_across_windows_and_packs() {
+    let e = env();
+    write(&e.src.join("big.bin"), &noise(40 << 20, 11));
+    write(&e.src.join("odd.bin"), &noise((9 << 20) + 12_345, 12));
+    let repo = e.init(Some(PW));
+    let s = e.snap(&repo);
+    assert!(
+        fs::read_dir(e.root.join("data")).unwrap().count() >= 2,
+        "more than one pack"
+    );
+    let out = e._tmp.path().join("restored");
+    let r = e.restore_to(&repo, &s, &out);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_same_tree(&e.src, &out.join("src"));
+}
