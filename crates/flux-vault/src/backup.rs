@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -583,52 +582,108 @@ fn store_file(
         }
         // The file grew past the largest chunk while being read: it's streamed instead.
     }
-    // Larger files: this thread reads and cuts the next batch of chunks while the pool's
-    // other threads hash, compress and encrypt the batch before it, so one big file (a
-    // disk image, a video) no longer runs on a single core. Chunks keep their order.
-    let mut chunks = fastcdc::v2020::StreamCDC::with_level_and_seed(
-        BufReader::with_capacity(1 << 20, reader()?),
+    // Larger files, a block at a time: this thread reads and cuts the next block while
+    // the pool's other threads hash, compress and encrypt the chunks of the one before,
+    // so one big file (a disk image, a video) doesn't run on a single core. Chunks keep
+    // their order in the file's list.
+    let cut = Cutter {
         min,
         avg,
         max,
-        level1,
         seed,
-    );
-    let mut read_batch = || -> Result<Vec<Vec<u8>>, VaultError> {
-        let t = std::time::Instant::now();
-        let mut batch = Vec::new();
-        let mut bytes = 0;
-        while bytes < STREAM_BATCH {
-            let Some(chunk) = chunks.next() else { break };
-            let chunk = chunk.map_err(|err| io_err(std::io::Error::other(err.to_string())))?;
-            bytes += chunk.data.len();
-            batch.push(chunk.data);
-        }
-        // Reading a big file and cutting it happen together here.
-        timings.add(Stage::Read, t.elapsed());
-        Ok(batch)
+        block: STREAM_BATCH.max(2 * max),
     };
-    let mut current = read_batch()?;
-    while !current.is_empty() {
+    let mut reader = reader()?;
+    let room = (data_len as usize).min(cut.block) + max;
+    let (mut this, mut next) = (Vec::with_capacity(room), Vec::with_capacity(room));
+    let mut read = |carry: &[u8], buf: &mut Vec<u8>| cut.read(&mut *reader, carry, buf, timings);
+    let (mut chunks, mut end) = read(&[], &mut this).map_err(io_err)?;
+    loop {
         if progress.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
-        // Each chunk goes into the pack from the thread that sealed it (a pack's blobs
-        // needn't be in the file's order; the file's list of them is).
-        let (next, ids) = rayon::join(&mut read_batch, || {
-            current
+        let store_all = || {
+            chunks
                 .par_iter()
-                .map(|data| store_blob(repo, seen, packer, data, level, timings))
+                .map(|&(at, len)| {
+                    store_blob(repo, seen, packer, &this[at..at + len], level, timings)
+                })
                 .collect::<Result<Vec<_>, _>>()
-        });
-        for (data, id) in current.iter().zip(ids?) {
+        };
+        // What follows the last chunk cut is the start of the next block's first.
+        let taken = chunks.last().map_or(0, |&(at, len)| at + len);
+        let (following, ids) = if end {
+            (None, store_all())
+        } else {
+            let (f, ids) = rayon::join(|| read(&this[taken..], &mut next), store_all);
+            (Some(f), ids)
+        };
+        for (&(_, len), id) in chunks.iter().zip(ids?) {
             blobs.push(id);
-            total += data.len() as u64;
-            progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
+            total += len as u64;
+            progress.bytes_done.fetch_add(len as u64, Relaxed);
         }
-        current = next?;
+        let Some(following) = following else { break };
+        (chunks, end) = following.map_err(io_err)?;
+        std::mem::swap(&mut this, &mut next);
     }
     done(blobs, total, holes)
+}
+
+/// Cuts a large file into the chunks [`fastcdc`] would cut it into in one piece, reading
+/// it a block at a time into a buffer the caller keeps. fastcdc's own streaming chunker
+/// moves its 8 MiB buffer forward after every chunk and copies each chunk out: it read a
+/// file at about 390 MiB/s on one core, where the drive gives 4 GB/s.
+struct Cutter {
+    min: usize,
+    avg: usize,
+    max: usize,
+    seed: u64,
+    /// How much is read at once.
+    block: usize,
+}
+
+impl Cutter {
+    /// Fill `buf` with `carry` (the unfinished end of the block before) and the next block
+    /// of `reader`, and cut it: `(offset, length)` of each chunk, and whether the file has
+    /// ended. A chunk is only cut where the buffer holds the largest chunk past its start
+    /// (or the file ends there), so its end is where cutting the whole file would put it;
+    /// the rest is carried into the next block.
+    fn read(
+        &self,
+        reader: &mut dyn std::io::Read,
+        carry: &[u8],
+        buf: &mut Vec<u8>,
+        timings: &flux_core::progress::Timings,
+    ) -> std::io::Result<(Vec<(usize, usize)>, bool)> {
+        use std::io::Read;
+        let t = std::time::Instant::now();
+        buf.clear();
+        buf.reserve(carry.len() + self.block);
+        buf.extend_from_slice(carry);
+        let want = self.block as u64;
+        let n = reader.take(want).read_to_end(buf)?;
+        let end = (n as u64) < want;
+        timings.add(Stage::Read, t.elapsed());
+        Ok(timings.time(Stage::Chunk, || {
+            let mut chunks = Vec::new();
+            let all = fastcdc::v2020::FastCDC::with_level_and_seed(
+                buf,
+                self.min,
+                self.avg,
+                self.max,
+                fastcdc::v2020::Normalization::Level1,
+                self.seed,
+            );
+            for c in all {
+                if !end && c.offset + self.max > buf.len() {
+                    break;
+                }
+                chunks.push((c.offset, c.length));
+            }
+            (chunks, end)
+        }))
+    }
 }
 
 thread_local! {
@@ -889,4 +944,77 @@ fn build_trees(
         subtree.insert(dir, id);
     }
     Ok(subtree[&b""[..]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cutter;
+
+    /// Cut a block at a time, a file has the chunks cutting it whole gives it (so a big
+    /// file stores what it always did, and deduplicates against earlier backups), at
+    /// every length around the block and chunk sizes.
+    #[test]
+    fn blocks_cut_as_the_whole_file_does() {
+        let (min, avg, max) = (1 << 10, 4 << 10, 16 << 10);
+        let mut data = vec![0u8; 300_000];
+        getrandom::fill(&mut data).unwrap();
+        // Long runs that compress to nothing cut at the largest size: the edge case.
+        data[100_000..160_000].fill(7);
+        let timings = flux_core::progress::Timings::default();
+        for block in [2 * max, 2 * max + 1, 50_000, 1 << 20] {
+            let cut = Cutter {
+                min,
+                avg,
+                max,
+                seed: 99,
+                block,
+            };
+            for len in [
+                0,
+                1,
+                min - 1,
+                min,
+                max,
+                max + 1,
+                block - 1,
+                block,
+                block + 1,
+                123_457,
+                data.len(),
+            ] {
+                if len > data.len() {
+                    continue;
+                }
+                let file = &data[..len];
+                let whole: Vec<(usize, usize)> = fastcdc::v2020::FastCDC::with_level_and_seed(
+                    file,
+                    min,
+                    avg,
+                    max,
+                    fastcdc::v2020::Normalization::Level1,
+                    99,
+                )
+                .map(|c| (c.offset, c.length))
+                .collect();
+                let mut reader = file;
+                let (mut buf, mut next) = (Vec::new(), Vec::new());
+                let mut got = Vec::new();
+                let mut base = 0;
+                let (mut chunks, mut end) = cut.read(&mut reader, &[], &mut buf, &timings).unwrap();
+                loop {
+                    got.extend(chunks.iter().map(|&(at, l)| (base + at, l)));
+                    if end {
+                        break;
+                    }
+                    let taken = chunks.last().map_or(0, |&(at, l)| at + l);
+                    base += taken;
+                    (chunks, end) = cut
+                        .read(&mut reader, &buf[taken..], &mut next, &timings)
+                        .unwrap();
+                    std::mem::swap(&mut buf, &mut next);
+                }
+                assert_eq!(got, whole, "block {block}, file {len}");
+            }
+        }
+    }
 }

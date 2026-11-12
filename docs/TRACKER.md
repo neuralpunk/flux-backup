@@ -4201,3 +4201,27 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Checks: `the_level_follows_a_sample` (random: raw; 7.6 bits a byte, like a JPEG:
       level 1, stored smaller; text: the level asked; short blobs not sampled), the
       Vault tests, clippy
+
+### Phase 156 — Large files read a block at a time (2026-11-12)
+- [x] Found: a large file was read and cut by fastcdc's `StreamCDC`, which copies each
+      chunk into a new `Vec` and moves the rest of its 8 MiB buffer forward after every
+      chunk (about 8 copies of each byte): "reading" 26 thread-seconds for 10 GiB, about
+      390 MiB/s for the thread reading a file, where one stream reads the source at
+      4.3–4.6 GB/s. (Phase 151's "one big file capped near 400 MiB/s" was wrong: reading
+      was already overlapped with sealing, at about 1 GB/s; it cost CPU, not that)
+- [x] `Cutter`: the file read in 16 MiB blocks (`STREAM_BATCH`, at least two of the
+      largest chunk) into two buffers kept for the file, cut in memory by `FastCDC`; a
+      chunk is taken only if the largest chunk past its start is in the buffer (or the
+      file ends), so the cuts are those of the whole file; the unfinished end is carried
+      into the next block, read (`rayon::join`) while the chunks of this one are sealed
+      straight from the buffer. Reading and cutting are now timed apart
+- [x] Measured into tmpfs (`/tmp` quota allows ~10 GiB; Phase 155's build in turns):
+      4 files, 10 GiB: 1142 → 1580 MiB/s, CPU 72 → 51 s; 1 file of 4 GiB: 1010 → 1315
+      MiB/s. With 8 threads instead of 16 the 10 GiB took 8.9 s against 11.9 s and the
+      same instructions: two threads to a core cost more than they give here (a later
+      look at the default thread count)
+- [x] Same chunks: `blocks_cut_as_the_whole_file_does` (files of 0 B to 300 KB around
+      the block and chunk sizes, blocks of 2×max to 1 MiB, a run of one byte value), and
+      a 10 GiB backup by Phase 155's build followed by one of the same files (touched)
+      by this build: read 10.0 GiB, stored 0 B
+- [x] Checks: the workspace's tests, clippy
