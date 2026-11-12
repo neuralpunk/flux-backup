@@ -21,6 +21,12 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   the end writing them out, and other programs keep that memory. A 65 GiB first backup
   to a USB SSD took 9–15% less time and a third less processor time.
   (`FLUX_PACK_WRITES=buffered` writes the old way.)
+- **Photos, video and archives are no longer compressed for nothing.** A small sample
+  of each piece is compressed first: data that wouldn't shrink by 3% (already
+  compressed) is stored as it is, and data that shrinks by less than 10% (photos,
+  video) is compressed at the fastest level, which saves nearly as much on it. JPEG and
+  video take half the processor time they did, ZIP archives a seventh. Everything else
+  is compressed at the level set, as before.
 
 ## [1.2.1] - 2026-11-12
 

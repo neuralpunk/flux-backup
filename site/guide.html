@@ -144,7 +144,7 @@ flux snapshots home</code></pre></div>
 <tr><td>Open without Flux</td><td>yes, with any file manager</td><td>no (use Flux, or <code>flux mount</code>)</td></tr>
 <tr><td>Unchanged files</td><td>hard links (no extra space)</td><td>stored once across <em>all</em> snapshots, files and computers</td></tr>
 <tr><td>Renamed or moved files</td><td>copied again</td><td>not stored again</td></tr>
-<tr><td>Compression</td><td>no</td><td>zstd</td></tr>
+<tr><td>Compression</td><td>no</td><td>zstd (skipped for data that doesn't compress)</td></tr>
 <tr><td>Encryption</td><td>use an encrypted drive (LUKS)</td><td>built in (XChaCha20-Poly1305, Argon2id)</td></tr>
 <tr><td>SSH servers need</td><td><code>rsync</code></td><td>only SFTP</td></tr>
 </tbody></table></div>
@@ -700,7 +700,8 @@ backup_before_restore = true      # keep files that a restore would replace
 threads = 0                       # 0 = automatic
 
 [vault]                           # Vault profiles only
-compression_level = 3             # 0 (off) to 22
+compression_level = 3             # 0 (off) to 22; data that barely compresses
+                                  # (photos, video) uses 1, data that doesn't, none
 encryption = true                 # fixed when the Vault is created
 password_source = { from = "keyring" }
 # parity = 5                      # repair data: this percent more space (1–50), 0 = none

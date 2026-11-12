@@ -146,7 +146,7 @@ where they are. The menu key or Shift+F10 opens the same menu from the keyboard.
 | Open without Flux | yes, with any file manager | no (use Flux, or `flux mount`) |
 | Unchanged files | hard links (no extra space) | stored once across *all* snapshots, files and computers |
 | Renamed or moved files | copied again | not stored again |
-| Compression | no | zstd |
+| Compression | no | zstd (skipped for data that doesn't compress) |
 | Encryption | use an encrypted drive (LUKS) | built in (XChaCha20-Poly1305, Argon2id) |
 | SSH servers need | `rsync` | only SFTP |
 
@@ -1745,7 +1745,8 @@ backup_before_restore = true      # keep files that a restore would replace
 threads = 0                       # 0 = automatic
 
 [vault]                           # Vault profiles only
-compression_level = 3             # 0 (off) to 22
+compression_level = 3             # 0 (off) to 22; data that barely compresses
+                                  # (photos, video) uses 1, data that doesn't, none
 encryption = true                 # fixed when the Vault is created
 password_source = { from = "keyring" }
 # parity = 5                      # repair data: this percent more space (1–50), 0 = none

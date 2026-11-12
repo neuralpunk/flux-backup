@@ -56,10 +56,11 @@ pub fn seal_blob(
     Ok(crypto.seal_in_place(out)?)
 }
 
-/// This thread's zstd compressor (and the level it's set to), and the buffer it writes to.
+/// This thread's zstd compressors: one at level 1 (samples, and data that barely
+/// compresses), one at the level asked for; and the buffer they write to.
 struct Zstd {
-    level: u8,
-    compressor: zstd::bulk::Compressor<'static>,
+    fast: zstd::bulk::Compressor<'static>,
+    asked: Option<(u8, zstd::bulk::Compressor<'static>)>,
     buf: Vec<u8>,
 }
 
@@ -67,31 +68,69 @@ thread_local! {
     static COMPRESSOR: std::cell::Cell<Option<Zstd>> = const { std::cell::Cell::new(None) };
 }
 
-/// Append `plaintext` compressed at `level` to `out` (after the [`ZSTD`] mark) if that's
-/// smaller than storing it raw. Returns whether it did.
-fn compress_into(plaintext: &[u8], level: u8, out: &mut Vec<u8>) -> bool {
-    let mut z = match COMPRESSOR.take() {
-        Some(z) if z.level == level => z,
-        _ => match zstd::bulk::Compressor::new(i32::from(level)) {
-            Ok(compressor) => Zstd {
-                level,
-                compressor,
-                buf: Vec::new(),
-            },
-            Err(_) => return false,
-        },
-    };
+/// Blobs at least this long are sampled before they are compressed (see [`compress_into`]).
+const SAMPLE_FROM: usize = 128 << 10;
+/// The sample: this much from the middle of the blob.
+const SAMPLE: usize = 64 << 10;
+
+/// How hard to compress `plaintext`, asked to at `level` (more than 0): a sample from its
+/// middle (past a file's header, which often compresses better than the rest), compressed
+/// at level 1, tells. `None`: it would save under 3% (already compressed: photos, video,
+/// archives); store it as it is. Under 10%: level 1, which saves nearly as much on such
+/// data as higher levels, two to seven times faster (a JPEG at level 3 compresses at
+/// 550 MiB/s on one core, at level 1 at 1350, both to 95%). Otherwise `level`.
+fn level_for(z: &mut Zstd, plaintext: &[u8], level: u8) -> Option<u8> {
+    if plaintext.len() < SAMPLE_FROM || level == 1 {
+        return Some(level);
+    }
+    let from = (plaintext.len() - SAMPLE) / 2;
     z.buf.clear();
-    z.buf
-        .reserve(zstd::zstd_safe::compress_bound(plaintext.len()));
-    let smaller = match z.compressor.compress_to_buffer(plaintext, &mut z.buf) {
-        Ok(n) if n < plaintext.len() => {
-            out.push(ZSTD);
-            out.extend_from_slice(&z.buf[..n]);
-            true
-        }
-        _ => false,
+    z.buf.reserve(zstd::zstd_safe::compress_bound(SAMPLE));
+    let n = z
+        .fast
+        .compress_to_buffer(&plaintext[from..from + SAMPLE], &mut z.buf)
+        .ok()?;
+    match n * 100 / SAMPLE {
+        97.. => None,
+        90.. => Some(1),
+        _ => Some(level),
+    }
+}
+
+/// Append `plaintext` compressed (at `level`, or less: see [`level_for`]) to `out`, after
+/// the [`ZSTD`] mark, if that's smaller than storing it raw. Returns whether it did.
+fn compress_into(plaintext: &[u8], level: u8, out: &mut Vec<u8>) -> bool {
+    let z = match COMPRESSOR.take() {
+        Some(z) => Some(z),
+        None => zstd::bulk::Compressor::new(1).ok().map(|fast| Zstd {
+            fast,
+            asked: None,
+            buf: Vec::new(),
+        }),
     };
+    let Some(mut z) = z else { return false };
+    let smaller = (|| {
+        let level = level_for(&mut z, plaintext, level)?;
+        let compressor = if level == 1 {
+            &mut z.fast
+        } else {
+            if z.asked.as_ref().is_none_or(|(l, _)| *l != level) {
+                z.asked = Some((level, zstd::bulk::Compressor::new(i32::from(level)).ok()?));
+            }
+            &mut z.asked.as_mut().expect("just set").1
+        };
+        z.buf.clear();
+        z.buf
+            .reserve(zstd::zstd_safe::compress_bound(plaintext.len()));
+        let n = compressor
+            .compress_to_buffer(plaintext, &mut z.buf)
+            .ok()
+            .filter(|n| *n < plaintext.len())?;
+        out.push(ZSTD);
+        out.extend_from_slice(&z.buf[..n]);
+        Some(())
+    })()
+    .is_some();
     // A buffer grown for an unusually large blob isn't kept for the life of the thread.
     if z.buf.capacity() > KEEP_BUFFER {
         z.buf = Vec::new();
@@ -650,6 +689,43 @@ mod padding_tests {
 mod seal_tests {
     use super::*;
     use crate::crypto::MasterKey;
+
+    /// Data that doesn't compress isn't compressed; data that barely does (like photos)
+    /// is compressed at level 1; the rest at the level asked for. Short blobs aren't
+    /// sampled.
+    #[test]
+    fn the_level_follows_a_sample() {
+        let mut z = Zstd {
+            fast: zstd::bulk::Compressor::new(1).unwrap(),
+            asked: None,
+            buf: Vec::new(),
+        };
+        let mut random = vec![0u8; 1 << 20];
+        getrandom::fill(&mut random).unwrap();
+        // About 7.6 bits per byte: 95% of the size at best, like a JPEG.
+        let narrow: Vec<u8> = random.iter().map(|b| b % 200).collect();
+        let text = b"the same line, over and over\n".repeat(40_000);
+        assert_eq!(level_for(&mut z, &random, 3), None);
+        assert_eq!(level_for(&mut z, &narrow, 3), Some(1));
+        assert_eq!(level_for(&mut z, &text, 3), Some(3));
+        assert_eq!(level_for(&mut z, &text, 19), Some(19));
+        assert_eq!(
+            level_for(&mut z, &random[..100_000], 3),
+            Some(3),
+            "too short to sample"
+        );
+        // What gets stored: raw, then smaller.
+        let crypto = Crypto::Plain {
+            id_key: [1; 32],
+            chunk_seed: 0,
+        };
+        let mut out = Vec::new();
+        seal_blob(&crypto, &random, 3, &mut out).unwrap();
+        assert_eq!(out[1], RAW);
+        seal_blob(&crypto, &narrow, 3, &mut out).unwrap();
+        assert_eq!(out[1], ZSTD);
+        assert!(out.len() < narrow.len() * 97 / 100);
+    }
 
     /// What a backup stores with [`seal_blob`] (a buffer reused from blob to blob, the
     /// thread's compressor at more than one level) reads back as [`encode_blob`]'s does.

@@ -4180,3 +4180,24 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Checks: `tests/direct.rs` (packs of 0 B to 16 MiB + 5 written on the build
       directory's disk read back; strace showed `O_DIRECT` opens and the cuts to length),
       the workspace's tests, clippy, `check --read-data` of the test Vault (0 problems)
+
+### Phase 155 — No compressing what doesn't compress (2026-11-12)
+- [x] Measured on compressed files that come with the OS (`/usr/share`: JPEG, PNG, WebP,
+      WebM, ZIP, gz, xz, zst), 1 MiB pieces, one core: zstd 3 → 1 is 548 → 1350 MiB/s
+      on JPEG (both to 95%), 487 → 1030 on WebM (86% → 87.5%), 211 → 1510 on ZIP (91% →
+      94%); gz, xz, zst, WebP and random data don't shrink at all. A 64 KiB sample at
+      level 1 runs at 8–100 GB/s and caught every piece that doesn't shrink
+- [x] `pack::level_for`: a blob of 128 KiB or more has 64 KiB from its middle (past a
+      file's header) compressed at level 1 first: under 3% saved, stored raw; under 10%,
+      compressed at level 1; otherwise at the profile's level. Each thread keeps a level-1
+      compressor (samples, and that data) and one at the profile's level
+- [x] Measured (`bench/vault-perf.sh`, random data, Phase 154's build in turns):
+      "compressing" 159 → 65 and 181 → 96 thread-seconds, CPU 318 → 197 s in the first
+      pair; instructions 1.18 → 1.10 trillion (on random data zstd gave up quickly
+      already; the time was memory traffic). Wall time is the drive's now (87–104 s,
+      both builds, as the drive warms)
+- [x] USER_GUIDE (the `compression_level` comment, the Mirror-or-Vault table), site guide,
+      CHANGELOG
+- [x] Checks: `the_level_follows_a_sample` (random: raw; 7.6 bits a byte, like a JPEG:
+      level 1, stored smaller; text: the level asked; short blobs not sampled), the
+      Vault tests, clippy
