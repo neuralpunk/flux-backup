@@ -4138,3 +4138,10 @@ The item phase 107 left: the sources were scanned for the look and again for the
       restore test
 - [ ] Not done: writing packs with `O_DIRECT` (on this drive, 857 MB/s direct against 703
       MB/s through the page cache); a writer thread so compute threads don't wait on writes
+
+### Phase 152 — Version 1.3: speed (2026-11-12)
+- [x] Asked by the owner: 1.3 is about performance (speed, and Flux overall doing more
+      with less). Version 1.3.0 everywhere (workspace, `Cargo.lock`, app, Tauri);
+      CHANGELOG's Unreleased becomes 1.3.0 (Unreleased, a compare link to `HEAD`) with
+      Phase 151's faster Vault backups in it
+- [ ] The AppStream 1.3.0 entry: when 1.3 is released (it needs the date)

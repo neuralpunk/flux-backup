@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cli"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "flux-compat"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "flux-core"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "humantime",
  "ignore",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "flux-fs"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "flux-gui"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "flux-helper"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "flux-core",
  "flux-runner",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mirror"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mount"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "flux-core",
  "flux-fs",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "flux-runner"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "flux-service"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "base64 0.23.1",
  "flux-compat",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "flux-transport"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "blake3",
  "flux-core",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "flux-vault-recover"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
