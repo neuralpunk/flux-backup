@@ -412,12 +412,12 @@ fn is_tree_format_1(f: &u32) -> bool {
 mod tests {
     use super::*;
 
-    /// Inputs that made fuzzing crash, kept (fuzz/regressions/vault_tree): decoding them
-    /// must fail cleanly, and nothing done with a tree that decodes may panic.
+    /// Inputs that made fuzzing crash, kept (tests/data/fuzz-regressions/vault_tree):
+    /// decoding them must fail cleanly, and nothing done with a tree that decodes may panic.
     #[test]
     fn fuzz_regressions_for_trees() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/regressions/vault_tree");
+            .join("tests/data/fuzz-regressions/vault_tree");
         let mut n = 0;
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             n += 1;
