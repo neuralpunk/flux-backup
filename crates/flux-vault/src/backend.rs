@@ -63,6 +63,11 @@ pub trait Backend: Send + Sync {
     fn flush_packs(&self) -> io::Result<()> {
         Ok(())
     }
+    /// How many packs a backup writes at once, in the background (see
+    /// `Packer::write_behind`). A server: several uploads in flight.
+    fn pack_writers(&self) -> usize {
+        4
+    }
     /// Files directly in `dir`, or (for `data` and `parity/data`) in its two-hex-digit
     /// subdirectories:
     /// `(name, size)`. A missing directory is empty.
@@ -76,15 +81,100 @@ pub trait Backend: Send + Sync {
     fn clear_locks(&self, force: bool) -> io::Result<Vec<LockInfo>>;
 }
 
+thread_local! {
+    /// Each pack writer's aligned buffer for [`LocalBackend::write_direct`].
+    static DIRECT_BUF: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// Filesystems of local drives, where `O_DIRECT` writes go straight to the device. Others
+/// (network filesystems, FUSE, tmpfs) write as they always did: there, `O_DIRECT` can
+/// mean a round trip per write, or isn't supported at all.
+fn direct_io_suits(root: &Path) -> bool {
+    const LOCAL: [i64; 7] = [
+        0xEF53,      // ext2/3/4
+        0x5846_5342, // xfs
+        0x9123_683E, // btrfs
+        0xF2F5_2010, // f2fs
+        0x2011_BAB0, // exfat
+        0x4D44,      // vfat
+        0x7366_746E, // ntfs3
+    ];
+    // (`f_type` is narrower than `i64` on 32-bit systems.)
+    #[allow(clippy::unnecessary_cast)]
+    rustix::fs::statfs(root).is_ok_and(|s| LOCAL.contains(&(s.f_type as i64)))
+}
+
 /// A repository in a local (or locally mounted) directory.
 #[derive(Debug, Clone)]
 pub struct LocalBackend {
     root: PathBuf,
+    /// Whether packs are written with `O_DIRECT` (see [`LocalBackend::write_direct`]):
+    /// decided at the first pack, and turned off for good if the kernel refuses one.
+    direct: Arc<std::sync::OnceLock<std::sync::atomic::AtomicBool>>,
 }
 
 impl LocalBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            direct: Arc::default(),
+        }
+    }
+
+    /// Write packs straight to the drive? On the filesystems of local drives, unless
+    /// `FLUX_PACK_WRITES=buffered`.
+    fn direct(&self) -> &std::sync::atomic::AtomicBool {
+        self.direct.get_or_init(|| {
+            let wanted = std::env::var_os("FLUX_PACK_WRITES").is_none_or(|v| v != "buffered");
+            std::sync::atomic::AtomicBool::new(wanted && direct_io_suits(&self.root))
+        })
+    }
+
+    /// A pack written with `O_DIRECT`, past the page cache: the drive takes it as fast as
+    /// it can, and a backup doesn't fill memory with gigabytes of data waiting to be
+    /// written (Linux lets a fifth to two fifths of the RAM wait; meanwhile a backup looks
+    /// faster than the drive, then waits at the end, and other programs are short of
+    /// memory). The data is copied into an aligned buffer (whole 4 KiB blocks, the tail
+    /// zeroed) and the file then cut to its length. Durable at [`Backend::flush_packs`], as
+    /// a buffered pack is.
+    fn write_direct(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        const ALIGN: usize = 4096;
+        let dest = self.path(path);
+        let dir = dest.parent().expect("repository files live in directories");
+        fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!(
+            ".tmp-{}-{:x}",
+            std::process::id(),
+            u64::from_le_bytes(crate::crypto::random().map_err(io::Error::other)?)
+        ));
+        let whole = data.len().div_ceil(ALIGN) * ALIGN;
+        let mut buf = DIRECT_BUF.take();
+        buf.clear();
+        buf.resize(whole + ALIGN, 0);
+        let at = buf.as_ptr().align_offset(ALIGN);
+        let block = &mut buf[at..at + whole];
+        block[..data.len()].copy_from_slice(data);
+        block[data.len()..].fill(0);
+        let result = (|| {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::DIRECT.bits() as i32)
+                .open(&tmp)?;
+            f.write_all(block)?;
+            if whole != data.len() {
+                f.set_len(data.len() as u64)?;
+            }
+            fs::rename(&tmp, &dest)
+        })();
+        if buf.capacity() <= crate::pack::KEEP_BUFFER {
+            DIRECT_BUF.set(buf);
+        }
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     pub fn root(&self) -> &Path {
@@ -153,8 +243,25 @@ impl Backend for LocalBackend {
 
     /// No fsync of the pack and its directory (two per 16 MiB pack: on a USB hard drive,
     /// minutes over a large first backup); one `syncfs` in [`Backend::flush_packs`].
+    ///
+    /// Written past the page cache where the filesystem allows (see `write_direct`).
     fn write_pack(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let direct = self.direct();
+        if direct.load(Relaxed) {
+            match self.write_direct(path, data) {
+                // Not on this filesystem (or this file's blocks): buffered from now on.
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {
+                    direct.store(false, Relaxed);
+                }
+                r => return r,
+            }
+        }
         self.write_file(path, data, false)
+    }
+
+    fn pack_writers(&self) -> usize {
+        2
     }
 
     fn flush_packs(&self) -> io::Result<()> {

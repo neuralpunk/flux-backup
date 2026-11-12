@@ -1795,6 +1795,7 @@ Durations are written like `90s`, `15min`, `4h`, `1day`, `2weeks`; sizes like `5
 | `FLUX_SYSTEMCTL`, `FLUX_SYSTEMD_UNIT_DIR` | where timers are written and how systemd is called |
 | `FLUX_CURL` | `curl` program webhooks are sent with |
 | `FLUX_NOTIFY_WAIT` | seconds a backup waits after it ends for a click on its notification's buttons (default 600) |
+| `FLUX_PACK_WRITES` | `buffered`: a Vault on a local drive is written through the page cache, as before 1.3, instead of straight to the drive |
 | `FLUX_VAULT_RECOVER` | the `flux-vault-recover` program kept next to Vaults on drives |
 | `FLUX_CRONTAB`, `FLUX_CRON_DIR` | the `crontab` program and the `/etc/cron.d` folder used with cron |
 

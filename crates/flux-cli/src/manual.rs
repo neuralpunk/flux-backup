@@ -1156,6 +1156,7 @@ FLUX_SECRET_TOOL\tThe secret-tool program, for the desktop keyring.
 FLUX_SYSTEMCTL, FLUX_SYSTEMD_UNIT_DIR\tHow systemd is called, and where timers are written.
 FLUX_CRONTAB, FLUX_CRON_DIR\tThe crontab program and the /etc/cron.d folder, with cron.
 FLUX_CURL\tThe curl program webhooks are sent with.
+FLUX_PACK_WRITES\tbuffered: a Vault on a local drive is written through the page cache, as before 1.3, not straight to the drive.
 FLUX_NOTIFY_WAIT\tSeconds a scheduled backup waits after it ends for a click on its notification's buttons (Try again, Open); 600 by default.
 VISUAL, EDITOR\tThe editor flux profile edit opens.";
 

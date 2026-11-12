@@ -11,9 +11,14 @@ use flux_core::sync::Locked;
 
 /// Close a pack once it reaches this size.
 pub const PACK_TARGET: usize = 16 << 20;
-/// Written packs' buffers a [`Packer`] keeps for its next packs (one per thread that
-/// can be writing a pack at once is plenty; more is memory held for nothing).
-const SPARE_PACKS: usize = 4;
+/// Room for the largest pack: the target, the blob that crossed it (up to the largest
+/// chunk, 8 MiB, sealed), then padding (at most 1/32 at this size) and the header. A
+/// buffer that had to grow past this would be copied, and too big to reuse.
+const PACK_ROOM: usize = PACK_TARGET + (10 << 20);
+/// Written packs' buffers a [`Packer`] keeps for its next packs: as many as can be away
+/// at once (queued for a writer, or being written, see [`Packer::write_behind`]), so a
+/// backup doesn't allocate new ones as it goes; more would be memory held for nothing.
+const SPARE_PACKS: usize = 8;
 const RAW: u8 = 0;
 const ZSTD: u8 = 1;
 
@@ -140,7 +145,7 @@ impl Builder {
     /// A builder that fills `buf` (emptied; a written pack's, to reuse).
     fn with_buf(mut buf: Vec<u8>) -> Self {
         buf.clear();
-        buf.reserve(PACK_TARGET + (1 << 20));
+        buf.reserve(PACK_ROOM);
         Self {
             buf,
             entries: Vec::new(),
@@ -301,6 +306,8 @@ pub struct Packer<'a> {
     /// Buffers of packs already written, for the next packs: a new 17 MiB buffer per pack
     /// is memory the kernel has to hand over (and clear) again each time.
     spare: Mutex<Vec<Vec<u8>>>,
+    /// Where full packs go while [`Packer::write_behind`]'s writers run.
+    behind: Mutex<Option<std::sync::mpsc::SyncSender<Builder>>>,
     /// Pack bytes written so far.
     pub bytes_written: std::sync::atomic::AtomicU64,
     /// Pad each pack to its [`padme`] length.
@@ -329,6 +336,7 @@ impl<'a> Packer<'a> {
             current: Mutex::new(Builder::new()),
             written: Mutex::new(Vec::new()),
             spare: Mutex::new(Vec::new()),
+            behind: Mutex::new(None),
             bytes_written: Default::default(),
             pad,
             parity: 0,
@@ -375,10 +383,50 @@ impl<'a> Packer<'a> {
                 std::mem::replace(&mut *cur, Builder::with_buf(buf))
             })
         };
-        match full {
-            Some(b) => self.write(b).inspect_err(|e| self.fail(e)),
-            None => Ok(()),
+        let Some(b) = full else { return Ok(()) };
+        let behind = self.behind.locked().clone();
+        match behind {
+            // Waits here only while the writers are a full queue behind: the drive (or
+            // the network) is what sets the pace then.
+            Some(tx) => tx
+                .send(b)
+                .map_err(|_| VaultError::Store("the pack writers stopped".into())),
+            None => self.write(b).inspect_err(|e| self.fail(e)),
         }
+    }
+
+    /// Write full packs in the background, on [`Backend::pack_writers`] threads of `scope`,
+    /// until the returned guard is dropped (then the packs queued are written, and the
+    /// threads end with the scope). A thread that fills a pack goes on reading and
+    /// sealing instead of waiting for the write: a 16 MiB pack takes 30–80 ms to reach a
+    /// fast USB drive, and longer to a server or a slow disk. At most [`QUEUED_PACKS`]
+    /// wait, so memory stays bounded when the storage is the slower side.
+    pub fn write_behind<'scope, 'env>(
+        &'env self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) -> WriteBehind<'env, 'a>
+    where
+        'a: 'env,
+    {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Builder>(QUEUED_PACKS);
+        let rx = std::sync::Arc::new(Mutex::new(rx));
+        for _ in 0..self.backend.pack_writers().max(1) {
+            let rx = rx.clone();
+            scope.spawn(move || {
+                loop {
+                    let next = rx.locked().recv();
+                    let Ok(b) = next else { break };
+                    // After a failed write, the rest are dropped: the backup fails anyway.
+                    if self.check().is_ok()
+                        && let Err(e) = self.write(b)
+                    {
+                        self.fail(&e);
+                    }
+                }
+            });
+        }
+        *self.behind.locked() = Some(tx);
+        WriteBehind { packer: self }
     }
 
     /// Record that a blob this run counts on was lost (see `failed`).
@@ -432,6 +480,21 @@ impl<'a> Packer<'a> {
         let last = std::mem::replace(&mut *self.current.locked(), Builder::new());
         self.write(last)?;
         Ok(self.written.into_value())
+    }
+}
+
+/// Full packs waiting for a writer (see [`Packer::write_behind`]).
+const QUEUED_PACKS: usize = 2;
+
+/// While this lives, a [`Packer`]'s full packs are written in the background. Dropping it
+/// lets the writers finish what is queued and end.
+pub struct WriteBehind<'p, 'a> {
+    packer: &'p Packer<'a>,
+}
+
+impl Drop for WriteBehind<'_, '_> {
+    fn drop(&mut self) {
+        self.packer.behind.locked().take();
     }
 }
 

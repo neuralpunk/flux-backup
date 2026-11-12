@@ -4158,3 +4158,25 @@ The item phase 107 left: the sources were scanned for the look and again for the
       LUKS; source on the internal NVMe): backup 83 s (800 MiB/s, 428 CPU-s); check 76 s
       (870 MiB/s, 100 CPU-s); restore 96 s (695 MiB/s, 124 CPU-s: little more than one
       core)
+
+### Phase 154 — Packs written in the background, straight to the drive (2026-11-12)
+- [x] `Packer::write_behind`: full packs go to a queue of two and are written by their own
+      threads (`Backend::pack_writers`: 2 on a local drive, 4 to a server), joined at
+      the end of the backup's reading (`std::thread::scope`; dropping the guard closes
+      the queue, also on a panic). The threads that read, cut and seal no longer stop
+      30–110 ms for each 16 MiB write
+- [x] `LocalBackend::write_pack` writes with `O_DIRECT` on the filesystems of local
+      drives (ext2/3/4, xfs, btrfs, f2fs, exfat, vfat, ntfs3 by `statfs`): an aligned
+      buffer per writer, whole 4 KiB blocks, the file then cut to its length. `EINVAL`
+      turns it off for the backend and writes buffered; `FLUX_PACK_WRITES=buffered`
+      always does (man page, USER_GUIDE, site guide). Nothing waits in the page cache
+      (this laptop lets 24 GB of it be dirty): no fast start then a long wait at the end
+- [x] A pack's buffer is sized for the largest pack (`PACK_ROOM`: target, one more 8 MiB
+      chunk, padding, header). It was 17 MiB, so a pack closed by a big blob grew to
+      34 MiB (copied, then too big to reuse); 8 written packs' buffers kept, not 4
+- [x] Measured (`bench/vault-perf.sh`, Phase 153's build in turns): backup 92 → 78 s and
+      103 → 94 s; CPU 404 → 269 s and 460 → 338 s (system time halved); page faults
+      2.2M → 1.4M; the copying phase is now the whole backup (no wait to flush)
+- [x] Checks: `tests/direct.rs` (packs of 0 B to 16 MiB + 5 written on the build
+      directory's disk read back; strace showed `O_DIRECT` opens and the cuts to length),
+      the workspace's tests, clippy, `check --read-data` of the test Vault (0 problems)

@@ -254,57 +254,62 @@ pub fn backup_scanned(
         profile.options.symlinks != flux_core::profile::SymlinkMode::Preserve,
     );
     let failures: Mutex<Vec<(usize, FileError)>> = Mutex::new(Vec::new());
-    let results: Vec<(usize, Content, u64)> = pool.install(|| {
-        to_read
-            .par_iter()
-            .filter_map(|&i| {
-                if progress.is_cancelled() {
-                    return None;
-                }
-                let e = &entries[i];
-                let r = {
-                    let _turn = gate.enter(e.size);
-                    store_file(
-                        repo,
-                        &seen,
-                        (&data_packer, &opener),
-                        e,
-                        level,
-                        tree_format >= 2,
-                        progress,
-                    )
-                };
-                progress.entries_done.fetch_add(1, Relaxed);
-                match r {
-                    Ok((c, data, n)) => {
-                        read_bytes.fetch_add(data, Relaxed);
-                        if n != e.size {
-                            report(Event::Warning {
-                                path: e.abs_path().display().to_string(),
-                                message: format!(
-                                    "file changed while being backed up ({} → {n} bytes)",
-                                    e.size
-                                ),
-                            });
+    // Full packs are written by their own threads (see `Packer::write_behind`), joined
+    // when the scope ends: every pack is on its way to the storage before the check below.
+    let results: Vec<(usize, Content, u64)> = std::thread::scope(|scope| {
+        let _behind = data_packer.write_behind(scope);
+        pool.install(|| {
+            to_read
+                .par_iter()
+                .filter_map(|&i| {
+                    if progress.is_cancelled() {
+                        return None;
+                    }
+                    let e = &entries[i];
+                    let r = {
+                        let _turn = gate.enter(e.size);
+                        store_file(
+                            repo,
+                            &seen,
+                            (&data_packer, &opener),
+                            e,
+                            level,
+                            tree_format >= 2,
+                            progress,
+                        )
+                    };
+                    progress.entries_done.fetch_add(1, Relaxed);
+                    match r {
+                        Ok((c, data, n)) => {
+                            read_bytes.fetch_add(data, Relaxed);
+                            if n != e.size {
+                                report(Event::Warning {
+                                    path: e.abs_path().display().to_string(),
+                                    message: format!(
+                                        "file changed while being backed up ({} → {n} bytes)",
+                                        e.size
+                                    ),
+                                });
+                            }
+                            Some((i, c, n))
                         }
-                        Some((i, c, n))
+                        Err(err) => {
+                            let fe = FileError {
+                                path: e.abs_path().display().to_string(),
+                                message: err.to_string(),
+                            };
+                            report(Event::Warning {
+                                path: fe.path.clone(),
+                                message: fe.message.clone(),
+                            });
+                            progress.warnings.fetch_add(1, Relaxed);
+                            failures.locked().push((i, fe));
+                            None
+                        }
                     }
-                    Err(err) => {
-                        let fe = FileError {
-                            path: e.abs_path().display().to_string(),
-                            message: err.to_string(),
-                        };
-                        report(Event::Warning {
-                            path: fe.path.clone(),
-                            message: fe.message.clone(),
-                        });
-                        progress.warnings.fetch_add(1, Relaxed);
-                        failures.locked().push((i, fe));
-                        None
-                    }
-                }
-            })
-            .collect()
+                })
+                .collect()
+        })
     });
     if progress.is_cancelled() {
         // Packs written so far have no index and are removed by the next prune.

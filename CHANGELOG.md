@@ -14,6 +14,13 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   processor time it did (a new compressor and several new buffers were set up for every
   piece, and its fingerprint was computed twice). A large backup to a fast drive spends
   less time compressing and encrypting, and its speed is set more by the drive.
+- **Vault backups write while they read.** Full packs go to the drive on their own
+  threads, so the threads reading and encrypting files no longer stop for each write.
+  On a local drive they are written straight to it, past the system's memory cache:
+  a backup no longer looks fast at first while gigabytes wait in memory, then stalls at
+  the end writing them out, and other programs keep that memory. A 65 GiB first backup
+  to a USB SSD took 9–15% less time and a third less processor time.
+  (`FLUX_PACK_WRITES=buffered` writes the old way.)
 
 ## [1.2.1] - 2026-11-12
 
