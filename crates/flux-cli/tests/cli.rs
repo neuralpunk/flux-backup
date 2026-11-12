@@ -2287,15 +2287,21 @@ fn unlock_and_upgrade_a_vault() {
     assert!(v["still_held"].as_array().unwrap().is_empty());
     assert!(flux_pw(h, pw, &["backup", "v"]).status.success());
 
-    // Upgrading: already format 2; a format 1 config moves to 2 and still opens.
-    assert!(stdout(&flux(h, &["vault", "upgrade", "v"])).contains("already in format 2"));
+    // Upgrading: a new Vault is format 3 already; a format 1 config moves to 2 (only the
+    // config changes: this Vault's objects are format 3's, so it's put back to open it).
+    assert!(stdout(&flux(h, &["vault", "upgrade", "v"])).contains("already in format 3"));
     let config = tgt.join("flux-vault/config");
-    let text = std::fs::read_to_string(&config)
-        .unwrap()
-        .replace("\"format\": 2", "\"format\": 1");
-    std::fs::write(&config, text).unwrap();
+    let original = std::fs::read_to_string(&config).unwrap();
+    assert!(original.contains("\"format\": 3"), "{original}");
+    std::fs::write(&config, original.replace("\"format\": 3", "\"format\": 1")).unwrap();
     let out = stdout(&flux(h, &["vault", "upgrade", "v"]));
     assert!(out.contains("from format 1 to 2"), "{out}");
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("\"format\": 2")
+    );
+    std::fs::write(&config, &original).unwrap();
     assert!(flux_pw(h, pw, &["snapshots", "v"]).status.success());
 
     // Other engines have no lock files to clear.

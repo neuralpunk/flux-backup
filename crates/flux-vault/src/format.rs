@@ -8,10 +8,16 @@ use flux_fs::snapshot::SnapshotMeta;
 
 use crate::crypto::BlobId;
 
-/// The newest repository format this build reads and writes. Format 1 (Flux 0.1–0.3) is
-/// read, and written as format 1 until upgraded (`flux vault upgrade`), so computers still
-/// on an older Flux can keep using a shared Vault. Format 2 adds holes in sparse files.
-pub const FORMAT: u32 = 2;
+/// The newest repository format this build reads and writes, and the one new Vaults are
+/// made in. Format 1 (Flux 0.1–0.3) is read, and written as format 1 until upgraded
+/// (`flux vault upgrade`), so computers still on an older Flux can keep using a shared
+/// Vault. Format 2 adds holes in sparse files. Format 3 (1.3) seals objects and key slots
+/// with XAES-256-GCM instead of XChaCha20-Poly1305; its trees are format 2's.
+pub const FORMAT: u32 = 3;
+
+/// The newest tree format (snapshot records' `tree_format`), and the newest format an
+/// older Vault is upgraded to: a change of `config` can't change how objects are sealed.
+pub const TREE_FORMAT: u32 = 2;
 
 /// The oldest repository format still read and written.
 pub const OLDEST_FORMAT: u32 = 1;

@@ -291,7 +291,7 @@
 
 <InfoDetails summary="The encryption itself">
   <p>
-    Everything in the Vault is encrypted with XChaCha20-Poly1305 using 256-bit keys, and identified with keyed BLAKE3. These are fixed, not settings: neither has a stronger alternative worth choosing. The password protects the key, so its length and the hashing above are what you can strengthen.
+    Everything in the Vault is encrypted with {security?.cipher ?? "XAES-256-GCM"} using 256-bit keys, and identified with keyed BLAKE3.{#if security?.cipher === "XChaCha20-Poly1305"} Vaults made with Flux 1.3 or later use XAES-256-GCM (AES, which the processor speeds up), as fast as the drive on most computers; this one keeps the cipher it was made with.{/if} These are fixed, not settings: neither has a stronger alternative worth choosing. The password protects the key, so its length and the hashing above are what you can strengthen.
   </p>
   {#if security?.keys.length}
     <p class="mt-2">

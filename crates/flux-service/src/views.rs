@@ -1069,7 +1069,8 @@ pub fn vault_format_impl(state: &Service, id: String) -> Result<Option<VaultForm
         .unwrap_or(1) as u32;
     Ok(Some(VaultFormat {
         format,
-        newest: flux_vault::format::FORMAT,
+        // The newest an upgrade reaches: format 3 (another cipher) is for new Vaults.
+        newest: flux_vault::format::TREE_FORMAT,
     }))
 }
 

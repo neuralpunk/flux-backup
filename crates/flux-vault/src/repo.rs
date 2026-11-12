@@ -15,11 +15,12 @@ use flux_fs::snapshot::SnapshotMeta;
 use crate::VaultError;
 use crate::backend::{Backend, LockGuard};
 use crate::crypto::{
-    BlobId, Crypto, KdfParams, KeySlot, MasterKey, UnlockSecret, hex_id, parse_id, random,
-    slot_input,
+    BlobId, Cipher, Crypto, KdfParams, KeySlot, Keys, MasterKey, UnlockSecret, hex_id, parse_id,
+    random, slot_input,
 };
 use crate::format::{
-    ChunkerParams, Config, Content, FORMAT, OLDEST_FORMAT, PlainKeys, SnapshotRecord, Tree,
+    ChunkerParams, Config, Content, FORMAT, OLDEST_FORMAT, PlainKeys, SnapshotRecord, TREE_FORMAT,
+    Tree,
 };
 use crate::pack::{Index, read_blob};
 use flux_core::sync::Locked;
@@ -181,10 +182,12 @@ pub struct Upgrade {
 pub type Unreadable = Vec<(String, VaultError)>;
 
 impl VaultRepo {
-    /// Move a repository to the newest format ([`FORMAT`]). Only `config` changes: the
-    /// snapshots already there stay as they are and stay readable, and new ones use the
-    /// new format. Flux before 1.0 can't open it afterwards. Needs no password, but the
-    /// exclusive lock (no job may be using the repository).
+    /// Move a repository to the newest format a change of `config` reaches
+    /// ([`TREE_FORMAT`], 2). Only `config` changes: the snapshots already there stay as they
+    /// are and stay readable, and new ones use the new format. Flux before 1.0 can't open
+    /// it afterwards. Needs no password, but the exclusive lock (no job may be using the
+    /// repository). Format 3 changed the cipher, and every object would have to be sealed
+    /// again: a Vault is made in format 3, not upgraded to it.
     pub fn upgrade_format(backend: &dyn Backend) -> Result<Upgrade, VaultError> {
         let raw = match backend.read("config") {
             Ok(r) => r,
@@ -195,7 +198,7 @@ impl VaultRepo {
         };
         let mut config = parse_config(&raw)?;
         let from = config.format;
-        if from == FORMAT {
+        if from >= TREE_FORMAT {
             return Ok(Upgrade { from, to: from });
         }
         let _lock = backend
@@ -210,7 +213,7 @@ impl VaultRepo {
                     .map(|l| l.describe())
                     .collect(),
             })?;
-        config.format = FORMAT;
+        config.format = TREE_FORMAT;
         let json =
             serde_json::to_vec_pretty(&config).map_err(|e| VaultError::Corrupt(e.to_string()))?;
         backend
@@ -221,7 +224,10 @@ impl VaultRepo {
             let percent = crate::parity::head(&par).map_or(5, |h| h.percent);
             crate::protect::write_for(backend, "config", &json, percent, false)?;
         }
-        Ok(Upgrade { from, to: FORMAT })
+        Ok(Upgrade {
+            from,
+            to: TREE_FORMAT,
+        })
     }
 
     pub fn exists(backend: &dyn Backend) -> Result<bool, VaultError> {
@@ -256,15 +262,21 @@ impl VaultRepo {
         let (crypto, plain_keys, slot) = match password {
             Some(pw) => {
                 let master = MasterKey::generate()?;
+                let cipher = Cipher::of_format(FORMAT);
                 let mut slot = KeySlot::wrap(
                     &master,
                     &slot_input(pw, unlock.as_ref()),
                     &id,
                     kdf,
                     "initial",
+                    cipher,
                 )?;
                 slot.unlock_file = unlock.is_some();
-                (Crypto::Encrypted(master), None, Some(slot))
+                (
+                    Crypto::Encrypted(Keys::new(master, cipher)),
+                    None,
+                    Some(slot),
+                )
             }
             None => {
                 let id_key: [u8; 32] = random()?;
@@ -344,7 +356,8 @@ impl VaultRepo {
             let pw = password.ok_or(VaultError::PasswordRequired)?;
             let (master, sid, used_file) =
                 Self::try_slots(backend.as_ref(), &config.id, pw, unlock.as_ref())?;
-            (Crypto::Encrypted(master), Some((sid, used_file)))
+            let keys = Keys::new(master, Cipher::of_format(config.format));
+            (Crypto::Encrypted(keys), Some((sid, used_file)))
         } else {
             let pk = config
                 .plain_keys
@@ -778,9 +791,10 @@ impl VaultRepo {
     }
 
     /// The tree format new snapshots are written in: the repository's format (1 until the
-    /// repository is upgraded).
+    /// repository is upgraded), and 2 from format 2 on (format 3 changed the cipher, not
+    /// the trees).
     pub fn tree_format(&self) -> u32 {
-        self.config.format
+        self.config.format.min(TREE_FORMAT)
     }
 
     /// Every entry of a snapshot with its content, sorted by path.
@@ -904,15 +918,16 @@ impl VaultRepo {
         kdf: KdfParams,
         unlock: Option<&UnlockSecret>,
     ) -> Result<String, VaultError> {
-        let Crypto::Encrypted(master) = &self.crypto else {
+        let Crypto::Encrypted(keys) = &self.crypto else {
             return Err(VaultError::NotEncrypted);
         };
         let mut slot = KeySlot::wrap(
-            master,
+            keys.master(),
             &slot_input(password, unlock),
             &self.config.id,
             kdf,
             label,
+            keys.cipher(),
         )?;
         slot.unlock_file = unlock.is_some();
         let sid = hex::encode(random::<8>()?);

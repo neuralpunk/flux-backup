@@ -1347,6 +1347,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         unlock_file: v.unlock_file ?? null,
         unlock_file_present: !!v.unlock_file,
         unlock_ms: 290,
+        cipher: "XAES-256-GCM",
       };
     }
     case "strengthen_key":

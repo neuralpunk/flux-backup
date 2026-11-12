@@ -4231,3 +4231,41 @@ The item phase 107 left: the sources were scanned for the look and again for the
       `FLUX_NOTIFY_WAIT` (ten minutes) for its own. The bus now names the test's thread;
       notifications from other threads are dropped while it's set. (Phase 156's commit
       went in on a run cut short by it: 14 of 37 suites; the full run passes)
+
+### Phase 157 — Vault format 3: XAES-256-GCM (2026-11-12)
+- [x] Asked by the owner: AES for the Vault ("no one is using Flux": change what's needed;
+      Vault is ours to make fast and secure). Measured on one core (scratch crate, no
+      target-cpu flags): XChaCha20-Poly1305 1962 MiB/s (1 MiB messages) / 1227 (4 KiB);
+      RustCrypto XAES-256-GCM 3144 / 2860; aws-lc-rs AES-256-GCM 5375 / 4919; ring
+      AES-256-GCM 9557 / 8306, and 6902 on 4 KiB with a new key per message
+- [x] Plain AES-256-GCM has a 96-bit nonce: random nonces are safe for about 2³² objects per
+      key, which a Vault of many small files kept for years could approach. XAES-256-GCM
+      (C2SP) derives a key per 192-bit nonce (CMAC-AES-256 counter KDF: two AES blocks)
+      and keeps the 192-bit random nonces. `crypto::Xaes`: the derivation with RustCrypto
+      `aes` (AES-NI), the GCM with ring; K1 and the AES key schedule worked out once per
+      Vault (`Keys`), so an object costs two AES blocks and ring's key setup more
+- [x] Format 3 (`FORMAT = 3`): objects tagged `2` (nonce ‖ AES-256-GCM ‖ tag); key slots
+      carry `"cipher": "xaes-256-gcm"` (left out for XChaCha20-Poly1305, so older slots
+      read as before). A Vault reads only its own cipher's tag. Trees stay format 2
+      (`TREE_FORMAT`; `tree_format()` is `min(format, 2)`). `vault upgrade` goes to 2 at
+      most (only `config` changes; sealing every object again isn't an upgrade); the
+      app's upgrade banner compares with `TREE_FORMAT`. Flux before 1.3 refuses format 3
+      ("newer than this Flux supports")
+- [x] `flux-vault-recover`: format 3, slots by their `cipher`, tag `2`, with RustCrypto's
+      `xaes-256-gcm` (pure Rust, a second implementation; static build unchanged)
+- [x] The Security page says which cipher the Vault uses (`VaultSecurity.cipher`, from
+      the opened Vault or its plain `config`; a Vault not made yet: XAES-256-GCM)
+- [x] Docs: VAULT_FORMAT (version 3, the derivation, tags, slots), THREAT_MODEL, FORMATS,
+      USER_GUIDE (and site guide), README, site/index.html, PRODUCT, MATH_IDEAS, CHANGELOG
+- [x] Tests: the C2SP vectors (Kx and ciphertext, both); byte-for-byte equal to RustCrypto's
+      XAES-256-GCM for random keys, nonces, 0 B–100 KB and associated data; both ciphers
+      through seal/open/tamper/plain/slots; a Vault refuses the other cipher's objects;
+      compat: Flux writes encrypted format 2 (tag 1) and 3 (tag 2), the recovery tool
+      restores and verifies both; CLI and runner tests for the new newest format. The
+      workspace's tests (37 suites), clippy, the app's tests (27), svelte-check (0, 0)
+- [x] Measured (`bench/vault-perf.sh`, Phase 156's build in turns, the drive now slower
+      after hours of writing: both read at ~540 MiB/s): backup CPU 193 → 155 s
+      ("compressing" 66 → 31 thread-s); check CPU 97 → 68 s; restore CPU 120 → 84 s
+      (user time halved in both); wall time the drive's. Into tmpfs, 10 GiB of large
+      files: 52 → 46 CPU-s, 1510 → 1565 MiB/s. Check of the test Vault: 0 problems; a
+      full restore, 150,414 items

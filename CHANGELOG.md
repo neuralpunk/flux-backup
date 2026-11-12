@@ -32,6 +32,15 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   rest of an 8 MiB buffer moved along after each one. Backing up large files went from
   about 1.1 to 1.6 GiB/s, with 30% less processor time. They are cut into exactly the
   same pieces, so they still deduplicate against earlier backups.
+- **New Vaults are encrypted with AES (XAES-256-GCM).** The processor's AES hardware
+  encrypts about five times as fast as XChaCha20-Poly1305 did (9 GB/s on one core here),
+  so encryption keeps up with the fastest drives and leaves the processor to other work.
+  Each piece stored gets its own key, derived from the Vault's key and a 192-bit random
+  number, so the usual limit on how much one AES-GCM key may encrypt doesn't apply.
+  This is Vault format 3. Vaults made before keep XChaCha20-Poly1305 and work as before
+  (there is no upgrade to format 3: every piece would have to be encrypted again);
+  *flux-vault-recover* reads both. Flux 1.2 and earlier can't open a format 3 Vault and
+  say to update.
 
 ## [1.2.1] - 2026-11-12
 

@@ -34,8 +34,9 @@ Against a drive thief or untrusted storage, an encrypted Vault keeps **contents 
 metadata confidential and tamper-evident**:
 
 - Every object (data chunks, directory trees, snapshot records, indexes, pack headers) is
-  sealed with XChaCha20-Poly1305 under a random 256-bit key. Random 192-bit nonces make
-  reuse a non-issue.
+  sealed with XAES-256-GCM (AES-256-GCM under a key derived for each object; Vaults made
+  before 1.3: XChaCha20-Poly1305) under a random 256-bit key. Random 192-bit nonces make
+  reuse a non-issue. A Vault accepts only objects sealed with its own cipher.
 - That key is stored only wrapped by your password(s) with Argon2id (64 MiB and 3 passes by
   default; *strong* is 256 MiB and 4 passes, *maximum* 1 GiB and 6) and bound to the
   repository's id, so a key slot can't be moved to another Vault.

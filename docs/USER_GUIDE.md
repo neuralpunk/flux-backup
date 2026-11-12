@@ -147,7 +147,7 @@ where they are. The menu key or Shift+F10 opens the same menu from the keyboard.
 | Unchanged files | hard links (no extra space) | stored once across *all* snapshots, files and computers |
 | Renamed or moved files | copied again | not stored again |
 | Compression | no | zstd (skipped for data that doesn't compress) |
-| Encryption | use an encrypted drive (LUKS) | built in (XChaCha20-Poly1305, Argon2id) |
+| Encryption | use an encrypted drive (LUKS) | built in (XAES-256-GCM, Argon2id) |
 | SSH servers need | `rsync` | only SFTP |
 
 Pick **Mirror** when you want to reach your files in an emergency with nothing but a
@@ -1224,8 +1224,12 @@ switch. The everyday choices are already made for you; these are for when you wa
   sooner when unused. Scheduled backups get the password from their own source and aren't
   affected.
 
-The encryption itself (XChaCha20-Poly1305 with 256-bit keys, and keyed BLAKE3) isn't a
-setting: neither has a stronger alternative worth choosing.
+The encryption itself (XAES-256-GCM with 256-bit keys, and keyed BLAKE3) isn't a
+setting: neither has a stronger alternative worth choosing. XAES-256-GCM is AES-256-GCM
+with a key of its own for every piece stored; AES runs in the processor's hardware, so
+encrypting keeps up with the fastest drives. A Vault made before 1.3 keeps the cipher it
+was made with, XChaCha20-Poly1305, and works as it always did; the Security page says
+which a Vault uses.
 
 Sparse files (disk images, some databases: files with *holes*, ranges that take no disk
 space) keep their holes in a Vault: only their data is read and stored, and a restored

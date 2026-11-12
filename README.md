@@ -96,7 +96,7 @@ build from source, see [Building](#building).
 | Format | Plain folders, unchanged files hard-linked | Deduplicated chunk repository |
 | Browse without Flux | Yes, with any file manager | Via `flux mount`, or `flux-vault-recover` (no Flux needed) |
 | Dedup | Per unchanged file | Across files and snapshots |
-| Compression / encryption | — / use an encrypted disk | zstd / XChaCha20-Poly1305 |
+| Compression / encryption | — / use an encrypted disk | zstd / XAES-256-GCM |
 | Targets | Local drives, SSH (server needs rsync) | Local drives, SSH/SFTP |
 
 Each profile picks its engine.
@@ -261,7 +261,7 @@ flux vault upgrade docs           # move a Vault made before 1.0 to format 2 (ke
 
 All Vault profiles on a target share one repository (`<target>/flux-vault`), so identical
 files deduplicate across profiles and machines. Everything stored (contents, file names,
-metadata) is encrypted with XChaCha20-Poly1305 under a key protected by Argon2id. Chunk
+metadata) is encrypted with XAES-256-GCM under a key protected by Argon2id. Chunk
 ids are keyed, so they don't reveal content. The format and threat model are documented in
 [docs/VAULT_FORMAT.md](docs/VAULT_FORMAT.md); every format Flux writes (Mirror, snapshots,
 profiles, the compatibility modes) is in [docs/FORMATS.md](docs/FORMATS.md), frozen for

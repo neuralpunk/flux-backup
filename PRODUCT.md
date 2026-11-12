@@ -70,7 +70,7 @@ All four claims are core and future work may lead with any of them:
 ## Capabilities and Constraints
 
 - **Engines, chosen per profile:** Mirror (hard-link snapshots, plain folders), Vault
-  (content-defined dedup, zstd, XChaCha20-Poly1305 + Argon2id), and compatibility mode:
+  (content-defined dedup, zstd, XAES-256-GCM + Argon2id), and compatibility mode:
   rsync (`--link-dest` folders) or Borg 1.x (`repokey-blake2`).
 - **App surfaces:** Overview (progress, last/next backup, free space, health warnings,
   space forecast, maintenance), Snapshots (instant file browser, what changed, find in all

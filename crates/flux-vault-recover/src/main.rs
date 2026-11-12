@@ -1,6 +1,6 @@
 //! flux-vault-recover: read a Flux Backup Vault without Flux.
 //!
-//! A small, read-only program for the Vault format (formats 1 and 2): it lists snapshots
+//! A small, read-only program for the Vault format (formats 1 to 3): it lists snapshots
 //! and their files, restores, and verifies. It shares no code with Flux's own Vault
 //! engine, has no configuration, and builds as a static binary, so it can be kept next to
 //! the backups and still run years from now on a computer without Flux.
@@ -8,9 +8,11 @@
 //! The format, briefly (docs/FORMATS.md has it in full):
 //! - `config`: JSON (format, id, encrypted, and for unencrypted Vaults the id key).
 //! - `keys/*`: JSON key slots; Argon2id of the password (with `\0` and the unlock file's
-//!   hex secret when one is needed) unwraps the 72-byte master key with XChaCha20-Poly1305
-//!   (associated data `flux-vault-key-v1:<vault id>`): encryption key, id key, chunk seed.
-//! - Objects are a tag byte: `0` plain, `1` sealed (24-byte nonce, XChaCha20-Poly1305).
+//!   hex secret when one is needed) unwraps the 72-byte master key with the slot's cipher
+//!   (`"cipher": "xaes-256-gcm"` in format 3, else XChaCha20-Poly1305; associated data
+//!   `flux-vault-key-v1:<vault id>`): encryption key, id key, chunk seed.
+//! - Objects are a tag byte: `0` plain, `1` sealed with XChaCha20-Poly1305 (formats 1, 2),
+//!   `2` sealed with XAES-256-GCM (format 3); a 24-byte nonce follows either.
 //! - `index/*`: sealed postcard lists of packs and the blobs in them.
 //! - `data/xx/<pack>`: blobs, each sealed `[0 raw | 1 zstd] + bytes`, with a blob id that
 //!   is the keyed BLAKE3 of its plaintext.
@@ -29,9 +31,10 @@ use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use serde::Deserialize;
+use xaes_256_gcm::Xaes256Gcm;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const NEWEST_FORMAT: u32 = 2;
+const NEWEST_FORMAT: u32 = 3;
 
 type Id = [u8; 32];
 type Res<T> = Result<T, String>;
@@ -88,6 +91,9 @@ struct KeySlot {
     ciphertext: String,
     #[serde(default)]
     unlock_file: bool,
+    /// "xaes-256-gcm" (format 3); left out for XChaCha20-Poly1305.
+    #[serde(default)]
+    cipher: String,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +231,15 @@ fn one() -> u32 {
 // ---- reading ----
 
 enum Keys {
-    Sealed { enc: [u8; 32], id: [u8; 32] },
-    Plain { id: [u8; 32] },
+    /// `xaes`: objects are sealed with XAES-256-GCM (format 3), else XChaCha20-Poly1305.
+    Sealed {
+        enc: [u8; 32],
+        id: [u8; 32],
+        xaes: bool,
+    },
+    Plain {
+        id: [u8; 32],
+    },
 }
 
 struct Vault {
@@ -291,7 +304,7 @@ impl Vault {
             ));
         }
         let keys = if config.encrypted {
-            Self::unwrap_key(&root, &config.id, &password()?, unlock)?
+            Self::unwrap_key(&root, &config.id, &password()?, unlock, config.format >= 3)?
         } else {
             let pk = config.plain_keys.as_ref().ok_or("config has no id key")?;
             let id = B64
@@ -311,7 +324,13 @@ impl Vault {
         Ok(v)
     }
 
-    fn unwrap_key(root: &Path, vault_id: &str, password: &str, unlock: Option<&Path>) -> Res<Keys> {
+    fn unwrap_key(
+        root: &Path,
+        vault_id: &str,
+        password: &str,
+        unlock: Option<&Path>,
+        xaes: bool,
+    ) -> Res<Keys> {
         let secret = match unlock {
             Some(f) => {
                 let bytes = fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
@@ -355,13 +374,18 @@ impl Vault {
                 continue;
             };
             let kek = argon2id(input.as_bytes(), &salt, slot.m_kib, slot.t, slot.p)?;
-            let Ok(master) = XChaCha20Poly1305::new(&Key::from(kek)).decrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: &ct,
-                    aad: aad.as_bytes(),
-                },
-            ) else {
+            let payload = Payload {
+                msg: &ct,
+                aad: aad.as_bytes(),
+            };
+            let opened = match slot.cipher.as_str() {
+                "" | "xchacha20-poly1305" => {
+                    XChaCha20Poly1305::new(&Key::from(kek)).decrypt(&XNonce::from(nonce), payload)
+                }
+                "xaes-256-gcm" => Xaes256Gcm::new(&kek.into()).decrypt(&nonce.into(), payload),
+                _ => continue,
+            };
+            let Ok(master) = opened else {
                 continue;
             };
             if master.len() != 72 {
@@ -371,7 +395,7 @@ impl Vault {
             let mut id = [0u8; 32];
             enc.copy_from_slice(&master[..32]);
             id.copy_from_slice(&master[32..64]);
-            return Ok(Keys::Sealed { enc, id });
+            return Ok(Keys::Sealed { enc, id, xaes });
         }
         Err(if needs_file {
             "wrong password, or this Vault also needs its unlock file (--unlock-file)".into()
@@ -385,16 +409,23 @@ impl Vault {
     fn open_object(&self, obj: &[u8], what: &str) -> Res<Vec<u8>> {
         match (obj.first(), &self.keys) {
             (Some(0), Keys::Plain { .. }) => Ok(obj[1..].to_vec()),
-            (Some(1), Keys::Sealed { enc, .. }) if obj.len() >= 1 + 24 + 16 => {
+            // Only the Vault's own cipher (format 3: XAES-256-GCM).
+            (Some(&tag @ (1 | 2)), Keys::Sealed { enc, xaes, .. })
+                if tag == if *xaes { 2 } else { 1 } && obj.len() >= 1 + 24 + 16 =>
+            {
                 let nonce: [u8; 24] = obj[1..25].try_into().expect("24 bytes");
-                XChaCha20Poly1305::new(&Key::from(*enc))
-                    .decrypt(&XNonce::from(nonce), &obj[25..])
-                    .map_err(|_| format!("{what}: damaged (it doesn't decrypt)"))
+                let opened = if *xaes {
+                    Xaes256Gcm::new(&(*enc).into()).decrypt(&nonce.into(), &obj[25..])
+                } else {
+                    XChaCha20Poly1305::new(&Key::from(*enc))
+                        .decrypt(&XNonce::from(nonce), &obj[25..])
+                };
+                opened.map_err(|_| format!("{what}: damaged (it doesn't decrypt)"))
             }
             (Some(0), Keys::Sealed { .. }) => Err(format!(
                 "{what}: unencrypted in an encrypted Vault (refused: it may have been tampered with)"
             )),
-            (Some(1), Keys::Plain { .. }) => {
+            (Some(1 | 2), Keys::Plain { .. }) => {
                 Err(format!("{what}: encrypted in an unencrypted Vault"))
             }
             _ => Err(format!("{what}: unknown format")),

@@ -1462,7 +1462,7 @@ fn newer_formats_are_refused_with_a_clear_message() {
                 .unwrap_or_else(|e| e.to_string()),
             Err(e) => e.to_string(),
         };
-    // A Vault of format 3.
+    // A Vault of a format after 3.
     let mut v = env();
     v.profile.engine = flux_core::Engine::Vault;
     v.profile.vault = Some(flux_core::profile::VaultOptions {
@@ -1472,7 +1472,7 @@ fn newer_formats_are_refused_with_a_clear_message() {
     assert_eq!(v.run().record.status, RunStatus::Completed);
     let config = v.root.join("tgt/flux-vault/config");
     let mut c: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
-    c["format"] = 3.into();
+    c["format"] = (flux_vault::format::FORMAT + 1).into();
     fs::write(&config, serde_json::to_vec(&c).unwrap()).unwrap();
     let err = open_err(&v);
     assert!(err.contains("newer than this Flux supports"), "{err}");

@@ -835,6 +835,8 @@ export interface VaultSecurity {
   unlock_file: string | null;
   unlock_file_present: boolean;
   unlock_ms: number;
+  /** "XAES-256-GCM", or "XChaCha20-Poly1305" in a Vault made before 1.3. */
+  cipher: string;
 }
 
 /** What unlocking found. */

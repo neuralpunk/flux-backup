@@ -34,6 +34,9 @@ pub struct VaultSecurity {
     pub unlock_file_present: bool,
     /// How long unlocking takes on this computer with the profile's hashing.
     pub unlock_ms: u64,
+    /// What the Vault's data is encrypted with: "XAES-256-GCM", or "XChaCha20-Poly1305" in
+    /// a Vault made before 1.3 (a Vault not made yet will be XAES-256-GCM).
+    pub cipher: &'static str,
 }
 
 fn vault_profile(state: &Service, id: &str) -> Result<(ProfileId, Profile)> {
@@ -58,25 +61,39 @@ pub fn time_hashing_impl(hashing: PasswordHashing) -> Result<u64> {
 pub fn vault_security_impl(state: &Service, id: String) -> Result<VaultSecurity> {
     let (pid, p) = vault_profile(state, &id)?;
     let v = p.vault.clone().unwrap_or_default();
-    let (keys, unlocked) = match state.password(&pid) {
+    use flux_vault::crypto::{Cipher, Crypto};
+    let newest = Cipher::of_format(flux_vault::format::FORMAT);
+    let (keys, unlocked, cipher) = match state.password(&pid) {
         Some(_) => match state.open(&pid, &p) {
-            Ok(repo) => (
-                repo.vault()
-                    .map(|r| r.keys())
-                    .transpose()?
-                    .unwrap_or_default(),
-                true,
-            ),
-            Err(e) if e.code == "empty" => (Vec::new(), true),
+            Ok(repo) => {
+                let vault = repo.vault();
+                let cipher = match vault.map(|r| &r.crypto) {
+                    Some(Crypto::Encrypted(k)) => k.cipher(),
+                    _ => newest,
+                };
+                (
+                    vault.map(|r| r.keys()).transpose()?.unwrap_or_default(),
+                    true,
+                    cipher,
+                )
+            }
+            Err(e) if e.code == "empty" => (Vec::new(), true, newest),
             Err(e) => return Err(e),
         },
-        // Key slots are plain JSON: they can be listed without the password.
+        // Key slots and the config are plain JSON: read without the password.
         None => {
             let pool = flux_runner::repo::sftp_pool(&state.paths, &p, true);
             let backend = flux_runner::repo::vault_backend(&p, pool);
+            let cipher = backend
+                .read("config")
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                .and_then(|c| c["format"].as_u64())
+                .map_or(newest, |f| Cipher::of_format(f as u32));
             (
                 flux_vault::VaultRepo::list_keys(backend.as_ref()).unwrap_or_default(),
                 false,
+                cipher,
             )
         }
     };
@@ -87,6 +104,7 @@ pub fn vault_security_impl(state: &Service, id: String) -> Result<VaultSecurity>
         unlock_file_present: v.unlock_file.as_ref().is_some_and(|f| f.is_file()),
         unlock_file: v.unlock_file,
         unlock_ms: time_hashing_impl(v.hashing)?,
+        cipher: cipher.name(),
     })
 }
 

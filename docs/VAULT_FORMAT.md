@@ -1,4 +1,11 @@
-# Vault repository format, version 2
+# Vault repository format, version 3
+
+Format 3 (Flux 1.3) seals every object and key slot with **XAES-256-GCM** (AES-256-GCM
+under a key derived for each nonce; below) instead of XChaCha20-Poly1305: AES runs in the
+processor's hardware, about five times as fast on one core. Its trees and records are
+format 2's. New Vaults are format 3. A format 1 or 2 Vault keeps its cipher: changing it
+would mean sealing every object again, so there is no upgrade to format 3 (copy the
+backups into a new Vault for that).
 
 Format 2 (Flux 1.0) keeps holes in sparse files and adds `tree_format` to snapshot
 records. Format 1 (Flux 0.1–0.3) is described alongside: 1.0 reads it, and keeps writing
@@ -31,9 +38,10 @@ flux-vault/
 ```
 
 Every object but `config` and the key slots starts with a tag byte: `0` plain (an
-unencrypted Vault), `1` sealed. An encrypted Vault never writes a plain object, and
-readers refuse one there: it could have been put in place of a sealed one by someone
-with the drive. All ids are lowercase hex. Files are written to a temporary name and renamed into place,
+unencrypted Vault), `1` sealed with XChaCha20-Poly1305 (formats 1 and 2), `2` sealed with
+XAES-256-GCM (format 3). An encrypted Vault never writes a plain object, and readers refuse
+one there, or one sealed with the other cipher: it could have been put in place of a
+sealed one by someone with the drive. All ids are lowercase hex. Files are written to a temporary name and renamed into place,
 so readers never see partial files. Nothing is modified in place except snapshot records
 (rename-replaced when a snapshot is named or pinned).
 
@@ -43,7 +51,7 @@ The **master key** is 72 random bytes:
 
 | bytes | use |
 |---|---|
-| 0–31 | `enc_key`: XChaCha20-Poly1305 key for every stored object |
+| 0–31 | `enc_key`: the key every stored object is sealed with (XAES-256-GCM in format 3, XChaCha20-Poly1305 before) |
 | 32–63 | `id_key`: BLAKE3 key for blob ids |
 | 64–71 | `chunk_seed` (u64 LE): seeds the chunker's gear table |
 
@@ -53,11 +61,13 @@ A **key slot** (`keys/<16 hex>`) is JSON:
 { "kdf": "argon2id", "m_kib": 65536, "t": 3, "p": 4,
   "salt": "<16 bytes, base64>", "nonce": "<24 bytes, base64>",
   "ciphertext": "<72 + 16 bytes, base64>", "created": "<RFC 3339>", "label": "…",
-  "unlock_file": true }
+  "unlock_file": true, "cipher": "xaes-256-gcm" }
 ```
 
 `KEK = Argon2id(input, salt, m_kib, t, p, 32 bytes)` and
-`ciphertext = XChaCha20-Poly1305(KEK, nonce, master, aad = "flux-vault-key-v1:" + repo id)`.
+`ciphertext = AEAD(KEK, nonce, master, aad = "flux-vault-key-v1:" + repo id)`, where AEAD
+is the slot's `cipher`: `"xaes-256-gcm"` (format 3), or XChaCha20-Poly1305 when `cipher`
+is left out (formats 1 and 2, exactly as before 1.3).
 `input` is the password, or, for a slot with `"unlock_file": true`, the password, a NUL
 byte and the lowercase hex of `BLAKE3-derive_key("flux-vault unlock file v1", file)`, where
 `file` is the whole content of an unlock file (any file; Flux makes them of 64 random
@@ -74,11 +84,31 @@ old one.
 Every **stored object** (blob, pack header, index file, snapshot record) is:
 
 ```
-encrypted:    0x01 ‖ nonce (24 random bytes) ‖ XChaCha20-Poly1305(enc_key, nonce, payload)
+format 3:     0x02 ‖ nonce (24 random bytes) ‖ XAES-256-GCM(enc_key, nonce, payload) ‖ tag (16)
+formats 1–2:  0x01 ‖ nonce (24 random bytes) ‖ XChaCha20-Poly1305(enc_key, nonce, payload) ‖ tag (16)
 unencrypted:  0x00 ‖ payload
 ```
 
-Random 192-bit nonces make nonce reuse a non-issue at any realistic volume.
+Random 192-bit nonces make nonce reuse a non-issue at any realistic volume, with either
+cipher. AES-256-GCM's own nonce is 96 bits, too short for random nonces over a Vault's
+life (about 2³² objects per key is the usual limit); XAES-256-GCM keeps 192.
+
+### XAES-256-GCM
+
+As specified by C2SP ([c2sp.org/XAES-256-GCM](https://c2sp.org/XAES-256-GCM)): from the
+key `K` and the 24-byte nonce `N`,
+
+```
+L  = AES-256_K(0¹²⁸)
+K1 = L << 1, XOR 0x87 into the last byte if L's top bit was 1     (CMAC subkey)
+M1 = 00 01 58 00 ‖ N[0..12]          M2 = 00 02 58 00 ‖ N[0..12]
+Kx = AES-256_K(M1 ⊕ K1) ‖ AES-256_K(M2 ⊕ K1)
+ciphertext ‖ tag = AES-256-GCM(Kx, nonce = N[12..24], plaintext, aad)
+```
+
+Every object gets its own GCM key. The spec's test vectors are in Flux's tests, which also
+check it byte for byte against RustCrypto's `xaes-256-gcm` (what `flux-vault-recover`
+decrypts with); Flux's GCM is ring's.
 
 In an **unencrypted** Vault, `config` carries `id_key` and `chunk_seed` in the clear
 (`"plain_keys"`), so that ids and chunking work the same way.

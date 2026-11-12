@@ -24,7 +24,7 @@ recovered on another computer keeps using them (`[origin]` in its profile).
 ## Vault
 
 Encrypted, deduplicated, compressed storage. Fully specified in
-[VAULT_FORMAT.md](VAULT_FORMAT.md): the key slots (Argon2id, XChaCha20-Poly1305, unlock
+[VAULT_FORMAT.md](VAULT_FORMAT.md): the key slots (Argon2id, XAES-256-GCM or XChaCha20-Poly1305, unlock
 files), packs, the index, trees, snapshot records, and how format 2 differs from 1 (holes
 in sparse files, `tree_format` in records). `flux vault upgrade` moves a format 1 Vault to
 format 2 (Flux before 1.0 can't open it afterwards); the app offers it on the backup's

@@ -688,7 +688,7 @@ mod padding_tests {
 #[cfg(test)]
 mod seal_tests {
     use super::*;
-    use crate::crypto::MasterKey;
+    use crate::crypto::{Cipher, Keys, MasterKey};
 
     /// Data that doesn't compress isn't compressed; data that barely does (like photos)
     /// is compressed at level 1; the rest at the level asked for. Short blobs aren't
@@ -735,7 +735,14 @@ mod seal_tests {
         getrandom::fill(&mut random).unwrap();
         let text = b"the same line, over and over\n".repeat(10_000);
         let keys = [
-            Crypto::Encrypted(MasterKey::generate().unwrap()),
+            Crypto::Encrypted(Keys::new(
+                MasterKey::generate().unwrap(),
+                Cipher::Xaes256Gcm,
+            )),
+            Crypto::Encrypted(Keys::new(
+                MasterKey::generate().unwrap(),
+                Cipher::XChaCha20Poly1305,
+            )),
             Crypto::Plain {
                 id_key: [7; 32],
                 chunk_seed: 1,

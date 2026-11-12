@@ -266,6 +266,62 @@ fn damage_largest_pack(data: &Path) {
     fs::write(p, bytes).unwrap();
 }
 
+/// An encrypted Vault from before 1.3 (format 2: objects sealed with XChaCha20-Poly1305)
+/// is still written by Flux and read by this program; a format 3 Vault's objects are sealed
+/// with XAES-256-GCM (tag 2).
+#[test]
+fn encrypted_format_2_and_3_vaults() {
+    for format in [2u64, 3] {
+        let e = env(true);
+        let vault_dir = e.root.join("tgt/flux-vault");
+        {
+            let root = flux_runner::repo::vault_root(&e.profile);
+            let backend = Box::new(flux_vault::LocalBackend::new(&root));
+            flux_vault::VaultRepo::init(
+                backend,
+                Some("s3cret"),
+                flux_vault::crypto::KdfParams::TESTING,
+            )
+            .unwrap();
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&fs::read(vault_dir.join("config")).unwrap()).unwrap();
+            assert_eq!(config["format"], 3, "new Vaults are format 3");
+            config["format"] = format.into();
+            fs::write(
+                vault_dir.join("config"),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+        }
+        e.backup();
+        let snap = fs::read_dir(vault_dir.join("snapshots"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read(snap).unwrap()[0],
+            format as u8 - 1,
+            "the object tag"
+        );
+        let to = e.root.join("restore");
+        let o = tool(
+            &[&e.vault(), "restore", "latest", to.to_str().unwrap()],
+            Some("s3cret"),
+        );
+        assert!(o.status.success(), "format {format}: {}", err(&o));
+        same_files(&e, &to);
+        let o = tool(&[&e.vault(), "verify", "latest"], Some("s3cret"));
+        assert!(
+            o.status.success(),
+            "format {format}: {}{}",
+            out(&o),
+            err(&o)
+        );
+    }
+}
+
 #[test]
 fn unencrypted_and_format_1_vaults() {
     let e = env(false);

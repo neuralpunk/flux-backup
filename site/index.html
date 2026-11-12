@@ -39,7 +39,7 @@
           <h1 id="title">Linux backups, done right.</h1>
           <div class="spec-col" aria-label="At a glance">
             <div><span>New snapshot, 100,000 files</span><b>0.26 s</b></div>
-            <div><span>Encryption</span><b>XChaCha20-Poly1305</b></div>
+            <div><span>Encryption</span><b>XAES-256-GCM</b></div>
             <div><span>Formats</span><b>Mirror · Vault · rsync · Borg</b></div>
             <div><span>License</span><b>MIT or Apache-2.0</b></div>
           </div>
@@ -67,7 +67,7 @@
         <div class="r"><p class="k">speed · Vault</p><p class="n b"><span data-count="0.51">0.51</span><small>s</small></p><p>The same, encrypted and deduplicated. Borg: 8.18 s.</p></div>
         <div class="r"><p class="k">first backup</p><p class="n"><span data-count="0.46">0.46</span><small>s</small></p><p>Mirror's first full copy of it. rsync: 4.28 s.</p></div>
         <div class="r"><p class="k">size</p><p class="n">864<small>MiB</small></p><p>Vault, for the same data. Borg: 869 MiB.</p></div>
-        <div class="r"><p class="k">key</p><p class="n">256<small>bit</small></p><p>XChaCha20-Poly1305, behind Argon2id.</p></div>
+        <div class="r"><p class="k">key</p><p class="n">256<small>bit</small></p><p>XAES-256-GCM, behind Argon2id.</p></div>
         <div class="r"><p class="k">kept by default</p><p class="n">7·4·12·5</p><p>Daily, weekly, monthly and yearly snapshots.</p></div>
         <div class="r"><p class="k">formats</p><p class="n">4</p><p>Every one readable without Flux.</p></div>
         <div class="r"><p class="k">packages</p><p class="n">3</p><p>.rpm, .deb and AppImage.</p></div>

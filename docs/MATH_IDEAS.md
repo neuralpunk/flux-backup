@@ -12,7 +12,7 @@ detecting it.
 
 | Area | What | Where |
 |---|---|---|
-| Cryptography | XChaCha20-Poly1305 (authenticated encryption), Argon2id (password hashing), BLAKE3 (checksums, chunk ids) | flux-vault, via audited crates |
+| Cryptography | XAES-256-GCM (authenticated encryption; XChaCha20-Poly1305 in Vaults before 1.3), Argon2id (password hashing), BLAKE3 (checksums, chunk ids) | flux-vault, via audited crates |
 | Content-defined chunking | FastCDC: a rolling "gear" hash cuts files where the content says, so an edit in the middle of a file only changes the chunks around it, and the rest deduplicate | flux-vault (`fastcdc` crate) |
 | Compression | zstd | flux-vault, Borg |
 
