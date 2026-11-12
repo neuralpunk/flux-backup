@@ -166,7 +166,8 @@ const shots = {
     await full("storage-dark");
   },
   "unusual": async () => {
-    await open("?profile=plain&theme=dark");
+    // The demo's unusual changes come only with ?unusual=1 (or ?trouble=1).
+    await open("?profile=plain&unusual=1&theme=dark");
     await full("unusual", { web: "unusual", png: false });
   },
   "settings-dark": async () => {

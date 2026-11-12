@@ -105,9 +105,15 @@ const profiles: ProfileSummary[] = [
   { id: "borg", sources: ["~/.local/share/mail", "~/Notes"], scope: "user", name: "Mail & Notes (Borg)", engine: "borg", target: "ssh://me@nas/srv/flux", remote: true, schedule: "every 12h", errors: [], last_run: null, running: false },
   { id: "system:etc", sources: ["/etc"], scope: "system", name: "System settings", engine: "mirror", target: "/run/media/me/BackupDisk", remote: false, schedule: "*-*-* 20:00:00", errors: [], last_run: null, running: false },
 ];
+/** `?trouble=1`: the demo's other troubles too (a copy that failed, a missing source,
+ * low space, unusual changes). Without it, every backup is fine but Photo library, whose
+ * drive isn't plugged in, so screenshots don't make Flux look like it's failing. */
+const trouble = typeof location !== "undefined" && new URLSearchParams(location.search).get("trouble") === "1";
 profiles[0]!.last_run = run("home", snapshots.home!.at(-1), "completed");
 profiles[1]!.last_run = run("docs", snapshots.docs!.at(-1), "completed");
-profiles[2]!.last_run = run("photos", undefined, "failed", "backup target /run/media/me/Archive does not exist (is the drive connected and mounted?)");
+profiles[2]!.last_run = trouble
+  ? run("photos", undefined, "failed", "backup target /run/media/me/Archive does not exist (is the drive connected and mounted?)")
+  : run("photos", snapshots.photos!.at(-1), "completed");
 profiles[3]!.last_run = run("plain", snapshots.plain!.at(-1), "completed");
 profiles[4]!.last_run = run("borg", snapshots.borg!.at(-1), "completed");
 profiles[5]!.last_run = run("system:etc", snapshots["system:etc"]!.at(-1), "completed");
@@ -118,7 +124,9 @@ profiles[0]!.destinations = [
 ];
 profiles[0]!.last_run!.destinations = [
   { name: "usb", status: "completed", snapshot: snapshots["home+usb"]!.at(-1)!.id },
-  { name: "office", status: "failed", error: "ssh: connect to host office-nas port 22: No route to host" },
+  trouble
+    ? { name: "office", status: "failed", error: "ssh: connect to host office-nas port 22: No route to host" }
+    : { name: "office", status: "completed", snapshot: snapshots.home!.at(-1)!.id },
 ];
 
 /** Demo: the Projects backup found what looks like ransomware. */
@@ -137,7 +145,8 @@ function demoUnusual() {
     before: s.at(-2)!.id,
   };
 }
-let unusualDismissed = false;
+/** `?unusual=1`: only Projects' unusual changes (for Flux Sentry's screenshot). */
+let unusualDismissed = !trouble && !(typeof location !== "undefined" && new URLSearchParams(location.search).get("unusual") === "1");
 
 /** Demo restore tests, newest first. */
 const restoreTests: Record<string, unknown[]> = {
@@ -698,7 +707,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
               ]
             : [],
       };
-      if (id === "photos") o.recent_runs.unshift(p.last_run!);
+      if (id === "photos" && p.last_run?.status === "failed") o.recent_runs.unshift(p.last_run);
       if (id === "home" && o.recent_runs[0]) o.recent_runs[0].destinations = p.last_run?.destinations;
       if (id === "plain" && !unusualDismissed) {
         o.unusual = demoUnusual();
@@ -730,7 +739,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         const d = days.find((d) => d.date === day(Date.parse(x.finished)));
         if (d) (d.state = "ok"), (d.bytes += (stored ? x.stats?.stored_bytes : x.stats?.copied_bytes) ?? 0);
       }
-      if (id === "photos") days[27]!.state = "failed";
+      if (id === "photos" && trouble) days[27]!.state = "failed";
       return {
         next_run: p.schedule.startsWith("manual") ? null : iso(now + (id === "docs" || id === "borg" ? 1 : 5) * 3_600_000),
         timer_active: !p.schedule.startsWith("manual"),
@@ -738,12 +747,14 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         health:
           id === "photos"
             ? [{ level: "warning", kind: "unplugged", text: "Archive isn't connected. The last backup to it was 9 days ago.", hint: "Plug in Archive to back up." }]
-            : id === "home"
+            : id === "plain" && !unusualDismissed
+              ? [{ level: "danger", kind: "unusual", text: `Unusual changes in snapshot ${demoUnusual().snapshot}: ${demoUnusual().signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }]
+            : !trouble
+              ? []
+              : id === "home"
               ? [{ level: "warning", kind: "destination_failing", text: "The copy on Office NAS failed in the last backup.", hint: "Check that Office NAS is reachable; the other places are fine." }]
               : id === "docs"
               ? [{ level: "warning", kind: "source_missing", text: "The drive with scans wasn't connected for the last 2 backups. Its files were kept as they were before; changes since then aren't backed up.", hint: "Connect the drive with /mnt/scans before the next backup." }]
-              : id === "plain" && !unusualDismissed
-                ? [{ level: "danger", kind: "unusual", text: `Unusual changes in snapshot ${demoUnusual().snapshot}: ${demoUnusual().signals.join("; ")}.`, hint: "If you didn't make them, don't delete anything: the snapshot before them is kept. Otherwise choose “This was me”." }]
                 : id === "borg"
                   ? [{ level: "warning", kind: "low_space", text: "Only 3.1 GiB free where the backups go.", hint: "Free up space (Maintenance), keep fewer snapshots, or use a bigger drive." }]
                   : [],

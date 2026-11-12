@@ -3550,7 +3550,7 @@ The item phase 107 left: the sources were scanned for the look and again for the
       `flux-key-recovery`), static `flux-vault-recover`
 - [ ] Not built as `.deb`/`.rpm`/AppImage here (`npm run tauri build`); the packages' new
       file-manager entries are in `tauri.conf.json` but not installed and tried
-- [ ] Publishing (tag `v1.2.0`, the public repository): only when the owner says so
+- [x] Publishing (tag `v1.2.0`, the public repository): done in Phase 148
 - [x] Checks: `cargo fmt`, clippy -D warnings, 427 Rust tests, svelte-check, app tests
       (16), Vite build
 
@@ -4047,3 +4047,31 @@ The item phase 107 left: the sources were scanned for the look and again for the
       site's other PNG copies differed only in metadata (pixel-identical) and were left
 - [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (451), svelte-check (0, 0),
       app tests, Vite build
+
+### Phase 148 — Release 1.2: published (2026-11-11)
+- [x] By the owner's word. The public repository (`../FluxBackup-public`) made the same as
+      this one at Phase 147, as one commit, *Flux Backup 1.2.0* (04c6012), as 1.1.0 was
+      (its tree was this repository's 3964c04). Left out: `app/appshots/` (ten working
+      screenshots from Phases 133 and 137, committed here by accident; kept here)
+- [x] Pushed `main` and the annotated tag `v1.2.0` over HTTPS with `gh` as the credential
+      helper (the SSH remote was refused). CI (main and the tag), the website and the
+      Release workflow passed; the site is live at 1.2
+- [x] The draft release's six files downloaded and checked: `sha256sum -c SHA256SUMS` OK,
+      the CLI tarball's `flux --version` is 1.2.0, `flux-vault-recover` is static-pie.
+      Notes written (highlights, security, upgrading, downloads) in 1.1.0's form; published
+      as *Flux Backup 1.2.0*, marked Latest
+- [ ] The packages from CI not installed and tried here
+
+### Phase 149 — Calmer screenshots (2026-11-11)
+- [x] Asked by the owner: the screenshots made Flux look like everything was failing (every
+      backup of the demo had a problem). The demo now starts calm: four backups protected,
+      and only Photo library not green (yellow: its drive isn't connected, 9 days since
+      the last backup, which completed)
+- [x] The demo's other troubles kept behind `?trouble=1` (Office NAS's copy failed,
+      Documents' missing source, Mail's low space, Photo library's failed run, Projects'
+      unusual changes); `?unusual=1` for Projects' unusual changes alone, which the
+      Flux Sentry shot (`unusual`) uses
+- [x] All screenshots retaken with `site/shots.mjs` and looked at (All backups, the
+      Overview running, the settings table, storage, Flux Sentry's warning); the
+      website's alt text for the hero and *Warnings in words*
+- [x] Checks: svelte-check (0, 0), app tests (27)
