@@ -4291,3 +4291,14 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Checks: `a_big_file_restores_across_windows_and_packs` (40 MiB and 9 MiB + 12,345 B,
       several packs), the remote-restore round-trip test, the workspace's tests (37),
       clippy
+
+### Phase 159 — A snapshot's file list: measured, left as it is (2026-11-12)
+- [x] Suggested in the survey from reading the code: `flatten_under` reads every folder's
+      tree one after the other. Measured on a tree like a real home folder in that
+      respect: 51,021 folders, 100,000 small files (7.7 MiB), backed up to the USB SSD;
+      `flux find` (the whole list) with the Vault out of the page cache: 1.17–1.19 s,
+      0.4 s of CPU, with Phase 158's build and this one alike. Trees are small and packed
+      together, so the kernel's read-ahead brings them in quickly; from a server, the
+      pack cache fetches their packs whole
+- [ ] Not changed: loading the trees in parallel would save about a second on a snapshot
+      like that (the owner's: 461,518 files), not worth its complexity
