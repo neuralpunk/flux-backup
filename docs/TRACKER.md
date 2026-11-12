@@ -4145,3 +4145,16 @@ The item phase 107 left: the sources were scanned for the look and again for the
       CHANGELOG's Unreleased becomes 1.3.0 (Unreleased, a compare link to `HEAD`) with
       Phase 151's faster Vault backups in it
 - [ ] The AppStream 1.3.0 entry: when 1.3 is released (it needs the date)
+
+### Phase 153 — A benchmark for Vault speed (2026-11-12)
+- [x] `bench/vault-perf.sh TARGET [WORKDIR]`: made-up random files (25,000 × 1 MiB, 25,000
+      × 512 KiB, 100,000 × 4–64 KiB, eight of 1–5 GiB: 64.9 GiB; sizes by env), made once
+      and kept. Each round: a fresh Vault, a first backup, `check --read-data` and a restore
+      of everything, each with the files it reads out of the page cache first
+      (`posix_fadvise`, no root). Wall time, MiB/s, CPU (user, sys), page faults, and
+      the backup's own record (phases, thread-seconds per step, writes). `FLUX_BINS`
+      with two builds takes turns, so a drive or CPU warming up favours neither
+- [x] 1.3's starting point (Phase 152's build, the 970 EVO Plus over USB 10 Gbps, ext4 on
+      LUKS; source on the internal NVMe): backup 83 s (800 MiB/s, 428 CPU-s); check 76 s
+      (870 MiB/s, 100 CPU-s); restore 96 s (695 MiB/s, 124 CPU-s: little more than one
+      core)
