@@ -347,6 +347,8 @@ pub struct Packer<'a> {
     spare: Mutex<Vec<Vec<u8>>>,
     /// Where full packs go while [`Packer::write_behind`]'s writers run.
     behind: Mutex<Option<std::sync::mpsc::SyncSender<Builder>>>,
+    /// Write through the system's cache (see [`Packer::cached`]).
+    cached: bool,
     /// Pack bytes written so far.
     pub bytes_written: std::sync::atomic::AtomicU64,
     /// Pad each pack to its [`padme`] length.
@@ -376,6 +378,7 @@ impl<'a> Packer<'a> {
             written: Mutex::new(Vec::new()),
             spare: Mutex::new(Vec::new()),
             behind: Mutex::new(None),
+            cached: false,
             bytes_written: Default::default(),
             pad,
             parity: 0,
@@ -389,6 +392,13 @@ impl<'a> Packer<'a> {
         let mut p = Self::padded(repo.backend(), &repo.crypto, repo.pad_packs);
         p.parity = repo.parity;
         p
+    }
+
+    /// Write packs through the system's cache ([`Backend::write_pack_cached`]): for
+    /// packs written while others are read from the same drive.
+    pub fn cached(mut self) -> Self {
+        self.cached = true;
+        self
     }
 
     /// Time each pack written into `t`.
@@ -490,9 +500,12 @@ impl<'a> Packer<'a> {
         let path = pack_path(&hex);
         // Durable later: the caller flushes once before writing the index (see write_pack).
         let t = std::time::Instant::now();
-        self.backend
-            .write_pack(&path, &bytes)
-            .map_err(|e| VaultError::io(&path, e))?;
+        if self.cached {
+            self.backend.write_pack_cached(&path, &bytes)
+        } else {
+            self.backend.write_pack(&path, &bytes)
+        }
+        .map_err(|e| VaultError::io(&path, e))?;
         // Its repair data, from the bytes just written (durable when the pack is).
         if self.parity > 0 {
             crate::protect::write_for(self.backend, &path, &bytes, self.parity, true)?;

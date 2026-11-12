@@ -4302,3 +4302,21 @@ The item phase 107 left: the sources were scanned for the look and again for the
       pack cache fetches their packs whole
 - [ ] Not changed: loading the trees in parallel would save about a second on a snapshot
       like that (the owner's: 461,518 files), not worth its complexity
+
+### Phase 160 — Prune: repacking through the cache (2026-11-12)
+- [x] Measured: 25,000 × 1 MiB backed up to the USB SSD, every other file removed, backed up
+      again, then the first snapshot deleted (Sentry's unusual-change check off in the
+      test profile: it rightly held that second backup): the prune repacks nearly every
+      pack, reading ~24 GiB and writing 12.6 GiB. 103 s (twice), CPU 18 s
+- [x] Tried and dropped: reading two packs at once with the new packs written in the
+      background (`write_behind`): 163 s; one reader with background writes: 141 s.
+      Reads and direct writes at once on this drive (USB bridge) are slower than either
+      alone
+- [x] Found: the same sequential repack with `FLUX_PACK_WRITES=buffered` took 74 s. Writes
+      the kernel holds and writes back interleave with the reads; direct writes stall
+      each read. So `Backend::write_pack_cached` (the local backend: through the cache;
+      others: as `write_pack`) and `Packer::cached`, used by `gc_locked`'s repack.
+      Backups keep writing straight to the drive (Phase 154: their reads are from
+      another drive)
+- [x] Measured: 103 → 74 s; `check --read-data` after each prune: 0 problems
+- [x] Checks: the workspace's tests (37), clippy

@@ -47,6 +47,10 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   one before it was decrypted and written. Restoring 65 GiB from a USB SSD took 147
   seconds instead of 164; one 4 GiB file went from about 400 to 440 MiB/s, close to what
   the drive reads.
+- **Pruning a Vault is faster.** When removing old snapshots leaves packs mostly
+  unused, the pieces still needed are copied into new packs; those are now written
+  through the system's cache, which lets the drive interleave them with the reading.
+  A prune that repacked 24 GiB on a USB SSD took 74 seconds instead of 103.
 
 ## [1.2.1] - 2026-11-12
 

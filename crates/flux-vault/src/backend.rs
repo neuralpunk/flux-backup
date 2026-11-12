@@ -59,6 +59,13 @@ pub trait Backend: Send + Sync {
     fn write_pack(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.write(path, data)
     }
+    /// [`Backend::write_pack`] through the system's cache, for packs written while others
+    /// are read from the same drive (repacking): there, the kernel's write-back interleaves
+    /// the writes with the reads better than writing straight to the drive does (on a USB
+    /// SSD, a prune that repacks 24 GiB took 74 s this way, 103 s the other).
+    fn write_pack_cached(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write_pack(path, data)
+    }
     /// Make every [`Backend::write_pack`] so far durable.
     fn flush_packs(&self) -> io::Result<()> {
         Ok(())
@@ -270,6 +277,10 @@ impl Backend for LocalBackend {
 
     fn pack_writers(&self) -> usize {
         2
+    }
+
+    fn write_pack_cached(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, false)
     }
 
     fn flush_packs(&self) -> io::Result<()> {

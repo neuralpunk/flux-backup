@@ -190,8 +190,10 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
     out.orphan_packs = orphans.len() as u64;
 
     // Copy still-used blobs out of packs that are mostly garbage (no re-encryption needed).
-    let data_packer = Packer::for_repo(repo);
-    let tree_packer = Packer::for_repo(repo);
+    // Written through the cache: the drive is being read at the same time (see
+    // `Backend::write_pack_cached`).
+    let data_packer = Packer::for_repo(repo).cached();
+    let tree_packer = Packer::for_repo(repo).cached();
     for (pack, _) in &repack {
         let hex = hex_id(pack);
         let path = pack_path(&hex);
