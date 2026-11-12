@@ -60,10 +60,11 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   unused, the pieces still needed are copied into new packs; those are now written
   through the system's cache, which lets the drive interleave them with the reading.
   A prune that repacked 24 GiB on a USB SSD took 74 seconds instead of 103.
-- **A Vault without encryption is a choice of its own.** Turning *Encrypt with a
-  password* off for a Vault now keeps it a Vault, compressed and deduplicated with no
-  password to keep, instead of switching to plain folders; it suits a drive that's
-  encrypted already. Plain folders are chosen under *How backups are stored*.
+- **Encryption on or off, for a Vault.** A Vault asks *Encrypt the backups: On or Off*,
+  in the new backup guide and in its Settings. Off, it is still a Vault, compressed and
+  deduplicated, with no password to keep (suits a drive that's encrypted already); before,
+  choosing a Vault always meant a password, and turning encryption off switched to plain
+  folders. The setup no longer calls a Vault "Encrypted" whatever the choice.
 
 ## [1.2.1] - 2026-11-12
 

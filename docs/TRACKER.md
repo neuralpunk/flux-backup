@@ -4364,3 +4364,24 @@ The item phase 107 left: the sources were scanned for the look and again for the
       encryption*), site guide, CHANGELOG
 - [x] Checks: svelte-check (0, 0), app tests (27), Vite build; no Rust changed
 - [ ] Not looked at in the demo
+
+### Phase 163 — Encryption on or off, said as such (2026-11-12)
+- [x] Asked by the owner: an explicit On or Off for a Vault's encryption, and setup words
+      that don't call a Vault encrypted whatever the choice. Seen in the demo (headless
+      Chrome, the harness of `site/shots.mjs`): the guide's Protection step, choosing
+      Vault, went straight to *Choose a password* (no way to say no); the format was
+      titled "Encrypted" ("Encrypted, compressed and deduplicated (Vault)")
+- [x] `encryptionRow`: *Encrypt the backups* with an **On | Off** segmented control and what
+      each means, in the guide (under the formats, for a Vault; Off hides the password and
+      lets the guide go on) and in Settings (*Protection*, and the Vault's storage page,
+      where the toggle was). Fixed for a Vault that exists ("Fixed when the Vault was
+      created"), as for Borg; rsync says it can't
+- [x] Words: the format is *Vault*, "Compressed and deduplicated, encrypted or not, as you
+      choose"; summaries "Vault · encrypted" / "Vault · not encrypted"; *What happens each
+      time* says "compressed and encrypted" or "compressed (not encrypted)"; the review
+      says when a Vault isn't encrypted
+- [x] USER_GUIDE (*A Vault without encryption*), site guide, CHANGELOG (Phase 162's entry
+      rewritten)
+- [x] Checked in the demo, dark: the guide with Vault On (password asked) and Off (no
+      password, Continue ready); an existing Vault's Settings (On, fixed). svelte-check
+      (0, 0), app tests (27)

@@ -1155,9 +1155,10 @@ was set up before this, or whose drive wasn't connected at the time, shows the s
 in its Settings until its first backup. On the command line, `flux key init <profile>`
 does the same.
 
-**A Vault without encryption.** Turn *Encrypt with a password* off for a Vault and it stays
-a Vault, compressed and deduplicated, with no password to keep or lose; anyone with the
-drive can read it. It suits a drive that is encrypted already (LUKS), or backups that
+**A Vault without encryption.** A Vault asks *Encrypt the backups: On or Off* (in the new
+backup guide, under the formats, and in its Settings). Off, it is still a Vault,
+compressed and deduplicated, with no password to keep or lose; anyone with the drive can
+read it. It suits a drive that is encrypted already (LUKS), or backups that
 needn't be private. (Plain folders are chosen under *How backups are stored*.) Like the
 password itself, this is decided when the Vault is made.
 

@@ -629,9 +629,11 @@
       return encrypted
         ? "Borg encrypts the backups with your passphrase; they're also compressed and deduplicated."
         : "Borg compresses and deduplicates the backups, without encryption.";
-    if (draft.engine === "vault" && !encrypted)
-      return "Compressed and deduplicated, with no password to keep or lose: anyone with the drive can read them. Suits a drive that's encrypted already (LUKS).";
-    return encrypted ? `Nobody can read the backups without the password; they're also compressed and deduplicated.` : "Backups are plain folders you can open in any file manager.";
+    if (draft.engine === "vault")
+      return encrypted
+        ? "On: nobody can read the backups without the password."
+        : "Off: no password to keep or lose, and anyone with the drive can read the backups. Suits a drive that's encrypted already (LUKS).";
+    return "Plain folders you can open in any file manager. On makes them a Vault, encrypted with a password.";
   });
   /** The storage format differs from the saved one (a new backup history). */
   const engineChanged = $derived(!creating && !!initial && (JSON.parse(initial) as Profile).engine !== draft?.engine);
@@ -659,7 +661,7 @@
       case "mirror":
         return "Plain folders";
       case "vault":
-        return draft.vault?.encryption === false ? "Compressed (Vault)" : "Encrypted (Vault)";
+        return draft.vault?.encryption === false ? "Vault · not encrypted" : "Vault · encrypted";
       case "rsync":
         return "rsync · works without Flux";
       case "borg":
@@ -1185,11 +1187,21 @@
             {/if}
           {/snippet}
 
+          {#snippet encryptionRow(locked: boolean, reason: string)}
+            <!-- Encryption, on or off, said as such (a Vault is one either way). -->
+            <Row icon="lock" title="Encrypt the backups" subtitle={encryptText} disabled={locked} {reason}>
+              <div class="segmented" role="radiogroup" aria-label="Encryption">
+                <button role="radio" aria-checked={encrypted} disabled={locked} onclick={() => setEncrypted(true)}>On</button>
+                <button role="radio" aria-checked={!encrypted} disabled={locked} onclick={() => setEncrypted(false)}>Off</button>
+              </div>
+            </Row>
+          {/snippet}
+
           {#snippet protectRows()}
             {#if draft}
             <div class="rows mt-3">
               {#if draft.target.kind === "ssh"}{@render pageRow("connection", "terminal", connectionSummary)}{/if}
-              <Toggle row icon="lock" checked={encrypted} onchange={setEncrypted} label="Encrypt with a password" hint={encryptText} disabled={encryptLocked} reason={encryptReason} />
+              {@render encryptionRow(encryptLocked, encryptReason)}
               {#if askPassword}
                 <label class="row gap-3">
                   <span class="w-5 shrink-0"></span>
@@ -1292,7 +1304,7 @@
                   </li>
                   <li>
                     {#if draft.engine === "vault"}
-                      It stores only what's new on {place}, compressed and encrypted. A file that appears in several places, or in several backups, is stored once.
+                      It stores only what's new on {place}, compressed{encrypted ? " and encrypted" : " (not encrypted)"}. A file that appears in several places, or in several backups, is stored once.
                     {:else if draft.engine === "borg"}
                       Borg stores only what's new on {place}, compressed{encrypted ? " and encrypted" : ""}, as a new archive.
                     {:else}
@@ -1514,7 +1526,7 @@
             {#if draft.engine === "vault" && draft.vault}
               {@const vault = draft.vault}
               <div class="rows">
-                <Toggle row bind:checked={() => vault.encryption, (on) => { vault.encryption = on; vault.hide_sizes = on; }} label="Encrypt" hint="Without it, the Vault is compressed and deduplicated but readable by anyone with the drive." disabled={!creating && !engineChanged} reason="Fixed when the Vault was created." />
+                {@render encryptionRow(!creating && !engineChanged, "Fixed when the Vault was created.")}
                 {#if vault.encryption}
                   <Row title="Password comes from" subtitle={sys ? "System backups run with nobody logged in: unlock once and Flux keeps the password in a root-only key file." : "Scheduled backups need a source that works without you."}>
                     <select class="input w-auto min-w-56" value={vault.password_source.from} onchange={(e) => setPasswordSource(e.currentTarget.value)} aria-label="Password comes from">
@@ -2067,6 +2079,12 @@
                     <span class="min-w-0 flex-1">Flux Sentry is on watch{draft.unusual_changes === "high" ? ", closely" : ""}: it learns what's normal for this backup over its first five backups.</span>
                   </div>
                 {/if}
+                {#if draft.engine === "vault" && !encrypted}
+                  <div class="row">
+                    <Icon name="lock" size={17} class="shrink-0 text-fg-muted" />
+                    <span class="min-w-0 flex-1">Not encrypted: no password to keep, and anyone with the drive can read the backups.</span>
+                  </div>
+                {/if}
                 {#if encrypted}
                   <div class="row">
                     <Icon name="lock" size={17} class="shrink-0 text-fg-2" />
@@ -2137,6 +2155,13 @@
                   </div>
                 {:else if step === "protect"}
                   <StorageChoice engine={draft.engine} onchoose={(e) => setEngine(e)} />
+                  {#if draft.engine === "vault"}
+                    <!-- A Vault is a Vault either way: encryption is its own question. -->
+                    <section>
+                      <h3 class="group-title">Encryption</h3>
+                      <div class="rows">{@render encryptionRow(false, "")}</div>
+                    </section>
+                  {/if}
                   {#if encrypted}{@render passwordGroup()}{/if}
                 {:else if step === "sentry"}
                   {@render sentryChoice()}
