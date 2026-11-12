@@ -4098,3 +4098,13 @@ The item phase 107 left: the sources were scanned for the look and again for the
       for the column); in Full at 1200px the header's chips take two lines
 - [x] Checks: cargo clippy (no warnings), the app's Rust tests, svelte-check (0, 0), app
       tests (27), Vite build
+- [x] Published, by the owner's word: the public repository (`../FluxBackup-public`) got
+      this repository's commits since Phase 149 one by one (`git format-patch | git am`;
+      its tree is this one's, `app/appshots/` still left out). Pushed `main` and the
+      annotated tag `v1.2.1` over HTTPS with `gh` as the credential helper; the website
+      (the guide's Borg key lines) and the Release workflow passed
+- [x] The draft release's six files downloaded and checked: `sha256sum -c SHA256SUMS` OK,
+      the CLI tarball's `flux --version` is 1.2.1, the rpm is 1.2.1-1, `flux-vault-recover`
+      is static-pie. Notes in 1.2.0's form (highlights, fixed, upgrading, downloads);
+      published as *Flux Backup 1.2.1*, marked Latest
+- [ ] The packages from CI not installed and tried here
