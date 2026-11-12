@@ -23,6 +23,15 @@ A fix for starting at login, and a nudge to keep a Borg backup's key safe.
   An entry written by a development build now names the installed app, and the app
   repairs an existing entry that points at a copy it can't start from (a dev build, or
   an AppImage that has moved).
+- **Activity** marks the run whose details are shown; it showed them with no row picked.
+- **Activity's log** wraps a long line between words where it can, not mid-word ("err" /
+  "or 13").
+- **All backups**, in its wide layout, puts a "·" between a backup's status and its
+  folders, as the narrow layout does ("Protected · ~ → BackupDisk").
+- **What changed** no longer shows a chip for a kind of change with none ("0 changed
+  type").
+- **Overview**'s status line wraps between its parts, not inside one ("since" left at the
+  end of a line, "Oct 10" alone on the next).
 
 ## [1.2.0] - 2026-11-11
 

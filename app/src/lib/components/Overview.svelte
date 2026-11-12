@@ -351,14 +351,14 @@
       <div class="min-w-0 pt-0.5">
         <h2 class="{compact ? 'text-[18px]' : 'text-[22px]'} leading-tight font-semibold tracking-[-0.01em] text-balance">{sentence[tone](data.profile.name)}</h2>
         <p class="num {compact ? 'mt-1 text-[12.5px] text-pretty' : 'mt-1.5 text-[14px]'} text-fg-2">
-          Last backup <span class="text-fg">{data.latest ? ago(data.latest.finished) : "never"}</span>
+          <span class="whitespace-nowrap">Last backup <span class="text-fg">{data.latest ? ago(data.latest.finished) : "never"}</span></span>
           {#if !summary?.running}
           <span class="text-fg-muted">·</span>
-          Next <span class="text-fg">{summary ? nextRun(summary, status ?? { next_run: data.next_run, timer_active: data.timer_active, last_good: null, health: [], days: [] }, pausedNext ? pauseUntil(app.pause!) : null) : ""}</span>
+          <span class="whitespace-nowrap">Next <span class="text-fg">{summary ? nextRun(summary, status ?? { next_run: data.next_run, timer_active: data.timer_active, last_good: null, health: [], days: [] }, pausedNext ? pauseUntil(app.pause!) : null) : ""}</span></span>
           {#if !manual && !data.timer_active}<span class="text-warning"> (its timer isn't installed)</span>{/if}
           {/if}
           <span class="text-fg-muted">·</span>
-          <span class="text-fg">{count(data.snapshot_count)}</span> {data.snapshot_count === 1 ? "snapshot" : "snapshots"}{#if data.oldest}<span class="text-fg-muted">{" "}since {shortDate(data.oldest)}</span>{/if}
+          <span class="whitespace-nowrap"><span class="text-fg">{count(data.snapshot_count)}</span> {data.snapshot_count === 1 ? "snapshot" : "snapshots"}{#if data.oldest}<span class="text-fg-muted">{" "}since {shortDate(data.oldest)}</span>{/if}</span>
         </p>
         {#if prot?.detail && tone !== "ok" && !data.unusual}
           <p class="mt-2 max-w-[68ch] {compact ? 'text-[13px]' : 'text-[14px]'} {tone === 'bad' ? 'text-danger' : tone === 'warn' ? 'text-warning' : 'text-fg-2'}">{prot.detail}</p>

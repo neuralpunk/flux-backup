@@ -77,6 +77,7 @@
       {#each Object.entries(meta) as [k, m] (k)}
         {@const key = k as Change["change"]}
         {@const n = key === "added" ? s.added : key === "removed" ? s.removed : key === "modified" ? s.modified - folderDates : s.type_changed}
+        {#if n > 0}
         <button
           class="rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors {show[key] ? 'bg-surface-3 text-fg' : 'bg-surface-3 text-fg-muted line-through'}"
           aria-pressed={show[key]}
@@ -84,6 +85,7 @@
         >
           <span class={m.tone}>{m.mark}</span> {count(n)} {m.label}
         </button>
+        {/if}
       {/each}
       {#if folderDates}
         <button

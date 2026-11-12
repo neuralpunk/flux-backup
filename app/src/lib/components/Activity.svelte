@@ -45,6 +45,9 @@
     );
   });
 
+  /** By what the run is, not by object: `runs` holds reactive proxies, `selected` may not. */
+  const isSelected = (r: RunRecord) => !!selected && selected.run_id === r.run_id && selected.started === r.started;
+
   function select(r: RunRecord | null) {
     selected = r;
     events = null;
@@ -93,7 +96,7 @@
         {#each shown as r (r.run_id + r.started)}
           <li>
             <button
-              class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] transition-colors {selected === r ? 'bg-selected font-semibold text-on-selected' : 'text-fg-2 hover:bg-surface-3 hover:text-fg'}"
+              class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] transition-colors {isSelected(r) ? 'bg-selected font-semibold text-on-selected' : 'text-fg-2 hover:bg-surface-3 hover:text-fg'}"
               title="{dateTime(r.started)} · {r.trigger}"
               onclick={() => select(r)}
               use:contextMenu={{ items: () => runMenu(r), label: `Backup run ${dateTime(r.started)}` }}
@@ -145,9 +148,9 @@
                   {#if e.event === "phase"}
                     <span class="text-fg-2">── {phaseLabel[e.phase ?? ""] ?? e.phase}</span>
                   {:else if e.event === "warning"}
-                    <span class="break-all text-warning">{e.path}: {e.message}</span>
+                    <span class="wrap-anywhere text-warning">{e.path}: {e.message}</span>
                   {:else}
-                    <span class="whitespace-pre-wrap break-all">{e.message}</span>
+                    <span class="whitespace-pre-wrap wrap-anywhere">{e.message}</span>
                   {/if}
                 </li>
               {/each}

@@ -226,7 +226,7 @@
       <span class="block truncate font-semibold">{p.name}</span>
       <span class="block truncate text-[12.5px]">
         <span class="num {toneText[s.tone]}">{s.short.split(" · ")[0]}</span>
-        <span class="font-mono text-[12px] text-fg-muted" title="{(p.sources ?? []).join(', ')} → {p.target}">{" "}{path}</span>
+        <span class="font-mono text-[12px] text-fg-muted" title="{(p.sources ?? []).join(', ')} → {p.target}">{" "}· {path}</span>
       </span>
     </span>
     <span>{#if st}<HistoryStrip days={st.days} />{/if}</span>
