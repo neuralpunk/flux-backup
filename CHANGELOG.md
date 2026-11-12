@@ -4,6 +4,15 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Faster Vault backups.** Storing each piece of a file takes about a third of the
+  processor time it did (a new compressor and several new buffers were set up for every
+  piece, and its fingerprint was computed twice). A large backup to a fast drive spends
+  less time compressing and encrypting, and its speed is set more by the drive.
+
 ## [1.2.1] - 2026-11-12
 
 A fix for starting at login, and a nudge to keep a Borg backup's key safe.

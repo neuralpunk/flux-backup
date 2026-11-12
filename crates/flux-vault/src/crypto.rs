@@ -13,6 +13,8 @@ pub type BlobId = [u8; 32];
 const TAG_PLAIN: u8 = 0x00;
 const TAG_SEALED: u8 = 0x01;
 const NONCE_LEN: usize = 24;
+/// Poly1305's tag, after the ciphertext.
+const TAG_LEN: usize = 16;
 const MASTER_LEN: usize = 72;
 
 #[derive(Debug, thiserror::Error)]
@@ -111,29 +113,45 @@ impl Crypto {
 
     /// Wrap `payload` as a stored object.
     pub fn seal(&self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut out = Vec::with_capacity(self.seal_prefix_len() + payload.len() + TAG_LEN);
+        out.resize(self.seal_prefix_len(), 0);
+        out.extend_from_slice(payload);
+        self.seal_in_place(&mut out)?;
+        Ok(out)
+    }
+
+    /// How many bytes [`Crypto::seal_in_place`] needs before the payload (for the object's
+    /// tag, and its nonce when encrypted).
+    pub fn seal_prefix_len(&self) -> usize {
         match self {
-            Crypto::Plain { .. } => {
-                let mut out = Vec::with_capacity(payload.len() + 1);
-                out.push(TAG_PLAIN);
-                out.extend_from_slice(payload);
-                Ok(out)
-            }
-            Crypto::Encrypted(k) => {
-                let nonce: [u8; NONCE_LEN] = random()?;
-                let cipher = XChaCha20Poly1305::new(&Key::from(k.enc));
-                let ct = cipher
-                    .encrypt(&XNonce::from(nonce), payload)
-                    .map_err(|_| CryptoError::Authentication)?;
-                let mut out = Vec::with_capacity(1 + NONCE_LEN + ct.len());
-                out.push(TAG_SEALED);
-                out.extend_from_slice(&nonce);
-                out.extend_from_slice(&ct);
-                Ok(out)
-            }
+            Crypto::Plain { .. } => 1,
+            Crypto::Encrypted(_) => 1 + NONCE_LEN,
         }
     }
 
-    /// Unwrap a stored object.
+    /// [`Crypto::seal`] where the bytes lie: `buf` holds [`Crypto::seal_prefix_len`] bytes of
+    /// room, then the payload, and becomes the stored object (the same bytes `seal` would
+    /// return). No copy of the payload is made, so a backup can seal each blob in a buffer
+    /// it keeps, instead of in three new ones.
+    pub fn seal_in_place(&self, buf: &mut Vec<u8>) -> Result<(), CryptoError> {
+        let prefix = self.seal_prefix_len();
+        assert!(buf.len() >= prefix, "no room for the object's prefix");
+        match self {
+            Crypto::Plain { .. } => buf[0] = TAG_PLAIN,
+            Crypto::Encrypted(k) => {
+                use chacha20poly1305::aead::AeadInOut;
+                let nonce: [u8; NONCE_LEN] = random()?;
+                buf[0] = TAG_SEALED;
+                buf[1..prefix].copy_from_slice(&nonce);
+                let tag = XChaCha20Poly1305::new(&Key::from(k.enc))
+                    .encrypt_inout_detached(&XNonce::from(nonce), &[], (&mut buf[prefix..]).into())
+                    .map_err(|_| CryptoError::Authentication)?;
+                buf.extend_from_slice(&tag);
+            }
+        }
+        Ok(())
+    }
+
     pub fn open(&self, object: &[u8]) -> Result<Vec<u8>, CryptoError> {
         match (object.first(), self) {
             (Some(&TAG_PLAIN), Crypto::Plain { .. }) => Ok(object[1..].to_vec()),
@@ -141,7 +159,7 @@ impl Crypto {
             // it there to be trusted without the key.
             (Some(&TAG_PLAIN), Crypto::Encrypted(_)) => Err(CryptoError::Authentication),
             (Some(&TAG_SEALED), Crypto::Encrypted(k)) => {
-                if object.len() < 1 + NONCE_LEN + 16 {
+                if object.len() < 1 + NONCE_LEN + TAG_LEN {
                     return Err(CryptoError::Malformed);
                 }
                 let nonce: [u8; NONCE_LEN] =

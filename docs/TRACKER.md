@@ -4108,3 +4108,33 @@ The item phase 107 left: the sources were scanned for the look and again for the
       is static-pie. Notes in 1.2.0's form (highlights, fixed, upgrading, downloads);
       published as *Flux Backup 1.2.1*, marked Latest
 - [ ] The packages from CI not installed and tried here
+
+### Phase 151 — Vault backups to a fast USB drive (2026-11-12)
+- [x] Reported by the owner: a 335 GiB Vault backup (461k files, incompressible) to a
+      USB NVMe drive started fast, then ran at about 315 MiB/s (416 MiB/s while copying,
+      15 min 30 s). Tested on `/mnt/external_backup` (970 EVO Plus 2TB in a USB enclosure,
+      ext4 on LUKS) with made-up data only: 25,000 × 1 MiB, 25,000 × 512 KiB, 100,000 ×
+      4–64 KiB and eight files of 1–5 GiB (65.5 GiB, random)
+- [x] The drive itself, written raw (`dd oflag=direct`, 200 GiB): 860 MiB/s for the first
+      55 GiB, then about 707, and 250–530 MiB/s after 170 GiB. The enclosure links at
+      10 Gbps (USB 3.2 Gen 2, not USB4), and TRIM doesn't reach the drive
+      (`provisioning_mode full`, no discard through the bridge or LUKS). The source reads
+      cold at 4.2 GiB/s, and small files aren't the bottleneck (100,000 in 3.4 s)
+- [x] Flux's share: storing a blob cost three times what its steps do. Each 1 MiB blob had a
+      new zstd compressor, about four new 1 MiB buffers (compressed data, payload, the
+      AEAD's copy, the sealed object; glibc gives them back to the kernel and faults them
+      in again: 4 million page faults and 126 s of system time a run), and its id hashed
+      twice. `Crypto::seal_in_place` (`seal` now uses it), `pack::seal_blob` (each thread's
+      compressor and buffer), a read buffer per thread for whole files, chunks of big
+      files packed by the thread that sealed them, and written packs' buffers reused.
+      The format is unchanged (`decode_blob` reads both)
+- [x] Measured: a 1 MiB blob 423 → 1414 MiB/s on one core; the whole run (old and new taking
+      turns, the drive and the laptop's CPU warming up between runs) 7–17% faster,
+      14% fewer instructions, 33–47% fewer page faults. Runs are now about as fast as the
+      drive takes buffered writes (650–790 MiB/s while copying)
+- [x] Checks: a test that `seal_blob`'s blobs (a reused buffer, levels 0/3/19, encrypted
+      and plain) decode; flux-vault and flux-vault-recover tests; the workspace's tests;
+      clippy; `flux check --read-data` of the 66 GiB test Vault (0 problems) and a
+      restore test
+- [ ] Not done: writing packs with `O_DIRECT` (on this drive, 857 MB/s direct against 703
+      MB/s through the page cache); a writer thread so compute threads don't wait on writes

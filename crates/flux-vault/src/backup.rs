@@ -19,7 +19,7 @@ use flux_fs::snapshot::{FileError, SnapshotMeta, SnapshotStats, SnapshotStatus};
 use crate::VaultError;
 use crate::crypto::{BlobId, hex_id, random};
 use crate::format::{BlobKind, Content, Hole, IndexFile, Node, SnapshotRecord, Tree};
-use crate::pack::{Packer, encode_blob, write_index};
+use crate::pack::{KEEP_BUFFER, Packer, encode_blob, seal_blob, write_index};
 use crate::repo::{Owner, VaultRepo};
 use flux_core::sync::Locked;
 
@@ -521,14 +521,7 @@ fn store_file(
         if progress.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
-        let id = timings.time(Stage::Dedup, || repo.crypto.blob_id(data));
-        if seen.claim(&id) {
-            // Claimed: other files now count on this blob being stored.
-            let (_, sealed) = timings
-                .time(Stage::Compress, || encode_blob(&repo.crypto, data, level))
-                .inspect_err(|e| packer.fail(e))?;
-            packer.add(BlobKind::Data, id, data.len(), &sealed)?;
-        }
+        let id = store_blob(repo, seen, packer, data, level, timings)?;
         blobs.push(id);
         total += data.len() as u64;
         progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
@@ -549,17 +542,24 @@ fn store_file(
 
     if data_len as usize <= max {
         use std::io::Read;
-        let mut data = Vec::with_capacity(data_len as usize + 1);
+        // This thread's buffer from the file before (a new one per file was memory the
+        // kernel handed over and cleared for every file).
+        let mut data = READ_BUF.take();
+        data.clear();
+        data.reserve(data_len as usize + 1);
         // Read at most max+1 bytes: if the file grew past the limit, fall through to streaming.
-        timings.time(Stage::Read, || {
-            reader()?
-                .take(max as u64 + 1)
-                .read_to_end(&mut data)
-                .map_err(io_err)
-        })?;
-        if data.len() <= max {
+        let whole = (|| {
+            timings.time(Stage::Read, || {
+                reader()?
+                    .take(max as u64 + 1)
+                    .read_to_end(&mut data)
+                    .map_err(io_err)
+            })?;
+            if data.len() > max {
+                return Ok(None);
+            }
             if data.is_empty() {
-                return done(Vec::new(), 0, holes);
+                return Ok(Some(()));
             }
             let cuts: Vec<_> = timings.time(Stage::Chunk, || {
                 fastcdc::v2020::FastCDC::with_level_and_seed(&data, min, avg, max, level1, seed)
@@ -568,8 +568,15 @@ fn store_file(
             for chunk in cuts {
                 store(&data[chunk.offset..chunk.offset + chunk.length])?;
             }
+            Ok::<_, VaultError>(Some(()))
+        })();
+        if data.capacity() <= KEEP_BUFFER {
+            READ_BUF.set(data);
+        }
+        if whole?.is_some() {
             return done(blobs, total, holes);
         }
+        // The file grew past the largest chunk while being read: it's streamed instead.
     }
     // Larger files: this thread reads and cuts the next batch of chunks while the pool's
     // other threads hash, compress and encrypt the batch before it, so one big file (a
@@ -601,29 +608,15 @@ fn store_file(
         if progress.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
-        let (next, sealed) = rayon::join(&mut read_batch, || {
+        // Each chunk goes into the pack from the thread that sealed it (a pack's blobs
+        // needn't be in the file's order; the file's list of them is).
+        let (next, ids) = rayon::join(&mut read_batch, || {
             current
                 .par_iter()
-                .map(|data| -> Result<(BlobId, Option<Vec<u8>>), VaultError> {
-                    let id = timings.time(Stage::Dedup, || repo.crypto.blob_id(data));
-                    let sealed = if seen.claim(&id) {
-                        Some(
-                            timings
-                                .time(Stage::Compress, || encode_blob(&repo.crypto, data, level))
-                                .inspect_err(|e| packer.fail(e))?
-                                .1,
-                        )
-                    } else {
-                        None
-                    };
-                    Ok((id, sealed))
-                })
+                .map(|data| store_blob(repo, seen, packer, data, level, timings))
                 .collect::<Result<Vec<_>, _>>()
         });
-        for (data, (id, sealed)) in current.iter().zip(sealed?) {
-            if let Some(sealed) = sealed {
-                packer.add(BlobKind::Data, id, data.len(), &sealed)?;
-            }
+        for (data, id) in current.iter().zip(ids?) {
             blobs.push(id);
             total += data.len() as u64;
             progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
@@ -631,6 +624,41 @@ fn store_file(
         current = next?;
     }
     done(blobs, total, holes)
+}
+
+thread_local! {
+    /// Each thread's buffer for reading a whole file (see [`store_file`]).
+    static READ_BUF: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+    /// Each thread's buffer for sealing a blob (see [`store_blob`]).
+    static SEALED: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// One chunk of a file: its id, and (the first time anyone sees it) the chunk compressed,
+/// sealed and added to a pack. The id is computed once (sealing doesn't need it again).
+fn store_blob(
+    repo: &VaultRepo,
+    seen: &Seen<'_>,
+    packer: &Packer<'_>,
+    data: &[u8],
+    level: u8,
+    timings: &flux_core::progress::Timings,
+) -> Result<BlobId, VaultError> {
+    let id = timings.time(Stage::Dedup, || repo.crypto.blob_id(data));
+    if seen.claim(&id) {
+        // Claimed: other files now count on this blob being stored.
+        let mut sealed = SEALED.take();
+        let r = timings
+            .time(Stage::Compress, || {
+                seal_blob(&repo.crypto, data, level, &mut sealed)
+            })
+            .inspect_err(|e| packer.fail(e))
+            .and_then(|()| packer.add(BlobKind::Data, id, data.len(), &sealed));
+        if sealed.capacity() <= KEEP_BUFFER {
+            SEALED.set(sealed);
+        }
+        r?;
+    }
+    Ok(id)
 }
 
 /// Before a backup commits: is what it stored, and what it counted on, still there?

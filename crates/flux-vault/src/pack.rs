@@ -11,6 +11,9 @@ use flux_core::sync::Locked;
 
 /// Close a pack once it reaches this size.
 pub const PACK_TARGET: usize = 16 << 20;
+/// Written packs' buffers a [`Packer`] keeps for its next packs (one per thread that
+/// can be writing a pack at once is plenty; more is memory held for nothing).
+const SPARE_PACKS: usize = 4;
 const RAW: u8 = 0;
 const ZSTD: u8 = 1;
 
@@ -21,23 +24,79 @@ pub fn encode_blob(
     plaintext: &[u8],
     level: u8,
 ) -> Result<(BlobId, Vec<u8>), VaultError> {
-    let id = crypto.blob_id(plaintext);
-    let mut payload = Vec::with_capacity(plaintext.len() + 1);
-    let compressed = (level > 0)
-        .then(|| zstd::bulk::compress(plaintext, i32::from(level)).ok())
-        .flatten();
-    match compressed {
-        Some(c) if c.len() < plaintext.len() => {
-            payload.push(ZSTD);
-            payload.extend_from_slice(&c);
-        }
-        _ => {
-            payload.push(RAW);
-            payload.extend_from_slice(plaintext);
-        }
-    }
-    Ok((id, crypto.seal(&payload)?))
+    let mut sealed = Vec::new();
+    seal_blob(crypto, plaintext, level, &mut sealed)?;
+    Ok((crypto.blob_id(plaintext), sealed))
 }
+
+/// [`encode_blob`] into `out` (replacing what it held), without the id: a backup has the
+/// id already (it decided by it whether to store the blob), and keeps `out` for the next
+/// blob. The blob is compressed and sealed in place, with this thread's zstd compressor:
+/// a new buffer per step, and a new compressor per blob, were most of what storing a
+/// blob cost (a megabyte of incompressible data took three times as long as it does now).
+pub fn seal_blob(
+    crypto: &Crypto,
+    plaintext: &[u8],
+    level: u8,
+    out: &mut Vec<u8>,
+) -> Result<(), VaultError> {
+    let prefix = crypto.seal_prefix_len();
+    out.clear();
+    out.reserve(prefix + 1 + plaintext.len() + 16);
+    out.resize(prefix, 0);
+    if !(level > 0 && compress_into(plaintext, level, out)) {
+        out.push(RAW);
+        out.extend_from_slice(plaintext);
+    }
+    Ok(crypto.seal_in_place(out)?)
+}
+
+/// This thread's zstd compressor (and the level it's set to), and the buffer it writes to.
+struct Zstd {
+    level: u8,
+    compressor: zstd::bulk::Compressor<'static>,
+    buf: Vec<u8>,
+}
+
+thread_local! {
+    static COMPRESSOR: std::cell::Cell<Option<Zstd>> = const { std::cell::Cell::new(None) };
+}
+
+/// Append `plaintext` compressed at `level` to `out` (after the [`ZSTD`] mark) if that's
+/// smaller than storing it raw. Returns whether it did.
+fn compress_into(plaintext: &[u8], level: u8, out: &mut Vec<u8>) -> bool {
+    let mut z = match COMPRESSOR.take() {
+        Some(z) if z.level == level => z,
+        _ => match zstd::bulk::Compressor::new(i32::from(level)) {
+            Ok(compressor) => Zstd {
+                level,
+                compressor,
+                buf: Vec::new(),
+            },
+            Err(_) => return false,
+        },
+    };
+    z.buf.clear();
+    z.buf
+        .reserve(zstd::zstd_safe::compress_bound(plaintext.len()));
+    let smaller = match z.compressor.compress_to_buffer(plaintext, &mut z.buf) {
+        Ok(n) if n < plaintext.len() => {
+            out.push(ZSTD);
+            out.extend_from_slice(&z.buf[..n]);
+            true
+        }
+        _ => false,
+    };
+    // A buffer grown for an unusually large blob isn't kept for the life of the thread.
+    if z.buf.capacity() > KEEP_BUFFER {
+        z.buf = Vec::new();
+    }
+    COMPRESSOR.set(Some(z));
+    smaller
+}
+
+/// Buffers up to this size are kept for reuse by the thread that grew them.
+pub(crate) const KEEP_BUFFER: usize = 32 << 20;
 
 /// Decode a stored blob and verify it against its id.
 pub fn decode_blob(
@@ -75,8 +134,15 @@ struct Builder {
 
 impl Builder {
     fn new() -> Self {
+        Self::with_buf(Vec::new())
+    }
+
+    /// A builder that fills `buf` (emptied; a written pack's, to reuse).
+    fn with_buf(mut buf: Vec<u8>) -> Self {
+        buf.clear();
+        buf.reserve(PACK_TARGET + (1 << 20));
         Self {
-            buf: Vec::with_capacity(PACK_TARGET + (1 << 20)),
+            buf,
             entries: Vec::new(),
         }
     }
@@ -232,6 +298,9 @@ pub struct Packer<'a> {
     crypto: &'a Crypto,
     current: Mutex<Builder>,
     written: Mutex<Vec<IndexPack>>,
+    /// Buffers of packs already written, for the next packs: a new 17 MiB buffer per pack
+    /// is memory the kernel has to hand over (and clear) again each time.
+    spare: Mutex<Vec<Vec<u8>>>,
     /// Pack bytes written so far.
     pub bytes_written: std::sync::atomic::AtomicU64,
     /// Pad each pack to its [`padme`] length.
@@ -259,6 +328,7 @@ impl<'a> Packer<'a> {
             crypto,
             current: Mutex::new(Builder::new()),
             written: Mutex::new(Vec::new()),
+            spare: Mutex::new(Vec::new()),
             bytes_written: Default::default(),
             pad,
             parity: 0,
@@ -300,7 +370,10 @@ impl<'a> Packer<'a> {
                 length: sealed.len() as u32,
                 raw_length: raw_length as u32,
             });
-            (cur.buf.len() >= PACK_TARGET).then(|| std::mem::replace(&mut *cur, Builder::new()))
+            (cur.buf.len() >= PACK_TARGET).then(|| {
+                let buf = self.spare.locked().pop().unwrap_or_default();
+                std::mem::replace(&mut *cur, Builder::with_buf(buf))
+            })
         };
         match full {
             Some(b) => self.write(b).inspect_err(|e| self.fail(e)),
@@ -346,6 +419,10 @@ impl<'a> Packer<'a> {
             pack: id,
             blobs: entries,
         });
+        let mut spare = self.spare.locked();
+        if spare.len() < SPARE_PACKS && bytes.capacity() <= KEEP_BUFFER {
+            spare.push(bytes);
+        }
         Ok(())
     }
 
@@ -503,5 +580,54 @@ mod padding_tests {
         // Lengths close together share a padded length: that's what hides them.
         assert_eq!(padme(10_000), padme(10_100));
         assert!(padme((16 << 20) + 1) - ((16 << 20) + 1) <= (16 << 20) / 32);
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+    use crate::crypto::MasterKey;
+
+    /// What a backup stores with [`seal_blob`] (a buffer reused from blob to blob, the
+    /// thread's compressor at more than one level) reads back as [`encode_blob`]'s does.
+    #[test]
+    fn sealed_in_place_blobs_decode() {
+        let mut random = vec![0u8; 300_000];
+        getrandom::fill(&mut random).unwrap();
+        let text = b"the same line, over and over\n".repeat(10_000);
+        let keys = [
+            Crypto::Encrypted(MasterKey::generate().unwrap()),
+            Crypto::Plain {
+                id_key: [7; 32],
+                chunk_seed: 1,
+            },
+        ];
+        let mut out = b"left over from the blob before".to_vec();
+        for crypto in &keys {
+            for level in [3u8, 0, 19, 3] {
+                for (plain, compresses) in [
+                    (&random[..], false),
+                    (&text[..], level > 0),
+                    (&b""[..], false),
+                ] {
+                    seal_blob(crypto, plain, level, &mut out).unwrap();
+                    assert!(
+                        (out.len() < plain.len()) == compresses,
+                        "level {level}: compressed only when that helps"
+                    );
+                    let entry = PackEntry {
+                        kind: BlobKind::Data,
+                        id: crypto.blob_id(plain),
+                        offset: 0,
+                        length: out.len() as u32,
+                        raw_length: plain.len() as u32,
+                    };
+                    assert_eq!(decode_blob(crypto, &out, &entry).unwrap(), plain);
+                    let (id, sealed) = encode_blob(crypto, plain, level).unwrap();
+                    assert_eq!(id, entry.id);
+                    assert_eq!(decode_blob(crypto, &sealed, &entry).unwrap(), plain);
+                }
+            }
+        }
     }
 }
