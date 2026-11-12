@@ -4224,4 +4224,10 @@ The item phase 107 left: the sources were scanned for the look and again for the
       the block and chunk sizes, blocks of 2×max to 1 MiB, a run of one byte value), and
       a 10 GiB backup by Phase 155's build followed by one of the same files (touched)
       by this build: read 10.0 GiB, stored 0 B
-- [x] Checks: the workspace's tests, clippy
+- [x] Checks: the workspace's tests (all 37 suites, after the fix below), clippy
+- [x] A test that hung: `desktop::tests::buttons_on_notifications` sets a private bus for
+      the whole test binary, and backups in other tests, run in parallel, sent their
+      notifications to it, taking the clicks it scripted; it then waited
+      `FLUX_NOTIFY_WAIT` (ten minutes) for its own. The bus now names the test's thread;
+      notifications from other threads are dropped while it's set. (Phase 156's commit
+      went in on a run cut short by it: 14 of 37 suites; the full run passes)

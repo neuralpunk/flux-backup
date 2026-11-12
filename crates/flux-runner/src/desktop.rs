@@ -22,7 +22,9 @@ pub fn notify(summary: &str, body: &str, urgency: Urgency) {
     // A test on a private bus never shows anything on the desktop's.
     #[cfg(test)]
     if TEST_BUS.get().is_some() {
-        PLAIN.fetch_add(1, Ordering::Relaxed);
+        if !elsewhere_in_tests() {
+            PLAIN.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     }
     let mut n = notify_rust::Notification::new();
@@ -88,13 +90,24 @@ static ACTIONS: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static PLAIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// The bus to use instead of the desktop's (tests: a private one).
+/// The bus to use instead of the desktop's (tests: a private one), and the thread of the
+/// test that uses it.
 #[cfg(test)]
-static TEST_BUS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static TEST_BUS: std::sync::OnceLock<(String, std::thread::ThreadId)> = std::sync::OnceLock::new();
+
+/// A notification from another test while one runs on the private bus: dropped. Tests run
+/// in parallel in one process, and a backup's notification would take an answer (a
+/// click) meant for that test, which then waited ten minutes for its own.
+#[cfg(test)]
+fn elsewhere_in_tests() -> bool {
+    TEST_BUS
+        .get()
+        .is_some_and(|(_, t)| *t != std::thread::current().id())
+}
 
 async fn session_bus() -> zbus::Result<zbus::Connection> {
     #[cfg(test)]
-    if let Some(address) = TEST_BUS.get() {
+    if let Some((address, _)) = TEST_BUS.get() {
         return zbus::conn::Builder::address(address.as_str()).build().await;
     }
     zbus::Connection::session().await
@@ -110,6 +123,10 @@ pub fn enable_actions() {
 /// this process answers them ([`enable_actions`]) and the desktop shows buttons;
 /// otherwise as [`notify`].
 pub fn notify_with(summary: &str, body: &str, urgency: Urgency, profile: &str, actions: &[Action]) {
+    #[cfg(test)]
+    if elsewhere_in_tests() {
+        return;
+    }
     if !(ACTIONS.load(Ordering::Relaxed)
         && shown_with_buttons(summary, body, urgency, profile, actions))
     {
@@ -508,7 +525,9 @@ mod tests {
             .read_line(&mut address)
             .unwrap();
         let _bus = Bus(child);
-        TEST_BUS.set(address.trim().to_owned()).unwrap();
+        TEST_BUS
+            .set((address.trim().to_owned(), std::thread::current().id()))
+            .unwrap();
         server(vec![Some("retry"), Some("default"), None]);
 
         // Nothing waits for a click until a process says it will.
