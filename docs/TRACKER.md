@@ -4075,3 +4075,26 @@ The item phase 107 left: the sources were scanned for the look and again for the
       Overview running, the settings table, storage, Flux Sentry's warning); the
       website's alt text for the hero and *Warnings in words*
 - [x] Checks: svelte-check (0, 0), app tests (27)
+
+### Phase 150 — Release 1.2.1 (2026-11-12)
+- [x] Start at login, reported by the owner: after a reboot, *Open Flux Backup* from the
+      tray showed "Could not connect to localhost: Connection refused". The autostart
+      entry named `target/debug/flux-backup` (written by `current_exe()` from `tauri
+      dev`), which loads its pages from the Vite dev server. Debug builds now write the
+      installed `flux-backup`; a release build repairs an entry that differs at startup
+      (`autostart::refresh`). The owner's entry repointed at `/usr/bin/flux-backup`
+- [x] Version 1.2.1 everywhere (workspace, `Cargo.lock`, app, Tauri); CHANGELOG and an
+      AppStream 1.2.1 entry (`appstreamcli validate` passes)
+- [x] Asked by the owner: an encrypted Borg backup whose key isn't exported says so on its
+      Overview (`BorgKeyNotice`), with *Export the key…* opening `BorgKeyDialog` (why,
+      *Choose a folder…*, where it went, *I already have*); the checklist's line uses the
+      same dialog. USER_GUIDE and `site/guide.html` say so
+- [x] Asked by the owner, a look through the demo for small issues (about 30 views, dark
+      and light, 1200×780 and 900×600). Fixed: Activity never marked the shown run (a
+      `$state` proxy compared with `===`); Activity's log broke words (`break-all`); All
+      backups' wide rows had no "·" between status and path; *What changed* showed
+      "0 changed type"; the Overview's status line left "since" and its date apart
+- [ ] Not changed: 12-hour times in Snapshots and the log keep a leading zero ("05:30 AM",
+      for the column); in Full at 1200px the header's chips take two lines
+- [x] Checks: cargo clippy (no warnings), the app's Rust tests, svelte-check (0, 0), app
+      tests (27), Vite build

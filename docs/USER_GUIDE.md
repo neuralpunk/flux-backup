@@ -883,7 +883,7 @@ computer?* opens a short checklist, with a button beside each line that isn't re
 |---|---|
 | Its settings are kept with the backups (and current) | **Back up now**: each backup keeps a copy |
 | The password is kept somewhere other than this computer | **Keep it elsewhere…**: shows the password from where Flux keeps it (masked until you click *Show*), copies it for a password manager (the clipboard is cleared 30 seconds later), saves a copy of a Vault's unlock file, and ticks the line. Flux can't know where you keep it, so **I have** ticks it too |
-| The Borg key is exported | **Export the key…**: `borg key export` into a folder you choose, as a new file; keep it with the passphrase, not next to the backups |
+| The Borg key is exported | **Export the key…**: says why it matters, then `borg key export` into a folder you choose, as a new file; keep it with the passphrase, not next to the backups. Until it's done, the backup's Overview says so too. Exported it yourself? **I have** ticks it |
 | A restore test has passed | **Test a restore now** (or *Test again*) |
 | A copy is kept somewhere else | **Add a place…**: opens Settings at *Keep a copy somewhere else too* |
 
@@ -1246,7 +1246,8 @@ never misread: update Flux. Every format is described in
 A Borg repository has one passphrase; `flux key store <profile>` saves it in the keyring
 for scheduled backups. Borg keeps the encryption key inside the repository, so also keep
 a copy of it: `borg key export <repository> ~/borg-key.txt` (the recovery guide has the
-exact command). **Without the passphrase, the data can't be decrypted.**
+exact command). Until it's exported, the backup's Overview says so, with **Export the
+key…**, which does it for you. **Without the passphrase, the data can't be decrypted.**
 
 ## Checking your backups
 
