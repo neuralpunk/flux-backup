@@ -114,7 +114,7 @@
           engine,
           target,
           offsite,
-          vault: engine === "vault" ? { compression_level: 3, encryption: true, password_source: { from: "keyring" } } : null,
+          vault: engine === "vault" ? { compression_level: 3, encryption: true, password_source: { from: "keyring" }, hide_sizes: true } : null,
           borg: engine === "borg" ? { encryption: "repokey-blake2", compression: "zstd,3", password_source: { from: "keyring" }, remote_path: null, extra_args: [] } : null,
         };
     try {

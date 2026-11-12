@@ -17,6 +17,8 @@ const KIND_LABEL: Record<string, string> = {
   restore_test_failed: "Restore test failed",
   unverified: "Not tested lately",
   unusual: "Unusual changes",
+  filesystem: "Drive's format",
+  drive_failing: "Drive's health",
 };
 
 /** "Low on space", or `null` for a kind without a short label. */
@@ -56,4 +58,21 @@ export function remainder(c: Counts, first: { protected: boolean }): string | nu
   const tl = c.toLook - (first.protected ? 1 : 0);
   const parts = [np ? `${np} more ${np === 1 ? "isn't" : "aren't"} protected` : "", tl ? `${tl} ${np ? "" : "more "}${tl === 1 ? "needs" : "need"} a look` : ""].filter(Boolean);
   return parts.length ? `And ${parts.join(", and ")} below.` : null;
+}
+
+/** A backup's status in a word or two, for the Compact sidebar where it shares a line with
+ * the name: "21%", "Failed", "Low on space", or for a backup that's fine, how old its copy
+ * is. `short` is the status line (`protection().short`); the whole of it stays in the
+ * item's title. */
+export function sideLabel(tone: Tone, short: string): string {
+  const [head, tail] = short.split(" · ");
+  if (tone === "run") {
+    if (tail?.endsWith("%")) return tail;
+    return short.startsWith("Waiting") ? "Waiting" : "Backing up";
+  }
+  if (tone === "ok") return tail ?? head!;
+  if (short.startsWith("Failed")) return "Failed";
+  if (short.startsWith("Can't run")) return "Needs fixing";
+  if (short === "Not backed up yet") return "No copy yet";
+  return head!;
 }

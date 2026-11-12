@@ -11,6 +11,8 @@
     ["← / →", "Previous / next snapshot (timeline focused)"],
     ["/", "Filter the current folder"],
     ["F5", "Check the current folder again (what's deleted, what's back)"],
+    ["F9", "Fold or open the sidebar"],
+    ["Ctrl + Z", "Undo deleting snapshots (for a few seconds after)"],
     ["Esc", "Close a dialog"],
     ["?", "This list"],
   ];

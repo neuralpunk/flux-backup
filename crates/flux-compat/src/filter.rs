@@ -241,6 +241,7 @@ mod tests {
             exclude_caches: false,
             exclude_if_present: vec![],
             one_file_system: false,
+            exclude_gitignored: false,
             volumes: Vec::new(),
         };
         assert_eq!(profile_rules(&s, None), ["+ keep.tmp", "- *.tmp"]);
@@ -283,6 +284,7 @@ mod tests {
             exclude_caches: true,
             exclude_if_present: vec![".nobackup".into()],
             one_file_system: false,
+            exclude_gitignored: false,
             volumes: Vec::new(),
         };
         let filter = Filter::new(&sources, None).unwrap();

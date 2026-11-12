@@ -4,6 +4,7 @@
   // same group (e.g. the row that opens the exclusions).
   import type { Snippet } from "svelte";
   import Icon, { type IconName } from "../Icon.svelte";
+  import { bytes } from "../../format";
 
   let {
     items = $bindable(),
@@ -14,6 +15,7 @@
     icon,
     label = "",
     after,
+    sizes,
   }: {
     items: string[];
     placeholder?: string;
@@ -25,6 +27,8 @@
     /** What the list is, for screen readers ("Folders to back up"). */
     label?: string;
     after?: Snippet;
+    /** How much each item holds, shown beside it (`partial`: at least that). */
+    sizes?: Record<string, { size: number | null; partial: boolean } | undefined>;
   } = $props();
   let draft = $state("");
 
@@ -46,6 +50,10 @@
         <li class="row min-h-11 py-1.5 pr-2">
           {#if icon}<Icon name={icon} size={17} class="shrink-0 text-fg-2" />{/if}
           <span class="selectable min-w-0 flex-1 truncate {mono ? 'font-mono text-[13px]' : 'text-[14px]'}" title={item}>{item}</span>
+          {#if sizes?.[item]?.size != null}
+            {@const sz = sizes[item]!}
+            <span class="shrink-0 font-mono text-[12px] text-fg-muted tabular-nums" title={sz.partial ? `At least ${bytes(sz.size!)} (still counting when Flux stopped)` : `${bytes(sz.size!)} on disk`}>{sz.partial ? "≥ " : ""}{bytes(sz.size!)}</span>
+          {/if}
           <button type="button" class="btn-icon size-8 hover:text-danger" aria-label="Remove {item}" title="Remove" onclick={() => (items = items.filter((_, j) => j !== i))}>
             <Icon name="x" size={15} />
           </button>

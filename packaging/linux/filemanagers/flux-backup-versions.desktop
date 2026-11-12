@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=all/all;
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+X-KDE-Priority=TopLevel
+Actions=previousVersions;
+
+[Desktop Action previousVersions]
+Name=Previous versions…
+Icon=flux-backup
+Exec=flux-backup --previous-versions %f

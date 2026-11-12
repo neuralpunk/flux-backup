@@ -9,6 +9,7 @@
   import Icon from "./Icon.svelte";
   import KeepPasswordDialog from "./KeepPasswordDialog.svelte";
   import DestinationDialog from "./DestinationDialog.svelte";
+  import RecoveryCodeDialog from "./RecoveryCodeDialog.svelte";
 
   let { id, onlocked }: { id: string; onlocked?: (retry: () => void) => void } = $props();
 
@@ -28,6 +29,7 @@
   /** Which action is running (its check's key). */
   let busy = $state<string | null>(null);
   let keepingPassword = $state(false);
+  let makingCode = $state(false);
 
   async function answer(c: ReadinessCheck, yes = !c.ok) {
     try {
@@ -85,6 +87,8 @@
         return c.ok ? null : { label: backingUp ? "Backing up…" : "Back up now", run: () => void app.backupNow(id), primary: true };
       case "password_elsewhere":
         return c.ok ? null : { label: "Keep it elsewhere…", run: () => (keepingPassword = true), primary: true };
+      case "recovery_code":
+        return c.ok ? null : { label: "Make one…", run: () => (makingCode = true), primary: true };
       case "key_exported":
         return c.ok ? null : { label: busy === "key_exported" ? "Exporting…" : "Export the key…", run: () => void exportKey(), primary: true };
       case "restore_test":
@@ -150,6 +154,10 @@
       if (c) void answer(c, true);
     }}
   />
+{/if}
+
+{#if makingCode}
+  <RecoveryCodeDialog {id} name={profile?.name ?? id} onclose={() => (makingCode = false)} ondone={() => app.revision++} />
 {/if}
 
 {#if adding}

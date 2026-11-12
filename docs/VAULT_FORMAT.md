@@ -111,7 +111,7 @@ The header object (encrypted like any object) holds a postcard-encoded list of
 the whole file, so `check --read-data` can verify a pack without any key. Packs hold either
 data or tree blobs, never both, and are closed at ~16 MiB.
 
-With *hide file sizes* on (encrypted Vaults), random bytes between the last blob and the
+With *hide file sizes* on (encrypted Vaults; the default for profiles made from 1.2), random bytes between the last blob and the
 header object bring the whole pack to its **Padmé** length (Nikitin et al., 2019): with
 `E = ⌊log₂ L⌋` and `S = ⌊log₂ E⌋ + 1`, the length `L` is rounded up to a multiple of
 `2^(E−S)`, which leaves about log₂ log₂ L bits of the length and costs at most about 12%

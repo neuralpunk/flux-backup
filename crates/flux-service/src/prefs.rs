@@ -36,6 +36,10 @@ pub struct Preferences {
     pub webhooks: Vec<flux_core::webhook::Webhook>,
     /// Closing the app's window keeps it running in the system tray.
     pub close_to_tray: bool,
+    /// Once a week, a quiet notification when every backup is fine.
+    pub weekly_note: bool,
+    /// When the notifications that only inform wait (`None`: never).
+    pub quiet_hours: Option<prefs::QuietHours>,
 }
 
 pub fn preferences_impl(state: &Service) -> Result<Preferences> {
@@ -59,7 +63,44 @@ pub fn preferences_impl(state: &Service) -> Result<Preferences> {
             .collect(),
         webhooks: s.webhooks,
         close_to_tray: !s.quit_on_close,
+        weekly_note: !s.weekly_note_off,
+        quiet_hours: s.quiet_hours.clone(),
     })
+}
+
+/// The weekly "all good" notification, on or off.
+pub fn set_weekly_note_impl(state: &Service, on: bool) -> Result<Preferences> {
+    let mut s = Settings::load(&state.paths);
+    s.weekly_note_off = !on;
+    s.save(&state.paths)
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    preferences_impl(state)
+}
+
+/// Quiet hours from `from` to `to` ("HH:MM", local time), or none (both `None`).
+pub fn set_quiet_hours_impl(
+    state: &Service,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<Preferences> {
+    let quiet = match (from, to) {
+        (Some(from), Some(to)) => {
+            let q = prefs::QuietHours { from, to };
+            if !q.is_valid() {
+                return Err(ApiError::new(
+                    "invalid",
+                    "Quiet hours need a start and an end, at different times of day.",
+                ));
+            }
+            Some(q)
+        }
+        _ => None,
+    };
+    let mut s = Settings::load(&state.paths);
+    s.quiet_hours = quiet;
+    s.save(&state.paths)
+        .map_err(|e| ApiError::new("error", e.to_string()))?;
+    preferences_impl(state)
 }
 
 /// Keep the app in the system tray when its window is closed (`true`), or quit.
@@ -195,6 +236,28 @@ pub fn new_profile_excludes(state: &Service) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_hours_are_kept_and_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Service::new(flux_core::Paths::under(t.path(), flux_core::Scope::User));
+        assert!(preferences_impl(&s).unwrap().quiet_hours.is_none());
+        let p = set_quiet_hours_impl(&s, Some("22:00".into()), Some("08:00".into())).unwrap();
+        assert_eq!(
+            p.quiet_hours.as_ref().map(|q| q.from.as_str()),
+            Some("22:00")
+        );
+        assert!(Settings::load(&s.paths).quiet_hours.is_some());
+        // The same start and end isn't a span of time.
+        assert!(set_quiet_hours_impl(&s, Some("08:00".into()), Some("08:00".into())).is_err());
+        assert!(Settings::load(&s.paths).quiet_hours.is_some(), "unchanged");
+        assert!(
+            set_quiet_hours_impl(&s, None, None)
+                .unwrap()
+                .quiet_hours
+                .is_none()
+        );
+    }
 
     #[test]
     fn preferences_round_trip() {

@@ -14,6 +14,8 @@
   import Row from "./form/Row.svelte";
   import Toggle from "./form/Toggle.svelte";
   import NumberInput from "./form/NumberInput.svelte";
+  import RecoveryCodeDialog from "./RecoveryCodeDialog.svelte";
+  import { dateTime } from "../format";
 
   let {
     vault = $bindable(),
@@ -66,6 +68,20 @@
 
   function choose(level: Level) {
     vault.hashing = level === "custom" ? (hashing.level === "custom" ? hashing : { level: "custom", memory_mib: 128, passes: 3, threads: 4 }) : { level };
+  }
+
+  // The recovery code: a key slot labelled "recovery code".
+  const recovery = $derived(security?.keys.find((k) => k.label === "recovery code") ?? null);
+  let makingCode = $state(false);
+  let removingCode = $state(false);
+  async function removeCode() {
+    if (!id) return;
+    await withPassword(async () => {
+      await api.recoveryCode(id, true);
+      removingCode = false;
+      app.toast("ok", "The recovery code was removed: it no longer opens the backups.");
+      security = await api.vaultSecurity(id);
+    });
   }
 
   /** The password in use (or, while locked, the Vault's first). */
@@ -216,6 +232,39 @@
     <p class="mt-2 px-0.5 text-[12.5px] text-fg-muted">Keep a copy of the file somewhere safe. If both the file and its copies are lost, the backups can't be opened with this password.</p>
   {/if}
 </section>
+
+<section class="flex flex-col">
+  <h2 class="group-title">Recovery code</h2>
+  <div class="rows">
+    {#if !id || !security?.keys.length}
+      <Row title="Make a recovery code" icon="lifebuoy" subtitle="" disabled reason="Available once the encrypted Vault exists (after setting it up, or the first backup)." />
+    {:else if recovery}
+      <Row title="There's a recovery code" icon="lifebuoy" subtitle="Made {dateTime(recovery.created)}. It opens the backups when the password is lost, also without the unlock file.">
+        {#if removingCode}
+          <button class="btn btn-danger" onclick={() => void removeCode()}>Remove it</button>
+          <button class="btn btn-ghost" onclick={() => (removingCode = false)}>Keep</button>
+        {:else}
+          <button class="btn" onclick={() => (makingCode = true)}>Make a new one…</button>
+          <button class="btn btn-ghost" onclick={() => (removingCode = true)}>Remove…</button>
+        {/if}
+      </Row>
+    {:else}
+      <Row title="Make a recovery code" icon="lifebuoy" subtitle="A long code to print or keep somewhere safe, that opens the backups if the password is ever lost.">
+        <button class="btn" onclick={() => (makingCode = true)}>Make one…</button>
+      </Row>
+    {/if}
+  </div>
+</section>
+
+{#if makingCode && id}
+  <RecoveryCodeDialog
+    {id}
+    {name}
+    replacing={!!recovery}
+    onclose={() => (makingCode = false)}
+    ondone={() => void api.vaultSecurity(id).then((v) => (security = v))}
+  />
+{/if}
 
 <section class="flex flex-col">
   <h2 class="group-title">Privacy and the app</h2>

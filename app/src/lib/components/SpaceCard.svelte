@@ -3,13 +3,15 @@
   // recorded after each backup), and when it's full at that rate. One series, so no
   // legend: the title says what's plotted. Hover or arrow keys for exact values; the
   // same numbers are in the table below the chart.
-  import { bytes, dayLabel, dateTime } from "../format";
-  import type { Space } from "../types";
+  import { ago, bytes, dayLabel, dateTime } from "../format";
+  import type { DriveHealth, Space } from "../types";
   import type { Snippet } from "svelte";
   import Icon from "./Icon.svelte";
   import StorageMeter from "./StorageMeter.svelte";
 
-  let { space, target, children }: { space: Space; target: string; children?: Snippet } = $props();
+  /** `flat`: without its card, title and meter, opened from Compact's one-line space row
+   * (which shows those). */
+  let { space, target, flat = false, health = null, children }: { space: Space; target: string; flat?: boolean; health?: DriveHealth | null; children?: Snippet } = $props();
   // The chart is open when the drive is filling up soon; otherwise one click away.
   const soon = $derived(space.days_left != null && space.days_left < 60);
 
@@ -70,12 +72,20 @@
   const hp = $derived(hover != null ? pts[hover] : null);
 </script>
 
-<section class="card px-5 py-4">
-  <h2 class="title">Space on {target}</h2>
-  <div class="mt-3">
-    <StorageMeter free={space.free} {size} label="Space used on {target}" />
-  </div>
-  <p class="mt-3 text-sm {space.days_left != null && space.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{headline}</p>
+<section class={flat ? "" : "card px-5 py-4"}>
+  {#if !flat}
+    <h2 class="title">Space on {target}</h2>
+    <div class="mt-3">
+      <StorageMeter free={space.free} {size} label="Space used on {target}" />
+    </div>
+  {/if}
+  <p class="{flat ? '' : 'mt-3'} text-sm {space.days_left != null && space.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{headline}</p>
+  <!-- What the drive says about itself, when a backup has asked it. -->
+  {#if health}
+    <p class="mt-1 text-[12.5px] {health.said ? 'text-warning' : 'text-fg-muted'}">
+      {#if health.said}{health.said}{:else if health.reports}The drive reports no problems with its health{#if health.checked}{" "}({ago(health.checked)}){/if}.{:else}This drive doesn't report its health (most USB sticks and many enclosures don't), so Flux can't tell how it is.{/if}
+    </p>
+  {/if}
 
   {#if pts.length >= 3}
   <details class="group/chart mt-2" open={soon}>

@@ -147,14 +147,17 @@ const shots = {
     await full("glance-dark");
   },
   "space-dark": async () => {
+    // Compact: the space is a row of the Overview; opened, its forecast and chart.
     await open("?profile=home&theme=dark");
+    await page.click("Space on BackupDisk", "summary");
     await page.click("History and forecast", "summary");
-    await page.scrollTo("Recent backups", 6);
+    await page.scrollTo("Restore test passed", 6);
     await full("space-dark");
-    // The space card down to its chart (not what the snapshots take, below it).
-    await crop("d-space", `(() => { const card = [...document.querySelectorAll("section, div")].filter(e => e.textContent.trim().startsWith("Space on BackupDisk") && e.textContent.includes("Show as a table")).at(-1); const end = [...card.querySelectorAll("summary")].find(e => e.textContent.includes("Show as a table")); const a = card.getBoundingClientRect(), b = end.getBoundingClientRect(); return { getBoundingClientRect: () => ({ x: a.x, y: a.y, width: a.width, height: b.bottom - a.y + 14 }) }; })()`);
-    await page.scrollTo("Last 30 days", 60);
-    await crop("d-days", `[...document.querySelectorAll("section")].find(e => e.textContent.trim().startsWith("Last 30 days"))`);
+    // The opened space row down to its chart (not what the snapshots take, below it).
+    await crop("d-space", `(() => { const row = [...document.querySelectorAll("details[open]")].find((d) => d.querySelector("summary")?.textContent.includes("Space on")); const end = [...row.querySelectorAll("summary")].find(e => e.textContent.includes("Show as a table")); const a = row.getBoundingClientRect(), b = end.getBoundingClientRect(); return { getBoundingClientRect: () => ({ x: a.x, y: a.y, width: a.width, height: b.bottom - a.y + 14 }) }; })()`);
+    // The last 30 days: the chart in the answer card.
+    await page.scrollTo("Status", 0);
+    await crop("d-days", `document.querySelector('[title^="Last 30 days"]')`);
   },
   "storage-dark": async () => {
     await open("?profile=photos&theme=dark");
@@ -179,7 +182,7 @@ const shots = {
     await page.click("Browse what's backed up");
     await page.waitFor(`document.body.innerText.includes("What's backed up")`);
     for (const folder of ["Projects", "site"]) {
-      await page.click(new RegExp(`^${folder}\\b`), "[role=dialog] button, dialog button, .modal button, button");
+      await page.click(new RegExp(`^${folder}\\b`), "dialog[open] button");
       await sleep(500);
     }
     await full("rules-dark");

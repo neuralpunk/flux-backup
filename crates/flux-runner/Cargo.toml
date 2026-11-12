@@ -27,6 +27,7 @@ toml.workspace = true
 rustix.workspace = true
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 zbus = { version = "6", default-features = false, features = ["default-rt"] }
+futures-util = { version = "0.3", default-features = false }
 # Snapshot export: tar.zst and ZIP, and checksum manifests.
 zstd.workspace = true
 flate2 = "1"

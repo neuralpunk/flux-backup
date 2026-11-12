@@ -38,6 +38,13 @@ pub enum Why {
     Marker { name: String, at: PathBuf },
     /// On another disk mounted at `at` ("stay on one disk").
     OtherDisk { at: PathBuf },
+    /// A git working tree's `.gitignore` (`file`, its `line`) leaves out `at` (the path or a
+    /// folder it's in).
+    GitIgnored {
+        file: PathBuf,
+        line: String,
+        at: PathBuf,
+    },
 }
 
 impl Why {
@@ -88,6 +95,15 @@ impl Why {
                 "Left out: {} is another disk, and this backup stays on one disk.",
                 at.display()
             ),
+            Why::GitIgnored { file, line, at } if here(at) => format!(
+                "Left out: {} ignores it ({line}), and this backup skips what .gitignore files ignore.",
+                file.display()
+            ),
+            Why::GitIgnored { file, line, at } => format!(
+                "Left out: it's in {}, which {} ignores ({line}), and this backup skips what .gitignore files ignore.",
+                at.display(),
+                file.display()
+            ),
         }
     }
 }
@@ -97,6 +113,10 @@ pub struct Rules {
     filter: Filter,
     sources: Vec<PathBuf>,
     one_disk: bool,
+    /// The `.gitignore` rules of each folder looked at (when they're read).
+    git: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, Option<std::sync::Arc<flux_core::filter::GitScope>>>,
+    >,
 }
 
 /// The folders a backup never takes because it keeps its own data there.
@@ -121,7 +141,26 @@ impl Rules {
             filter,
             sources: p.sources.paths.clone(),
             one_disk: p.sources.one_file_system,
+            git: Default::default(),
         })
+    }
+
+    /// The `.gitignore` that leaves out `path` (in folder `path`'s parent), if any.
+    fn git_ignored(&self, path: &Path, is_dir: bool) -> Option<(PathBuf, String)> {
+        if !self.filter.reads_gitignore() {
+            return None;
+        }
+        let dir = path.parent()?;
+        let scope = {
+            let mut cache = self.git.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| self.filter.git_scope_of_dir(dir))
+                .clone()
+        }?;
+        scope
+            .ignored(path, is_dir)
+            .map(|(f, line)| (f.to_path_buf(), line))
     }
 
     /// The source folder `path` is in (the innermost), if any.
@@ -144,11 +183,24 @@ impl Rules {
         if self.filter.is_hard_excluded(path) {
             return Some(Why::Storage { at: path.into() });
         }
-        if let Some((rule, true)) = self.filter.rule_for(path, is_dir) {
-            return Some(Why::Excluded {
-                rule,
-                at: path.into(),
-            });
+        match self.filter.rule_for(path, is_dir) {
+            Some((rule, true)) => {
+                return Some(Why::Excluded {
+                    rule,
+                    at: path.into(),
+                });
+            }
+            // A `!pattern` of the backup's own brings it back, whatever .gitignore says.
+            Some((_, false)) => {}
+            None => {
+                if let Some((file, line)) = self.git_ignored(path, is_dir) {
+                    return Some(Why::GitIgnored {
+                        file,
+                        line,
+                        at: path.into(),
+                    });
+                }
+            }
         }
         if let Some(m) = meta {
             if m.is_file()
@@ -414,6 +466,52 @@ mod tests {
         p.sources.exclude_larger_than = Some(flux_core::ByteSize(1000));
         p.sources.exclude_if_present = vec![".nobackup".into()];
         (t, p)
+    }
+
+    #[test]
+    fn the_rule_tester_names_the_gitignore() {
+        let (t, mut p) = setup();
+        let proj = t.path().join("home/proj");
+        fs::create_dir_all(proj.join(".git")).unwrap();
+        fs::create_dir_all(proj.join("dist/js")).unwrap();
+        fs::write(proj.join(".gitignore"), "dist/\n.env\n").unwrap();
+        fs::write(proj.join(".env"), "KEY=1").unwrap();
+        fs::write(proj.join("dist/js/app.js"), "x").unwrap();
+        p.sources.exclude_gitignored = true;
+        let r = Rules::of(&p).unwrap();
+        let w = explain(&r, &proj.join(".env"));
+        assert_eq!(
+            w,
+            Why::GitIgnored {
+                file: proj.join(".gitignore"),
+                line: ".env".into(),
+                at: proj.join(".env")
+            }
+        );
+        assert!(
+            w.text(&proj.join(".env"))
+                .contains(".gitignore ignores it (.env)")
+        );
+        // In a folder it ignores: that folder is named.
+        let w = explain(&r, &proj.join("dist/js/app.js"));
+        assert!(
+            matches!(&w, Why::GitIgnored { at, .. } if *at == proj.join("dist")),
+            "{w:?}"
+        );
+        // The listing marks it out.
+        let c = list(&r, &proj, None).unwrap();
+        let env = c.items.iter().find(|i| i.name == ".env").unwrap();
+        assert!(!env.backed_up);
+        assert!(
+            c.items
+                .iter()
+                .find(|i| i.name == "main.rs")
+                .unwrap()
+                .backed_up
+        );
+        // Off: backed up.
+        p.sources.exclude_gitignored = false;
+        assert!(explain(&Rules::of(&p).unwrap(), &proj.join(".env")).included());
     }
 
     #[test]

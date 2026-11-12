@@ -547,6 +547,8 @@ pub struct Answers {
     pub password_elsewhere: bool,
     /// The Borg key was exported.
     pub key_exported: bool,
+    /// A recovery code was made for the Vault (and not removed since), by Flux.
+    pub recovery_code: bool,
 }
 
 fn answers_path(paths: &Paths, id: &ProfileId) -> PathBuf {
@@ -569,6 +571,7 @@ pub fn set_answer(paths: &Paths, id: &ProfileId, key: &str, yes: bool) -> Result
     match key {
         "password_elsewhere" => a.password_elsewhere = yes,
         "key_exported" => a.key_exported = yes,
+        "recovery_code" => a.recovery_code = yes,
         _ => return Err(format!("nothing to answer about {key:?}")),
     }
     let path = answers_path(paths, id);
@@ -659,6 +662,19 @@ pub fn readiness(paths: &Paths, id: &ProfileId, p: &Profile) -> Vec<Check> {
                     _ => "Keep it in a password manager or on paper too.",
                 }
             ),
+        });
+    }
+    if p.engine == Engine::Vault && p.vault.as_ref().is_none_or(|v| v.encryption) {
+        out.push(Check {
+            key: "recovery_code",
+            ok: a.recovery_code,
+            asked: false,
+            title: if a.recovery_code {
+                "There's a recovery code".into()
+            } else {
+                "No recovery code yet".into()
+            },
+            detail: "A long code, printed or kept somewhere safe, that opens the backups when the password is lost.".into(),
         });
     }
     if p.engine == Engine::Borg
@@ -752,6 +768,8 @@ changed. In a terminal, in this folder:
 
 If the program won't start (\"Permission denied\"), run: chmod +x flux-vault-recover
 If the Vault needs an unlock file, add --unlock-file /path/to/the/file.
+If the password is lost but you made a recovery code, type the code when the password
+is asked for (it doesn't need the unlock file).
 The format is documented at https://github.com/neuralpunk/flux-backup (docs/FORMATS.md).
 
 Kept here by Flux Backup {version}.

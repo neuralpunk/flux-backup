@@ -4,6 +4,168 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-11
+
+A release for the person backing up their own computer, about the moments that matter.
+Getting a file back now starts where it was lost: **Previous versions…** and **Restore
+deleted files here…** in the file manager's right-click menu, and **Browse in Files** for
+a whole snapshot. A **recovery code** means a forgotten password is no longer the end of
+an encrypted backup: unlocking with it sets a new password and a new code. A USB drive
+can be **safe to unplug** the moment a backup ends, and Flux **warns when the drive
+itself is failing**. The app is **Compact** by default, so a backup's Overview fits on one
+screen; files can be **previewed before restoring**, deleted snapshots **undone**, and
+notifications have **buttons** and **quiet hours**. Several snapshots can be deleted at
+once, every folder shows its size, a project's `.gitignore` can decide what's skipped,
+and once a week a **calm note** says all is well.
+Under the hood, new encrypted Vaults hide file sizes by default.
+
+### Added
+- **A Compact layout, now the default.** More on the screen: in the sidebar each backup
+  is one line, its name and a word or two of status ("21%", "Failed", "Low on space");
+  All backups lines the backups up in columns (backup, last 30 days, last good copy,
+  next), so the 30-day strips compare at a glance; a backup's Overview, Snapshots and
+  Activity switcher shares the title's line; and the Overview puts *Settings at a
+  glance* (open to start with) and *Where it's kept* in a column beside the rest. Rows are a step shorter.
+  In a narrow window the pages fall back to the Full arrangement.
+- In Compact, **a backup's Overview fits on one screen** (1200×780) when nothing extra
+  needs saying: the answer and the last 30 days share one card; recent backups are
+  tighter; the restore test and the space are rows of one list (the space opens to its
+  forecast and what the snapshots take); storage and *Where it's kept* fold to a line
+  each; the header leaves out the tags the settings column already shows; and each
+  setting at a glance is one line, its value on the right. The two columns start and end
+  level, each under a heading of the same kind, and a running backup's progress sits in
+  the answer card.
+- In Compact's settings column, **a value too long for its line is said shortly**
+  ("7d · 4w · 12m · 5y" for what's kept, "USB stick +1" for other copies), so every
+  setting stays on one line; the full wording is in its tooltip. The All backups
+  settings table uses the same short forms.
+- **A sidebar that folds into a row of icons.** The sidebar button by the title (or F9)
+  folds it to a column of icons, animated: each backup by an icon of what it backs up,
+  with its status as a coloured dot, and its name and status on pointing. Remembered on
+  this computer.
+- **What each backup changed**, on a backup's Overview: "214 new · 38 changed · 2
+  deleted" by each recent backup (*+214 ~38 −2* in Compact); a click compares it with
+  the backup before.
+- **A preview before restoring.** In a snapshot's files, Space (or the eye beside
+  *Restore*, or right-click › *Preview*) shows a picture, a text file's first lines, or
+  what's known of anything else, read from the backup; restore, open or see its versions
+  from there. Up to 32 MB.
+- **Undo after deleting snapshots.** For eight seconds after a deletion is confirmed, the
+  snapshots are only out of the list: *Undo* (or Ctrl+Z) brings them back. If the app is
+  quit within those seconds, nothing is deleted. `flux delete` is unchanged.
+- **Buttons on notifications.** A failed backup, or one that finished with problems, offers
+  *Try again* and *Open* in its notification (scheduled backups and ones started from the
+  app); unusual changes, failed restore tests and monthly checks offer *Open*. The app
+  opens on that backup, and is started if it isn't running (`flux-backup --show-backup
+  ID`).
+- In Compact, **a backup's Settings and Preferences list their sections at the side**
+  (What to back up, Where to keep it, When…): the one you're in is marked, and a click
+  goes to another.
+- **Text size**: *Preferences › App › Text size* makes everything in the window smaller
+  (90%) or larger (115%), the window's smallest size with it.
+- **The desktop's accent colour.** The main button, switches, progress and focus follow
+  the accent chosen in GNOME's or KDE's settings, live, a shade lighter or darker where it
+  must be to stay readable (as readable as Flux's own blue). *Preferences › App › Accent
+  colour* can keep Flux's blue instead.
+- In Nautilus, **Flux Backup's items are under one *Flux Backup* submenu** in the
+  right-click menu, so the menu stays short.
+- **Leave out of backups, back up this folder: from the file manager.** Right-click a
+  file or folder in Nautilus, Nemo or Dolphin: *Leave out of backups…* lists the backups
+  that take it, each with the rule it would add (or the folder it would stop taking);
+  *Back up this folder…* adds a folder to the backup you choose, or starts a new backup
+  with it. Nothing changes until it's confirmed. Nautilus shows whichever applies. Also
+  `flux profile leave-out PATH [--only ID]` and `flux profile add-folder ID PATH`.
+- **Whether the drive suits the backup.** A plain-folder (Mirror or rsync) backup on a
+  FAT32 or exFAT drive can't hard-link unchanged files, so every snapshot was quietly a
+  full copy; links and permissions were lost, and FAT32 can't hold a file of 4 GB or
+  more. Choosing such a drive now says so (with a Vault, or formatting it as ext4, as the
+  way out), and so do the backup's settings, its Overview, `flux profile validate` and
+  `flux check`. NTFS, which keeps hard links but not Linux permissions, gets a milder
+  note. A file too big for the drive is named in the log as such, not "File too large".
+- **Time left, wherever a backup or restore runs**: in the restore dialog (with the
+  speed), beside a running backup in All backups, when pointing at it in the sidebar, and
+  in the tray icon's tooltip ("21% · about 6 minutes left"). The estimate now follows the
+  recent speed rather than the average since copying began, so a slow start no longer
+  holds it back, and it's said to the minute.
+- **Quiet hours** for notifications: *Preferences › Notifications › Quiet hours* (off at
+  first, 10 PM to 8 AM when turned on) keeps a successful backup's notification and the
+  weekly note out of those hours; the note comes after them. Failures and warnings are
+  always sent. Scheduled backups follow it with the app closed (`[quiet_hours]` in
+  `settings.toml`).
+- **A warning when the backup drive is failing.** After each backup Flux asks the drive
+  how it is (its SMART report, or an NVMe drive's warnings, through udisks, without a
+  password). When it says it's failing, its spare space is running out, it's no longer
+  reliable, or its bad sectors start growing, the Overview says so and a notification
+  says it once. The space card says what was seen last, or that a drive which reports
+  nothing (most USB sticks) can't be told about. `flux check` asks too.
+- **Full**, the layout of 1.1 and before, stays one click away: *Preferences › App ›
+  Layout*. Every install starts Compact, existing ones too, until Full is chosen there;
+  the choice is kept on this computer, like the theme.
+- **Safe to unplug.** A backup to a USB drive can end by unmounting the drive and
+  powering it off, as the file manager's *Eject* does, with a notification that says
+  it's safe to unplug: *Unmount the drive when done*, under *When* (in a profile file,
+  `release_drive = true`). Encrypted drives are locked again first. Drives the desktop
+  didn't mount (from `/etc/fstab`) are left mounted, since that would need an
+  administrator's password; a drive that's in use stays mounted, and the notification
+  says to eject it before unplugging. Off by default.
+- **Delete several snapshots at once.** Ctrl-click snapshots in the list, Shift-click for
+  a range, or choose *Select several…* in a snapshot's menu and click them; *Delete N…*
+  removes them together. Pinned ones among them are kept, and a Vault says how much
+  space was freed.
+- **Sizes next to every folder.** The folders a backup takes and the folders it leaves out
+  each show how much they hold, so it's clear what's worth leaving out. Counting has a few
+  seconds; a folder too big for that shows "≥" and what was counted.
+- **Skip what a project's .gitignore ignores.** In git working trees, a backup can leave
+  out what their `.gitignore` files ignore (build output, `node_modules`, and also files
+  git skips on purpose, like `.env`), read as git reads them: *Skip what .gitignore files
+  ignore* under *Exclude Files/Directories*, or `exclude_gitignored = true`. Off by
+  default; the backup's own rules come first (`!.env` keeps one); Mirror and Vault only.
+  The rule tester names the `.gitignore` and line that left a file out, and an exact
+  restore doesn't remove such files.
+- **Browse in Files.** A snapshot's ⋯ menu opens it in the desktop's file manager,
+  mounted read-only (at the backed-up folder when there's one), for copying files out
+  with the tools you know. *Close*, another snapshot, or quitting Flux unmounts it.
+  Not for system backups; needs FUSE, as `flux mount` does.
+- **Previous versions from the file manager.** Right-click a file or folder in Nautilus,
+  Nemo or Dolphin: *Previous versions…* opens Flux on its versions in the backup that
+  takes it; *Restore deleted files here…* opens the newest snapshot at that folder with
+  *Only deleted* on. Flux starts if needed, or the running copy is handed the request.
+  Installed by the `.deb` and `.rpm` packages (Nautilus needs nautilus-python); also
+  `flux-backup --previous-versions PATH` and `--restore-deleted FOLDER`.
+- **A recovery code.** An encrypted Vault can have a recovery code: a long random code,
+  shown once to print or keep somewhere safe, that opens the backups when the password
+  is lost (also without the unlock file). Setting up an encrypted backup ends with an
+  offer to make one; it's also under *Security › Recovery code*, on the recovery
+  checklist, and `flux key recovery`. It can be typed loosely (any case, with or without
+  dashes, O for 0). A new one replaces the old; the format is unchanged (it's one more
+  key slot).
+- **A forgotten password, replaced.** After unlocking with the recovery code, Flux asks
+  for a new password before going on: it replaces the lost one (with several, you choose
+  which stop working), is kept where the old one was (keyring, key file), needs the
+  unlock file if the old one did, and comes with a new recovery code in place of the one
+  just used. Nothing is re-encrypted: the lost password's key slot is removed. The
+  unlock dialog says the code can be pasted there.
+- **A calm weekly note.** Once a week, when every backup is protected with nothing to
+  look at, one quiet notification says so: how recent the copies are and when the last
+  restore test passed. It's checked when a scheduled backup ends (the app needn't be
+  open), never sent when something needs you, and first comes a week after the first
+  check. On by default; *Preferences › Notifications* turns it off.
+
+### Security
+- **New encrypted Vaults hide file sizes by default.** Published 2025 research recovers
+  the secret that keyed content-defined chunkers use to cut files into pieces, from
+  files an attacker knows or planted ([ePrint 2025/558](https://eprint.iacr.org/2025/558),
+  [arXiv 2504.02095](https://arxiv.org/abs/2504.02095)). Flux's Vault chunker is of that
+  kind (FastCDC, its table XORed with a secret 64-bit seed), and whether the attacks
+  reach it through its encrypted pack headers hasn't been assessed. Until it is,
+  *Hide file sizes* (packs padded to a Padmé length, at most about 12% bigger, about 3%
+  for a full pack) is on for Vaults set up from 1.2, in the app and with
+  `flux profile create --engine vault`, which takes away the exact sizes such an attack
+  would read. File contents were never at risk: they're encrypted either way. Existing
+  Vaults keep the setting they had; turn it on under *How backups are stored ›
+  Security*. THREAT_MODEL.md no longer says chunk boundaries can't reveal that a known
+  file is in a Vault.
+
 ## [1.1.0] - 2026-11-10
 
 A refinement release: what was there, made clearer, safer and quicker to use, and three
@@ -1146,6 +1308,7 @@ compressed, encrypted) engines; local drives and SSH servers; systemd schedules
 hooks; the `flux` command line; the desktop app; system backups through a polkit helper;
 read-only mounts of snapshots (`flux mount`); man pages and packages.
 
+[1.2.0]: https://github.com/neuralpunk/flux-backup/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/neuralpunk/flux-backup/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/neuralpunk/flux-backup/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/neuralpunk/flux-backup/compare/v0.2.0...v0.3.0

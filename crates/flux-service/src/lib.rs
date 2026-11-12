@@ -8,11 +8,13 @@
 #![deny(clippy::unwrap_used)]
 
 pub mod actions;
+pub mod browse;
 pub mod client;
 pub mod edit;
 pub mod extras;
 pub mod filediff;
 pub mod find;
+pub mod folders;
 pub mod prefs;
 pub mod protocol;
 pub mod recover;
@@ -20,6 +22,7 @@ pub mod security;
 pub mod space;
 pub mod views;
 pub mod watch;
+pub mod weekly;
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -131,6 +134,8 @@ pub struct Service {
     unit_bin: PathBuf,
     /// The latest size estimate; older ones still running stop.
     pub(crate) estimate_gen: std::sync::atomic::AtomicU64,
+    /// The snapshot open in the file manager (*Browse in Files*), if any.
+    pub(crate) browsing: Mutex<Option<browse::Mounted>>,
 }
 
 impl Service {
@@ -156,7 +161,20 @@ impl Service {
             backup_cmd,
             unit_bin,
             estimate_gen: std::sync::atomic::AtomicU64::new(0),
+            browsing: Mutex::new(None),
         }
+    }
+
+    /// The `flux` program this service runs (backups' first word).
+    pub(crate) fn flux_program(&self) -> &std::ffi::OsStr {
+        self.backup_cmd
+            .first()
+            .map_or(self.unit_bin.as_os_str(), |p| p.as_os_str())
+    }
+
+    /// Unmount what *Browse in Files* opened (when the app quits).
+    pub fn stop_browsing(&self) {
+        let _ = browse::stop_browsing_impl(self);
     }
 
     pub fn scope(&self) -> Scope {

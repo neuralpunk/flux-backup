@@ -36,6 +36,113 @@ pub fn open_file_impl(
         .to_string())
 }
 
+/// Files previewed are copied out of the backup up to this size.
+const PREVIEW_MAX: u64 = 32 << 20;
+/// A text file's preview: its first lines, up to this much.
+const PREVIEW_TEXT: usize = 64 << 10;
+/// …and this many lines.
+const PREVIEW_LINES: usize = 400;
+
+/// A look at a file in a snapshot before restoring it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Preview {
+    /// A picture, as a `data:` URL.
+    Image { url: String },
+    /// Its first lines; `more`: there's more after them.
+    Text { text: String, more: bool },
+    /// Neither (or too large): only what the listing says.
+    Other { too_large: bool },
+}
+
+/// Image types shown in the preview, by file name ending.
+fn image_type(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        // Shown as an <img>: its scripts never run.
+        "svg" => "image/svg+xml",
+        _ => return None,
+    })
+}
+
+/// The start of a file's bytes as text: `None` if it isn't (a NUL byte, or not UTF-8
+/// short of a character cut at the end). Cut after a line at most `PREVIEW_LINES` lines
+/// and `PREVIEW_TEXT` bytes in; `true` if anything was left out.
+fn text_start(bytes: &[u8]) -> Option<(String, bool)> {
+    let head = &bytes[..bytes.len().min(PREVIEW_TEXT)];
+    if head.contains(&0) {
+        return None;
+    }
+    let text = match std::str::from_utf8(head) {
+        Ok(t) => t,
+        // A character cut by the limit is fine; anything else isn't text.
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&head[..e.valid_up_to()]).ok()?,
+        Err(_) => return None,
+    };
+    let mut more = bytes.len() > head.len();
+    let mut end = text.len();
+    if let Some((i, _)) = text.match_indices('\n').nth(PREVIEW_LINES - 1) {
+        end = i + 1;
+        more = true;
+    } else if more && let Some(i) = text.rfind('\n') {
+        end = i + 1;
+    }
+    Some((text[..end].to_owned(), more))
+}
+
+/// A preview of file `path` in `snapshot`: the picture, the first lines, or neither.
+pub fn preview_file_impl(
+    state: &Service,
+    id: String,
+    snapshot: String,
+    path: String,
+) -> Result<Preview> {
+    if state.scope() == Scope::System {
+        return Err(ApiError::new(
+            "error",
+            "Files from system backups can't be previewed here (they're root's); restore them to a folder instead.",
+        ));
+    }
+    let (pid, p) = state.load(&id)?;
+    let repo = state.open(&pid, &p)?;
+    let snap = repo.find(&snapshot)?;
+    let entry = repo
+        .entry_at(&snap, path.trim_start_matches('/').as_bytes())?
+        .ok_or_else(|| ApiError::new("error", format!("{path} is not in this snapshot")))?;
+    if entry.kind != Kind::File {
+        return Ok(Preview::Other { too_large: false });
+    }
+    if entry.size > PREVIEW_MAX {
+        return Ok(Preview::Other { too_large: true });
+    }
+    let local = copy_out(state, &id, &snapshot, &path)?;
+    let bytes = std::fs::read(&local)
+        .map_err(|e| ApiError::new("error", format!("{}: {e}", local.display())))?;
+    // Read: the copy and its folder go (opened copies stay a day; this one isn't open).
+    let _ = std::fs::remove_file(&local);
+    if let Some(dir) = local.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    if let Some(mime) = image_type(&path) {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        return Ok(Preview::Image {
+            url: format!("data:{mime};base64,{data}"),
+        });
+    }
+    Ok(match text_start(&bytes) {
+        Some((text, more)) => Preview::Text { text, more },
+        None => Preview::Other { too_large: false },
+    })
+}
+
 /// A read-only copy of file `path` from `snapshot`, in a private folder of the cache
 /// (cleaned up after a while).
 pub fn copy_out(state: &Service, id: &str, snapshot: &str, path: &str) -> Result<PathBuf> {
@@ -419,7 +526,8 @@ pub struct Health {
     pub level: &'static str,
     /// What it's about, for filters: `overdue`, `failing`, `low_space`, `unplugged`,
     /// `source_missing`, `destination_failing`, `restore_test_failed`, `unverified`,
-    /// `unusual`.
+    /// `unusual`, `filesystem` (plain folders on a drive that can't hard-link),
+    /// `drive_failing` (the backup drive's own health report).
     pub kind: &'static str,
     pub text: String,
     /// What to do about it.
@@ -700,6 +808,19 @@ pub fn health(
         _ => {}
     }
 
+    // Plain folders on a drive that can't hard-link: every snapshot a full copy.
+    if !unplugged
+        && let Some(fit) = flux_core::target_check::filesystem_fit_of(p)
+        && fit.severe
+    {
+        out.push(Health {
+            kind: "filesystem",
+            level: "warning",
+            text: fit.text,
+            hint: Some(fit.hint),
+        });
+    }
+
     // Little space left.
     if let Some(f) = free
         && f < (5 << 30)
@@ -733,10 +854,156 @@ pub fn health(
     out
 }
 
+/// What was last seen of a backup's drive health (its main place), for the space card.
+#[derive(Debug, Serialize)]
+pub struct DriveHealthView {
+    /// The drive reports its health at all (most USB sticks and many enclosures don't).
+    pub reports: bool,
+    pub checked: Option<jiff::Timestamp>,
+    /// What's wrong, when something is (also among the health warnings).
+    pub said: Option<String>,
+}
+
+/// The health warnings from what the backup drives last said about themselves (each
+/// place's: `failing` danger, signs of wear a warning), and the main place's view.
+pub fn drive_health(
+    paths: &flux_core::Paths,
+    id: &str,
+    p: &Profile,
+    now: Timestamp,
+) -> (Vec<Health>, Option<DriveHealthView>) {
+    use flux_runner::drive_health;
+    let mut out = Vec::new();
+    let mut view = None;
+    for (i, (key, _)) in drive_health::places(id, p).into_iter().enumerate() {
+        let Some(k) = drive_health::load(paths, &key) else {
+            continue;
+        };
+        let said = k.said(now);
+        if let Some(s) = &said {
+            out.push(Health {
+                kind: "drive_failing",
+                level: if s.danger { "danger" } else { "warning" },
+                text: s.text.clone(),
+                hint: Some(s.hint.clone()),
+            });
+        }
+        if i == 0 {
+            view = Some(DriveHealthView {
+                reports: k.reports,
+                checked: k.checked,
+                said: said.map(|s| s.text),
+            });
+        }
+    }
+    (out, view)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flux_runner::Trigger as RunTrigger;
+
+    #[test]
+    fn a_preview_from_a_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let src = t.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(t.join("tgt")).unwrap();
+        std::fs::write(src.join("notes.md"), "# Notes\nbuy milk\n").unwrap();
+        // A 1×1 PNG's start is enough: it's shown as a picture by its name.
+        std::fs::write(src.join("dot.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(src.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+        let paths = flux_core::Paths::under(t.join("home"), Scope::User);
+        let id = ProfileId::new("p").unwrap();
+        let mut p = Profile::new(
+            "P",
+            Target::Local {
+                path: t.join("tgt"),
+                fs_uuid: None,
+            },
+            vec![src.clone()],
+        );
+        p.options.notify = false;
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        let snap = flux_runner::run_backup(
+            &flux_runner::BackupJob {
+                paths: &paths,
+                id: &id,
+                profile: &p,
+                name: None,
+                dry_run: false,
+                trigger: RunTrigger::Manual,
+                prune: false,
+                only_if_due: false,
+                ask: None,
+                shutdown_after: false,
+            },
+            &Progress::new(),
+            &silent,
+        )
+        .record
+        .snapshot
+        .unwrap();
+        let state = Service::new(paths);
+        let at = |name: &str| src.join(name).display().to_string();
+        let look =
+            |name: &str| preview_file_impl(&state, "p".into(), snap.clone(), at(name)).unwrap();
+        assert_eq!(
+            look("notes.md"),
+            Preview::Text {
+                text: "# Notes\nbuy milk\n".into(),
+                more: false
+            }
+        );
+        assert_eq!(
+            look("dot.png"),
+            Preview::Image {
+                url: "data:image/png;base64,iVBORw0KGgo=".into()
+            }
+        );
+        assert_eq!(look("blob.bin"), Preview::Other { too_large: false });
+        // A folder has no preview.
+        assert_eq!(
+            preview_file_impl(&state, "p".into(), snap.clone(), src.display().to_string()).unwrap(),
+            Preview::Other { too_large: false }
+        );
+        // Nothing is left behind in the cache.
+        let opened = state.paths.cache_dir.join("opened");
+        let left: usize = std::fs::read_dir(&opened)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|d| std::fs::read_dir(d.path()).map(|r| r.count()).unwrap_or(0))
+                    .sum()
+            })
+            .unwrap_or(0);
+        assert_eq!(left, 0, "the copies are removed");
+    }
+
+    #[test]
+    fn previews_text_and_pictures() {
+        assert_eq!(image_type("/home/me/Pictures/cat.JPG"), Some("image/jpeg"));
+        assert_eq!(image_type("/home/me/logo.svg"), Some("image/svg+xml"));
+        assert_eq!(image_type("/home/me/notes.md"), None);
+        assert_eq!(
+            text_start(b"one\ntwo\n"),
+            Some(("one\ntwo\n".into(), false))
+        );
+        assert_eq!(text_start(b"\x00\x01binary"), None);
+        assert_eq!(text_start(&[0xff, 0xfe, b'a']), None, "not UTF-8");
+        // Long: cut after a whole line, and said to go on.
+        let long = "a line of text\n".repeat(10_000);
+        let (t, more) = text_start(long.as_bytes()).unwrap();
+        assert!(more);
+        assert_eq!(t.lines().count(), PREVIEW_LINES);
+        assert!(t.ends_with('\n'));
+        // A character cut by the size limit is still text.
+        let mut wide = "é".repeat(PREVIEW_TEXT / 2);
+        wide.push_str("tail");
+        let cut = text_start(&wide.as_bytes()[..PREVIEW_TEXT + 1]).unwrap();
+        assert!(cut.1);
+    }
 
     #[test]
     fn a_failing_copy_is_a_warning() {

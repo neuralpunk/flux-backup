@@ -9,11 +9,37 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 1.1. See the [changelog](CHANGELOG.md) for what's new. Read the
+> **Status:** 1.2. See the [changelog](CHANGELOG.md) for what's new. Read the
 > [user guide](docs/USER_GUIDE.md) to get started, the [threat model](docs/THREAT_MODEL.md)
 > for what Flux protects against, and [FORMATS.md](docs/FORMATS.md) for how your backups
 > are stored (frozen for 1.x). [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md)
 > show how it was built.
+
+### What 1.2 adds
+
+- **Previous versions from the file manager.** Right-click a file or folder in Nautilus,
+  Nemo or Dolphin: *Previous versions…* opens its versions; *Restore deleted files here…*
+  shows what's gone from that folder, ready to restore.
+- **Browse in Files.** Open any snapshot, read-only, in the file manager you know.
+- **A recovery code.** A long code to print or keep safe, that opens an encrypted backup
+  when the password is lost.
+- **Leave out, or back up, from the file manager too.** *Leave out of backups…* and
+  *Back up this folder…* in the same right-click menu (one *Flux Backup* submenu in
+  Nautilus).
+- **Compact, by default.** More on the screen: a backup's Overview fits on one screen,
+  its settings beside it, and *All backups* lines every backup up in columns. A sidebar
+  that folds to icons (F9), a text size, and the desktop's accent colour. *Full* is one
+  click away.
+- **Preview before restoring**, and **undo** after deleting snapshots.
+- **Safe to unplug.** A USB drive can be unmounted and powered off when its backup ends.
+- **A warning when the drive is failing** (its SMART or NVMe report), and when a FAT32 or
+  exFAT drive doesn't suit a plain-folder backup.
+- **Notifications with buttons** (*Try again*, *Open*), **quiet hours**, and a **calm
+  weekly note** when every backup is fine.
+- **Time left** wherever a backup or restore runs, the tray's tooltip included.
+- **Tidier.** Delete several snapshots at once; see what each backup changed and the size
+  of every folder you back up or leave out; skip what a project's `.gitignore` ignores.
+- **Sizes hidden by default** in new encrypted Vaults.
 
 ### What 1.1 refines
 
@@ -107,10 +133,10 @@ the other engines. See the
 | ![Choosing Vault, rsync or Borg while setting up](docs/screenshots/compat-dark.png) | ![Recovery kit](docs/screenshots/recovery-dark.png) |
 | **Find in all snapshots** | **Versions of a file** |
 | ![Search results across snapshots](docs/screenshots/search-dark.png) | ![Versions of a file](docs/screenshots/versions-dark.png) |
-| **Restore preview** | **Space forecast** |
-| ![What a restore would change](docs/screenshots/restore-dark.png) | ![Used space and when the drive is full](docs/screenshots/space-dark.png) |
-| **Warnings in words** | **Preferences and pausing** |
-| ![All backups, with the one that needs attention explained](docs/screenshots/health-dark.png) | ![Preferences with schedules paused](docs/screenshots/preferences-dark.png) |
+| **Restore preview** | **Space forecast and drive health** |
+| ![What a restore would change](docs/screenshots/restore-dark.png) | ![Used space, when the drive is full, and the drive's health](docs/screenshots/space-dark.png) |
+| **Warnings in words** | **Preferences: pausing, quiet hours** |
+| ![All backups, with the one that needs attention explained](docs/screenshots/health-dark.png) | ![Preferences with schedules paused, the weekly note and quiet hours](docs/screenshots/preferences-dark.png) |
 | **Export to other tools** | **Size estimate** |
 | ![Export dialog](docs/screenshots/export-dark.png) | ![New backup, step one, with a size estimate](docs/screenshots/new-dark.png) |
 | ![Recovering an existing backup on a new computer](docs/screenshots/recover-dark.png) | ![Templates for a new backup](docs/screenshots/templates-dark.png) |

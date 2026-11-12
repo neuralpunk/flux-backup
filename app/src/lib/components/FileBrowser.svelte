@@ -7,6 +7,7 @@
   import RestoreDialog from "./RestoreDialog.svelte";
   import ExportSnapshotDialog from "./ExportSnapshotDialog.svelte";
   import VersionsDialog from "./VersionsDialog.svelte";
+  import PreviewDialog from "./PreviewDialog.svelte";
   import { contextMenu, type MenuEntry } from "../menu.svelte";
   import { copyText } from "../clipboard";
   import { app } from "../state.svelte";
@@ -17,16 +18,23 @@
     snapshot,
     onLocked,
     show = null,
+    openAt = null,
+    onlyDeleted = false,
   }: {
     profile: string;
     snapshot: SnapshotMeta;
     onLocked: (retry: () => void) => void;
     /** Open at this item's folder, with it selected (from a search). */
     show?: string | null;
+    /** Open in this folder (from a file manager's request). */
+    openAt?: string | null;
+    /** Start with *Only deleted* on. */
+    onlyDeleted?: boolean;
   } = $props();
 
   // Start in the first source folder: that's what people look for.
   const initialPath = (() => {
+    if (openAt) return openAt;
     if (show) return show.slice(0, show.lastIndexOf("/")) || "/";
     const src = snapshot.sources[0];
     return src ?? "/";
@@ -41,12 +49,14 @@
   let selected = $state<Set<string>>(new Set());
   let restoring = $state<{ snapshot: SnapshotMeta; paths: string[]; missing: boolean } | null>(null);
   let versionsOf = $state<string | null>(null);
+  /** A file being looked at before restoring it. */
+  let previewing = $state<DirEntry | null>(null);
   /** Whether each item seen so far is still on disk (from the listings). */
   const onDisk = new Map<string, boolean | null>();
   const restore = (paths: string[]) => (restoring = { snapshot, paths, missing: paths.every((p) => onDisk.get(p) === false) });
   let exporting = $state<string[] | null>(null);
   /** Only items deleted (or moved) since this snapshot. */
-  let onlyMissing = $state(false);
+  let onlyMissing = $state(untrack(() => onlyDeleted));
   const sizeLimit = $derived(app.profiles.find((p) => p.id === profile)?.size_limit ?? null);
 
   /**
@@ -228,6 +238,7 @@
     const sel = selected.has(e.path);
     return [
       ...(e.kind === "dir" ? [{ label: "Open", icon: "folder" as const, onselect: () => open(e) }] : []),
+      ...(e.kind === "file" ? [{ label: "Preview", icon: "eye" as const, shortcut: "Space", onselect: () => (previewing = e) }] : []),
       ...(e.kind === "file" ? [{ label: "Open a copy", icon: "file" as const, hint: "A read-only copy in its usual program", onselect: () => open(e) }] : []),
       ...(e.kind === "file" ? [{ label: "Versions of this file…", icon: "history" as const, onselect: () => (versionsOf = e.path) }] : []),
       { label: `Restore “${e.name}”…`, icon: "restore", onselect: () => restore([e.path]) },
@@ -303,7 +314,7 @@
             <th class="py-2 font-medium">Name</th>
             <th class="w-24 py-2 pr-4 text-right font-medium">Size</th>
             <th class="hidden w-36 py-2 pr-2 font-medium @min-[520px]:table-cell">Modified</th>
-            <th class="w-24 py-2 pr-4"><span class="sr-only">Restore</span></th>
+            <th class="w-32 py-2 pr-4"><span class="sr-only">Preview and restore</span></th>
           </tr>
         </thead>
         <tbody>
@@ -311,7 +322,17 @@
             <tr data-path={e.path} class="group transition-colors {selected.has(e.path) ? 'bg-selected text-on-selected' : 'hover:bg-surface-3'}" ondblclick={() => open(e)} use:contextMenu={{ items: () => entryMenu(e), label: e.name }}>
               <td class="py-1.5 pl-4"><input type="checkbox" class="accent-[var(--c-primary)]" checked={selected.has(e.path)} onchange={() => toggle(e)} aria-label="Select {e.name}" /></td>
               <td class="min-w-0 py-1.5">
-                <button class="flex max-w-full items-center gap-2.5 text-left {e.kind === 'dir' ? 'hover:text-primary' : 'cursor-default'}" onclick={() => e.kind === "dir" && open(e)} title={e.kind === "file" ? "Double-click to open a read-only copy" : ""}>
+                <button
+                  class="flex max-w-full items-center gap-2.5 text-left {e.kind === 'dir' ? 'hover:text-primary' : 'cursor-default'}"
+                  onclick={() => e.kind === "dir" && open(e)}
+                  onkeydown={(k) => {
+                    // Space previews a file (as in a file manager); Enter opens it.
+                    if (e.kind !== "file") return;
+                    if (k.key === " ") (k.preventDefault(), (previewing = e));
+                    else if (k.key === "Enter") (k.preventDefault(), open(e));
+                  }}
+                  title={e.kind === "file" ? "Space to preview · double-click to open a read-only copy" : ""}
+                >
                   <Icon name={icon(e)} size={16} class={e.kind === "dir" ? "text-primary" : "text-fg-muted"} />
                   <span class="truncate">{e.name}</span>
                   {#if opening === e.path}<span class="text-xs text-fg-muted">opening…</span>{/if}
@@ -321,7 +342,15 @@
               </td>
               <td class="truncate py-1.5 pr-4 text-right font-mono text-[12.5px] whitespace-nowrap text-fg-2">{e.kind === "dir" ? (e.children != null ? `${e.children} ${e.children === 1 ? "item" : "items"}` : "") : e.kind === "file" ? bytes(e.size) : ""}</td>
               <td class="hidden truncate py-1.5 pr-2 font-mono @min-[520px]:table-cell text-[12.5px] whitespace-nowrap text-fg-2" title={dateTime(e.mtime * 1000)}>{shortDateTime(e.mtime * 1000)}</td>
-              <td class="py-1 pr-3 text-right">
+              <td class="py-1 pr-3 text-right whitespace-nowrap">
+                {#if e.kind === "file"}
+                  <button
+                    class="btn-icon size-7 align-middle opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"
+                    onclick={() => (previewing = e)}
+                    aria-label="Preview {e.name}"
+                    title="Preview (Space)"
+                  ><Icon name="eye" size={14} /></button>
+                {/if}
                 <button
                   class="btn btn-ghost h-7 px-2 text-[12.5px] {e.on_disk === false ? '' : 'opacity-0 group-focus-within:opacity-100 group-hover:opacity-100'}"
                   onclick={() => restore([e.path])}
@@ -381,6 +410,19 @@
 {/if}
 {#if exporting}
   <ExportSnapshotDialog {profile} {snapshot} paths={exporting} onclose={() => (exporting = null)} />
+{/if}
+{#if previewing}
+  {@const e = previewing}
+  <PreviewDialog
+    {profile}
+    {snapshot}
+    entry={e}
+    {onLocked}
+    onclose={() => (previewing = null)}
+    onrestore={() => ((previewing = null), restore([e.path]))}
+    onopen={() => ((previewing = null), void openCopy(e))}
+    onversions={() => ((previewing = null), (versionsOf = e.path))}
+  />
 {/if}
 {#if versionsOf}
   {@const p = versionsOf}

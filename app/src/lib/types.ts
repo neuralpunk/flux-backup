@@ -155,6 +155,8 @@ export interface Overview {
   restore_test?: { every: TestEvery; last: TestReport | null; last_passed: string | null };
   /** Unusual changes found and not yet dismissed. */
   unusual?: UnusualReport | null;
+  /** What the backup drive last said about its health (local drives seen by a backup). */
+  drive_health?: DriveHealth | null;
   /** What Flux Sentry has learned of this backup: the share of its files that usually
    * changes, the share at which it would warn, and how many backups it learned from. */
   sentry?: { usual: number; warns_at: number | null; runs: number } | null;
@@ -285,6 +287,10 @@ export interface Space {
   per_day: number | null;
   days_left: number | null;
 }
+
+/** A look at a file in a snapshot: a picture (a `data:` URL), its first lines (`more`:
+ * there's more), or neither (`too_large`: past what's previewed). */
+export type FilePreview = { kind: "image"; url: string } | { kind: "text"; text: string; more: boolean } | { kind: "other"; too_large: boolean };
 
 export interface DirEntry {
   name: string;
@@ -426,6 +432,10 @@ export interface Preferences {
   diff_tools?: [string, string][];
   /** Closing the window keeps the app in the system tray (absent from older backends). */
   close_to_tray?: boolean;
+  /** Once a week, a quiet notification when every backup is fine. */
+  weekly_note?: boolean;
+  /** When the notifications that only inform wait ("HH:MM", local time); `null`: never. */
+  quiet_hours?: { from: string; to: string } | null;
 }
 
 export type Scheduler = "systemd" | "cron";
@@ -527,6 +537,8 @@ export interface Profile {
     exclude: string[];
     exclude_larger_than?: string | null;
     exclude_caches: boolean;
+    /** In git working trees, also leave out what their .gitignore files ignore (Mirror and Vault). */
+    exclude_gitignored?: boolean;
     exclude_if_present?: string[];
     one_file_system: boolean;
     /** Sources on a drive of their own (recorded when saved with the drive connected). */
@@ -560,6 +572,8 @@ export interface Profile {
     skip_on_battery: boolean;
     skip_on_metered?: boolean;
     on_connect: boolean;
+    /** Unmount (and power off) the drive when a backup ends: safe to unplug. */
+    release_drive?: boolean;
   };
   options: {
     preserve_acl: boolean;
@@ -823,6 +837,26 @@ export interface VaultSecurity {
   unlock_ms: number;
 }
 
+/** What unlocking found. */
+export interface Unlocked {
+  /** It was the Vault's recovery code: the password was lost, so a new one is asked for. */
+  recovery_code: boolean;
+}
+
+/** What replacing a lost password did (after unlocking with the recovery code). */
+export interface Replaced {
+  /** The new recovery code, shown once (`null` for a system backup: root makes it). */
+  recovery_code: string | null;
+  /** Where the new password is kept: the keyring, the profile's key file, nowhere (asked
+   * each time), or the profile's command (which Flux can't change). */
+  kept: "keyring" | "file" | "ask" | "command";
+  /** The new password needs the unlock file, as the old one did. */
+  unlock_file: boolean;
+  /** The unlock file wasn't there: the new password works without it. */
+  unlock_file_dropped: string | null;
+  removed: number;
+}
+
 export interface UnlockFileResult {
   unlock_file: string | null;
   /** Other passwords that still open the Vault without the file. */
@@ -1016,4 +1050,61 @@ export interface Storage {
   repair_bytes?: number | null;
   packs?: number;
   packs_with_repair?: number;
+}
+
+/** A snapshot open in the file manager (*Browse in Files*). */
+export interface Browsing {
+  profile: string;
+  snapshot: string;
+  /** Where it's mounted. */
+  dir: string;
+  /** The folder that was opened. */
+  open: string;
+}
+
+/** A file manager's *Leave out of backups* (`exclude`) or *Back up this folder* (`include`). */
+export type FolderWant = "exclude" | "include";
+
+/** What would change in one backup's settings. */
+export type FolderChange =
+  | { kind: "add_rule"; rule: string }
+  | { kind: "remove_folder"; folder: string }
+  | { kind: "add_folder"; folder: string; replaces: string[] }
+  | { kind: "remove_rule"; rule: string };
+
+/** What each backup would change for a path. */
+export interface FolderPlan {
+  path: string;
+  /** `~/Downloads` in the home folder. */
+  shown: string;
+  is_dir: boolean;
+  size: number | null;
+  /** Counting stopped early: at least `size`. */
+  partial: boolean;
+  /** Leaving out: the backups that take it. Backing up: every backup. */
+  backups: {
+    id: string;
+    name: string;
+    backed_up: boolean;
+    /** Why it's in or out now. */
+    why: string;
+    change: FolderChange | null;
+    /** Why no change is offered, when none is. */
+    blocked: string | null;
+  }[];
+}
+
+/** The backups changed and those that couldn't be (each `[id or name, why]`). */
+export interface FolderApplied {
+  changed: [string, string][];
+  failed: [string, string][];
+}
+
+/** A backup drive's own health report, as last seen. */
+export interface DriveHealth {
+  /** It reports its health at all (most USB sticks and many enclosures don't). */
+  reports: boolean;
+  checked: string | null;
+  /** What's wrong, when something is (also among the health warnings). */
+  said: string | null;
 }

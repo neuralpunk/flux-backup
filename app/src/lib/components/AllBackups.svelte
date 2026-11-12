@@ -97,6 +97,8 @@
   // Red only for what isn't protected (as in the sidebar).
   const toneText: Record<Tone, string> = { ok: "text-fg-muted", warn: "text-fg-2", bad: "text-danger", run: "text-primary", idle: "text-fg-muted" };
 
+  const compact = $derived(app.layout === "compact");
+
   let backingUpAll = $state(false);
   async function backUpAll() {
     backingUpAll = true;
@@ -141,6 +143,16 @@
     opacity: 0.45;
     cursor: default;
   }
+  /* Compact's columns: glyph, backup, 30 days (30 × 8px), last good copy, next, chevron. */
+  .ledger {
+    grid-template-columns: 24px minmax(0, 1fr) 240px 7.5rem 10.75rem 16px;
+    column-gap: 1rem;
+    align-items: center;
+  }
+  /* The Full rows Compact falls back to when narrow sit in wrappers: their hairlines. */
+  .narrow ~ .narrow > .row {
+    box-shadow: inset 0 1px 0 var(--c-sep);
+  }
   .chip-filter .num {
     font-variant-numeric: tabular-nums;
     opacity: 0.7;
@@ -176,6 +188,8 @@
       {/if}
       {#if p.running}
         <span class="block truncate text-fg">Backing up now</span>
+        {@const left = app.timeLeftOf(p.id)}
+        {#if left}<span class="num block truncate text-fg-muted">{left[0]!.toUpperCase()}{left.slice(1)}</span>{/if}
       {:else}
         <span class="block truncate"><span class="text-fg-muted">Next</span>{" "}<span class="num text-fg">{nextRun(p, st)}</span></span>
       {/if}
@@ -184,9 +198,47 @@
   </button>
 {/snippet}
 
+<!-- Compact: one line a backup, in columns, so the strips line up and compare across
+     backups (the ramp is the same for all). Below 800px of room it is the Full row. -->
+{#snippet ledgerHead()}
+  <div class="row ledger hidden min-h-8 py-1.5 text-[12px] text-fg-muted @min-[800px]:grid" aria-hidden="true">
+    <span></span>
+    <span>Backup</span>
+    <span>Last 30 days <span class="text-fg-muted/80">· taller bars copied more</span></span>
+    <span>Last good copy</span>
+    <span>Next</span>
+    <span></span>
+  </div>
+{/snippet}
+
+{#snippet ledgerRow(p: ProfileSummary, s: Protection)}
+  {@const st = app.statuses[p.id]}
+  {@const good = lastGood(p, st)}
+  {@const path = `${p.sources?.length ? `${p.sources[0]}${p.sources.length > 1 ? ` +${p.sources.length - 1}` : ""} ` : ""}→ ${where(p.target)}`}
+  <div class="narrow contents @min-[800px]:hidden">{@render backupRow(p, s)}</div>
+  <button
+    class="row row-link ledger hidden min-h-11 py-2 @min-[800px]:grid {s.tone === 'bad' ? 'bg-danger/7' : ''}"
+    onclick={() => app.open(p.id)}
+    use:contextMenu={{ items: () => profileMenu(p), label: p.name }}
+  >
+    <StatusGlyph tone={s.tone} />
+    <span class="min-w-0">
+      <span class="block truncate font-semibold">{p.name}</span>
+      <span class="block truncate text-[12.5px]">
+        <span class="num {toneText[s.tone]}">{s.short.split(" · ")[0]}</span>
+        <span class="font-mono text-[12px] text-fg-muted" title="{(p.sources ?? []).join(', ')} → {p.target}">{" "}{path}</span>
+      </span>
+    </span>
+    <span>{#if st}<HistoryStrip days={st.days} />{/if}</span>
+    <span class="num truncate text-[13px] {s.tone === 'bad' ? 'text-danger' : 'text-fg'}" title={good ? `Last good copy ${good}` : "No good copy yet"}>{good ?? "none yet"}</span>
+    <span class="num truncate text-[13px] text-fg-2" title={p.running ? (app.timeLeftOf(p.id) ?? "Running now") : `Next: ${nextRun(p, st)}`}>{p.running ? (app.timeLeftOf(p.id, true) ?? "running now") : nextRun(p, st)}</span>
+    <Icon name="chevronRight" size={16} class="text-fg-muted" />
+  </button>
+{/snippet}
+
 <div class="@container flex min-h-0 flex-1 flex-col overflow-y-auto">
   <!-- The settings table may use the whole width; the status view reads better narrower. -->
-  <div class="mx-auto flex w-full {view === 'settings' ? 'max-w-none' : 'max-w-[1080px]'} flex-col gap-8 px-10 pt-6 pb-10">
+  <div class="mx-auto flex w-full {view === 'settings' ? 'max-w-none' : 'max-w-[1080px]'} flex-col {compact ? 'gap-6 pb-6' : 'gap-8 pb-10'} px-10 pt-6">
     <div class="flex items-center justify-between gap-4">
       <h1 class="text-[15px] font-semibold text-fg-2">All backups</h1>
       <div class="flex gap-2">
@@ -272,8 +324,9 @@
         {/if}
       {:else}
       <div class="rows">
+        {#if compact && mine.length}{@render ledgerHead()}{/if}
         {#each mine as r (r.p.id)}
-          {@render backupRow(r.p, r.s)}
+          {#if compact}{@render ledgerRow(r.p, r.s)}{:else}{@render backupRow(r.p, r.s)}{/if}
         {:else}
           {#if filter}<p class="row text-[13px] text-fg-muted">None of your backups.</p>{/if}
         {/each}
@@ -291,8 +344,9 @@
       <section>
         <h2 class="group-title">System backups</h2>
         <div class="rows">
+          {#if compact}{@render ledgerHead()}{/if}
           {#each system as r (r.p.id)}
-            {@render backupRow(r.p, r.s)}
+            {#if compact}{@render ledgerRow(r.p, r.s)}{:else}{@render backupRow(r.p, r.s)}{/if}
           {/each}
         </div>
       </section>

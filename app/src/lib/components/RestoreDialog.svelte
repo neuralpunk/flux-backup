@@ -3,7 +3,7 @@
   import { api, listen, pickFolder } from "../api";
   import { sizeLabel } from "../size";
   import { app } from "../state.svelte";
-  import { bytes, count, dateTime } from "../format";
+  import { bytes, count, dateTime, timeLeft } from "../format";
   import type { ProgressSnapshot, RestoreOutcome, RestorePreview, SnapshotMeta } from "../types";
   import Icon from "./Icon.svelte";
   import Callout from "./Callout.svelte";
@@ -292,7 +292,9 @@
           <div class="h-1.5 overflow-hidden rounded-full bg-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((progress.bytes_done / progress.bytes_total) * 100)}>
             <div class="h-full rounded bg-primary motion-safe:transition-[width] motion-safe:duration-300" style="width: {Math.min(100, (progress.bytes_done / progress.bytes_total) * 100)}%"></div>
           </div>
-          <div class="tabular text-xs text-fg-muted">{bytes(progress.bytes_done)} of {bytes(progress.bytes_total)} · {count(progress.entries_done)} of {count(progress.entries_total)} items</div>
+          <div class="tabular text-xs text-fg-muted">
+            {bytes(progress.bytes_done)} of {bytes(progress.bytes_total)} · {count(progress.entries_done)} of {count(progress.entries_total)} items{#if progress.bytes_per_sec > 0}&nbsp;· {bytes(progress.bytes_per_sec)}/s{/if}{#if progress.phase === "transferring" && progress.eta_secs != null}&nbsp;· {timeLeft(progress.eta_secs)}{/if}
+          </div>
         </div>
       {/if}
 

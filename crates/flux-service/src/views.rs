@@ -198,6 +198,8 @@ pub struct Overview {
     restore_test: RestoreTestView,
     /// Unusual changes found and not yet dismissed.
     unusual: Option<flux_runner::unusual::UnusualReport>,
+    /// What the backup drive last said about its health (local drives that were seen).
+    drive_health: Option<crate::extras::DriveHealthView>,
     /// What Flux Sentry has learned of this backup (when it's watched, and has run
     /// often enough).
     sentry: Option<SentryView>,
@@ -266,6 +268,9 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         now,
     );
     health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
+    let (drive_warnings, drive_health) =
+        crate::extras::drive_health(&state.paths, id.as_str(), &p, now);
+    health.extend(drive_warnings);
     // (Nothing is held with Flux Sentry off: an alarm from before isn't shown as one.)
     let unusual = (p.unusual_changes != flux_core::profile::Sensitivity::Off)
         .then(|| crate::extras::open_unusual(&state.paths, &id, &runs))
@@ -283,6 +288,7 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         },
         health,
         space,
+        drive_health,
         profile: summary(&state.paths, &id, &p, &running),
         snapshot_count: snaps.len(),
         oldest: snaps.first().map(|s| s.started),
@@ -313,8 +319,8 @@ pub struct Status {
     next_run: Option<jiff::Timestamp>,
     timer_active: bool,
     /// The last backup that kept a copy (some files skipped still counts).
-    last_good: Option<jiff::Timestamp>,
-    health: Vec<crate::extras::Health>,
+    pub(crate) last_good: Option<jiff::Timestamp>,
+    pub(crate) health: Vec<crate::extras::Health>,
     /// The last [`STATUS_DAYS`] days, oldest first, today last.
     days: Vec<Day>,
     /// Restore tests are on, and none has passed within their interval.
@@ -339,6 +345,7 @@ pub fn status_impl(state: &Service, id: String) -> Result<Status> {
         now,
     );
     health.extend(crate::extras::restore_test_health(&p, &tests, &runs, now));
+    health.extend(crate::extras::drive_health(&state.paths, id.as_str(), &p, now).0);
     if p.unusual_changes != flux_core::profile::Sensitivity::Off
         && let Some(u) = crate::extras::open_unusual(&state.paths, &id, &runs)
     {
@@ -625,10 +632,23 @@ pub fn list_dir_impl(
     })
 }
 
+/// What unlocking found.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Unlocked {
+    /// It was the Vault's recovery code, not a password: the password was lost, so the
+    /// app asks for a new one ([`crate::security::replace_password_impl`]).
+    pub recovery_code: bool,
+}
+
 /// Check a Vault password (or Borg passphrase) and keep it in memory. If the Vault doesn't exist yet, the
 /// password becomes the new Vault's when `create` is set (the first backup creates it);
 /// otherwise the answer is `new_vault`, so the app can ask for it twice.
-pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) -> Result<()> {
+pub fn unlock_impl(
+    state: &Service,
+    id: String,
+    password: String,
+    create: bool,
+) -> Result<Unlocked> {
     let password = Zeroizing::new(password);
     let (pid, p) = state.load(&id)?;
     if p.engine == Engine::Borg {
@@ -649,16 +669,17 @@ pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) 
             ));
         }
         state.remember_password(&pid, password);
-        return Ok(());
+        return Ok(Unlocked::default());
     }
     let pool = flux_runner::repo::sftp_pool(&state.paths, &p, true);
     use flux_runner::repo::RepoError;
+    let mut found = Unlocked::default();
     match flux_runner::repo::open_vault_with(
         flux_runner::repo::vault_backend(&p, pool),
         &p,
         &password,
     ) {
-        Ok(_) => {}
+        Ok(repo) => found.recovery_code = repo.opened_by_recovery_code().unwrap_or(false),
         Err(RepoError::Vault(VaultError::NoRepository(_))) if create => {}
         Err(RepoError::Vault(VaultError::NoRepository(_))) => {
             return Err(ApiError::new(
@@ -669,7 +690,7 @@ pub fn unlock_impl(state: &Service, id: String, password: String, create: bool) 
         Err(e) => return Err(e.into()),
     }
     state.remember_password(&pid, password);
-    Ok(())
+    Ok(found)
 }
 
 /// Set up encryption while a backup is being set up, so its first run (scheduled or not)
@@ -900,6 +921,8 @@ pub fn start_backup(state: &Service, id: String, shutdown: bool) -> Result<Start
     if let Some(pw) = state.password(&pid) {
         cmd.env("FLUX_PASSWORD", pw.as_str());
     }
+    // Its notifications may have buttons (*Try again*, *Open*): it waits for them at its end.
+    cmd.env("FLUX_NOTIFY_ACTIONS", "1");
     let since = jiff::Timestamp::now();
     let mut child = cmd.spawn().map_err(|e| {
         ApiError::new(

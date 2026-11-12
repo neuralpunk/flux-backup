@@ -70,6 +70,14 @@ pub enum Call {
         id: String,
         password: String,
     },
+    /// After unlocking with the recovery code: a new password in place of the lost one(s)
+    /// (`remove`: their key slots), and a new recovery code.
+    ReplacePassword {
+        id: String,
+        password: String,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     SaveKeyFile {
         id: String,
     },
@@ -103,6 +111,14 @@ pub enum Call {
     /// Keep the app in the system tray when its window is closed, or quit.
     SetCloseToTray {
         on: bool,
+    },
+    SetWeeklyNote {
+        on: bool,
+    },
+    /// Quiet hours for the notifications that only inform; both `None`: none.
+    SetQuietHours {
+        from: Option<String>,
+        to: Option<String>,
     },
     Cancel {
         id: String,
@@ -144,6 +160,10 @@ pub enum Call {
     ExcludeSuggestions {
         sources: Vec<String>,
     },
+    /// How much each folder (or excluded folder) holds, measured within a time limit.
+    FolderSizes {
+        paths: Vec<String>,
+    },
     Drives,
     TestTarget {
         profile: Value,
@@ -166,6 +186,36 @@ pub enum Call {
     DeleteSnapshot {
         id: String,
         snapshot: String,
+    },
+    /// Mount a snapshot read-only for the file manager.
+    BrowseInFiles {
+        id: String,
+        snapshot: String,
+    },
+    /// The backup that takes a path, if any (a file manager's *Previous versions…*).
+    BackupForPath {
+        path: String,
+    },
+    /// What each backup would change to leave out, or to take, a path (a file manager's
+    /// *Leave out of backups*, *Back up this folder*).
+    FolderPlan {
+        path: String,
+        want: crate::folders::Want,
+    },
+    /// Make that change in backups `ids`.
+    ApplyFolderChange {
+        path: String,
+        want: crate::folders::Want,
+        ids: Vec<String>,
+    },
+    /// What *Browse in Files* has open.
+    Browsing,
+    /// Unmount what *Browse in Files* has open.
+    StopBrowsing,
+    /// Delete several snapshots at once; pinned ones are kept.
+    DeleteSnapshots {
+        id: String,
+        snapshots: Vec<String>,
     },
     Compare {
         id: String,
@@ -204,6 +254,11 @@ pub enum Call {
         id: Option<String>,
     },
     OpenFile {
+        id: String,
+        snapshot: String,
+        path: String,
+    },
+    PreviewFile {
         id: String,
         snapshot: String,
         path: String,
@@ -254,6 +309,12 @@ pub enum Call {
     /// A Vault's passwords, their hashing and unlock file.
     VaultSecurity {
         id: String,
+    },
+    /// Make (or remove) a Vault's recovery code.
+    RecoveryCode {
+        id: String,
+        #[serde(default)]
+        remove: bool,
     },
     /// Hash the password in use again with this strength.
     StrengthenKey {
@@ -407,6 +468,7 @@ impl Call {
             | ListDir { id, .. }
             | Unlock { id, .. }
             | SetPassword { id, .. }
+            | ReplacePassword { id, .. }
             | SaveKeyFile { id }
             | BackupNow { id, .. }
             | ShutdownAfter { id, .. }
@@ -419,6 +481,8 @@ impl Call {
             | RetentionPreview { id, .. }
             | UpdateSnapshot { id, .. }
             | DeleteSnapshot { id, .. }
+            | BrowseInFiles { id, .. }
+            | DeleteSnapshots { id, .. }
             | Compare { id, .. }
             | Runs { id, .. }
             | RunEvents { id, .. }
@@ -427,12 +491,14 @@ impl Call {
             | RecoveryKit { id }
             | ExportProfile { id, .. }
             | OpenFile { id, .. }
+            | PreviewFile { id, .. }
             | DuplicateProfile { id }
             | Diagnostics { id }
             | Find { id, .. }
             | Versions { id, .. }
             | RestorePreview { id, .. }
             | VaultSecurity { id }
+            | RecoveryCode { id, .. }
             | StrengthenKey { id, .. }
             | SetUnlockFile { id, .. }
             | Lock { id }
@@ -457,6 +523,12 @@ impl Call {
             | ValidateProfile { .. }
             | SuggestId { .. }
             | ExcludeSuggestions { .. }
+            | Browsing
+            | StopBrowsing
+            | BackupForPath { .. }
+            | FolderPlan { .. }
+            | ApplyFolderChange { .. }
+            | FolderSizes { .. }
             | Drives
             | TestTarget { .. }
             | Tools
@@ -471,6 +543,8 @@ impl Call {
             | DiffTool
             | SetDiffTool { .. }
             | SetCloseToTray { .. }
+            | SetWeeklyNote { .. }
+            | SetQuietHours { .. }
             | TimeHashing { .. }
             | SetWebhooks { .. }
             | TestWebhook { .. }
@@ -494,6 +568,7 @@ impl Call {
             ListDir { .. } => "list_dir",
             Unlock { .. } => "unlock",
             VaultSecurity { .. } => "vault_security",
+            RecoveryCode { .. } => "recovery_code",
             StrengthenKey { .. } => "strengthen_key",
             SetUnlockFile { .. } => "set_unlock_file",
             TimeHashing { .. } => "time_hashing",
@@ -523,6 +598,7 @@ impl Call {
             ExportBorgKey { .. } => "export_borg_key",
             CopyUnlockFile { .. } => "copy_unlock_file",
             SetPassword { .. } => "set_password",
+            ReplacePassword { .. } => "replace_password",
             SaveKeyFile { .. } => "save_key_file",
             BackupNow { .. } => "backup_now",
             ShutdownAfter { .. } => "shutdown_after",
@@ -531,6 +607,8 @@ impl Call {
             DiffTool => "diff_tool",
             SetDiffTool { .. } => "set_diff_tool",
             SetCloseToTray { .. } => "set_close_to_tray",
+            SetWeeklyNote { .. } => "set_weekly_note",
+            SetQuietHours { .. } => "set_quiet_hours",
             Cancel { .. } => "cancel",
             Restore { .. } => "restore",
             GetProfile { .. } => "get_profile",
@@ -542,10 +620,18 @@ impl Call {
             SuggestId { .. } => "suggest_id",
             RetentionPreview { .. } => "retention_preview",
             ExcludeSuggestions { .. } => "exclude_suggestions",
+            FolderSizes { .. } => "folder_sizes",
             Drives => "drives",
             TestTarget { .. } => "test_target",
             UpdateSnapshot { .. } => "update_snapshot",
             DeleteSnapshot { .. } => "delete_snapshot",
+            BrowseInFiles { .. } => "browse_in_files",
+            Browsing => "browsing",
+            BackupForPath { .. } => "backup_for_path",
+            FolderPlan { .. } => "folder_plan",
+            ApplyFolderChange { .. } => "apply_folder_change",
+            StopBrowsing => "stop_browsing",
+            DeleteSnapshots { .. } => "delete_snapshots",
             Compare { .. } => "compare",
             Runs { .. } => "runs",
             RunEvents { .. } => "run_events",
@@ -557,6 +643,7 @@ impl Call {
             ExportProfile { .. } => "export_profile",
             ImportProfile { .. } => "import_profile",
             OpenFile { .. } => "open_file",
+            PreviewFile { .. } => "preview_file",
             DuplicateProfile { .. } => "duplicate_profile",
             Diagnostics { .. } => "diagnostics",
             Find { .. } => "find",
@@ -620,7 +707,13 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             create,
         } => json(views::unlock_impl(s, id, password, create)?),
         Call::SetPassword { id, password } => json(views::set_password_impl(s, id, password)?),
+        Call::ReplacePassword {
+            id,
+            password,
+            remove,
+        } => json(security::replace_password_impl(s, id, password, remove)?),
         Call::VaultSecurity { id } => json(security::vault_security_impl(s, id)?),
+        Call::RecoveryCode { id, remove } => json(security::recovery_code_impl(s, id, remove)?),
         Call::StrengthenKey { id, hashing } => json(security::strengthen_impl(s, id, hashing)?),
         Call::SetUnlockFile { id, path, create } => {
             json(security::set_unlock_file_impl(s, id, path, create)?)
@@ -674,6 +767,8 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::DiffTool => json(filediff::diff_tool(s)),
         Call::SetDiffTool { tool } => json(prefs::set_diff_tool_impl(s, tool)?),
         Call::SetCloseToTray { on } => json(prefs::set_close_to_tray_impl(s, on)?),
+        Call::SetWeeklyNote { on } => json(prefs::set_weekly_note_impl(s, on)?),
+        Call::SetQuietHours { from, to } => json(prefs::set_quiet_hours_impl(s, from, to)?),
         Call::Cancel { id } => json(views::cancel_impl(s, id)?),
         Call::Restore {
             id,
@@ -737,6 +832,7 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
             json(edit::retention_preview_impl(s, id, retention)?)
         }
         Call::ExcludeSuggestions { sources } => json(edit::exclude_suggestions_impl(s, sources)?),
+        Call::FolderSizes { paths } => json(edit::folder_sizes_impl(s, paths)?),
         Call::Drives => json(edit::drives_impl(s)?),
         Call::TestTarget { profile } => json(edit::test_target_impl(s, profile)?),
         Call::UpdateSnapshot {
@@ -759,8 +855,21 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
                 tags,
             },
         )?),
+        Call::BrowseInFiles { id, snapshot } => {
+            json(crate::browse::browse_in_files_impl(s, id, snapshot)?)
+        }
+        Call::Browsing => json(crate::browse::browsing_impl(s)?),
+        Call::BackupForPath { path } => json(crate::browse::backup_for_path_impl(s, path)?),
+        Call::FolderPlan { path, want } => json(crate::folders::folder_plan_impl(s, path, want)?),
+        Call::ApplyFolderChange { path, want, ids } => json(
+            crate::folders::apply_folder_change_impl(s, path, want, ids)?,
+        ),
+        Call::StopBrowsing => json(crate::browse::stop_browsing_impl(s)?),
         Call::DeleteSnapshot { id, snapshot } => {
             json(actions::delete_snapshot_impl(s, id, snapshot)?)
+        }
+        Call::DeleteSnapshots { id, snapshots } => {
+            json(actions::delete_snapshots_impl(s, id, snapshots)?)
         }
         Call::Compare { id, old, new } => json(actions::compare_impl(s, id, old, new)?),
         Call::Runs { id, limit } => json(actions::runs_impl(s, id, limit)?),
@@ -774,6 +883,9 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::ImportProfile { toml, id } => json(edit::import_profile_impl(s, toml, id)?),
         Call::OpenFile { id, snapshot, path } => {
             json(extras::open_file_impl(s, id, snapshot, path)?)
+        }
+        Call::PreviewFile { id, snapshot, path } => {
+            json(extras::preview_file_impl(s, id, snapshot, path)?)
         }
         Call::DuplicateProfile { id } => json(extras::duplicate_profile_impl(s, id)?),
         Call::Diagnostics { id } => json(extras::diagnostics_impl(s, id)?),

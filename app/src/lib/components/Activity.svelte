@@ -82,7 +82,7 @@
   </div>
 {:else}
   <div class="flex h-full min-h-0 gap-3">
-    <div class="card flex w-60 shrink-0 flex-col overflow-hidden min-[1100px]:w-72">
+    <div class="card flex w-60 shrink-0 flex-col overflow-hidden {app.layout === 'compact' ? 'min-[1100px]:w-[19.5rem]' : 'min-[1100px]:w-72'}">
       <div class="flex items-center gap-2 px-3 pt-3">
         <div class="segmented flex flex-1 [&>button]:flex-1" role="radiogroup" aria-label="Show">
           <button role="radio" aria-checked={!problemsOnly} onclick={() => (problemsOnly = false)}>All</button>

@@ -78,6 +78,28 @@ pub enum ProfileCmd {
     },
     /// Copy a profile under a new id (`<id>-copy`), with its schedule.
     Duplicate { id: String },
+    /// Leave a file or folder out of the profiles that back it up (all of them, or those
+    /// named with --only): adds an exclusion rule naming just it, or, when it's one of a
+    /// profile's folders, stops taking that folder. Says what changes and asks first.
+    LeaveOut {
+        path: String,
+        /// Only this profile (repeatable).
+        #[arg(long = "only", value_name = "ID")]
+        only: Vec<String>,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Back up a folder in a profile: adds it to the profile's folders (in place of any of
+    /// them inside it), or removes the exclusion rule that names just this folder. Says
+    /// what changes and asks first.
+    AddFolder {
+        id: String,
+        path: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Import a profile exported with `flux profile export` (or written by hand).
     Import {
         file: PathBuf,
@@ -412,6 +434,19 @@ pub fn run(ctx: &Ctx, cmd: ProfileCmd) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         ProfileCmd::Validate { ids } => validate(ctx, &store, ids),
+        ProfileCmd::LeaveOut { path, only, yes } => {
+            folder_change(ctx, path, flux_service::folders::Want::Exclude, only, yes)
+        }
+        ProfileCmd::AddFolder { id, path, yes } => {
+            parse_id(&id)?;
+            folder_change(
+                ctx,
+                path,
+                flux_service::folders::Want::Include,
+                vec![id],
+                yes,
+            )
+        }
         ProfileCmd::Export { id, format, output } => {
             let id = parse_id(&id)?;
             let p = store.load(&id)?;
@@ -893,4 +928,87 @@ fn own_template(paths: &flux_core::Paths, t: &str) -> String {
     list.iter()
         .find(|x| x.id == t || x.id == format!("own:{t}") || (x.own && x.name == t))
         .map_or_else(|| t.to_owned(), |x| x.id.clone())
+}
+
+/// `profile leave-out` and `profile add-folder`: the changes the app's *Leave out of
+/// backups* and *Back up this folder* make, said first.
+fn folder_change(
+    ctx: &Ctx,
+    path: String,
+    want: flux_service::folders::Want,
+    only: Vec<String>,
+    yes: bool,
+) -> anyhow::Result<ExitCode> {
+    use flux_service::folders::{Change, Want, apply_folder_change_impl, folder_plan_impl};
+    let service = flux_service::Service::new(ctx.paths.clone());
+    let plan = folder_plan_impl(&service, path, want)?;
+    let picked: Vec<_> = plan
+        .backups
+        .iter()
+        .filter(|b| only.is_empty() || only.contains(&b.id))
+        .collect();
+    for id in &only {
+        if !plan.backups.iter().any(|b| &b.id == id) {
+            if want == Want::Include {
+                bail!("profile {id:?} not found");
+            }
+            bail!("{id} doesn't back up {}", plan.shown);
+        }
+    }
+    if picked.is_empty() {
+        bail!("none of your profiles backs up {}", plan.shown);
+    }
+    let mut ids = Vec::new();
+    for b in &picked {
+        let line = match (&b.change, &b.blocked) {
+            (Some(Change::AddRule { rule }), _) => format!("adds the exclusion rule {rule}"),
+            (Some(Change::RemoveFolder { folder }), _) => format!("stops backing up {folder}"),
+            (Some(Change::AddFolder { folder, replaces }), _) if replaces.is_empty() => {
+                format!("adds {folder} to its folders")
+            }
+            (Some(Change::AddFolder { folder, replaces }), _) => {
+                format!(
+                    "adds {folder} to its folders, in place of {}",
+                    replaces.join(", ")
+                )
+            }
+            (Some(Change::RemoveRule { rule }), _) => {
+                format!("removes the exclusion rule {rule}")
+            }
+            (None, Some(why)) => format!("can't: {why}"),
+            (None, None) if b.backed_up => "already backs it up".into(),
+            (None, None) => "nothing to change".into(),
+        };
+        if !ctx.json {
+            println!("{} ({}): {line}", b.name, b.id);
+        }
+        if b.change.is_some() {
+            ids.push(b.id.clone());
+        }
+    }
+    if ids.is_empty() {
+        if ctx.json {
+            output::print_json(&plan)?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !yes && !output::confirm("Make these changes?")? {
+        bail!("not confirmed (use --yes to change without asking)");
+    }
+    let done = apply_folder_change_impl(&service, plan.path.clone(), want, ids)?;
+    if ctx.json {
+        output::print_json(&done)?;
+    } else {
+        for (name, why) in &done.failed {
+            eprintln!("{name}: {why}");
+        }
+        if !done.changed.is_empty() {
+            println!("Changed from the next backup on. Snapshots already made are as they were.");
+        }
+    }
+    Ok(if done.failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }

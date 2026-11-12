@@ -113,8 +113,8 @@ pub fn new_profile_impl(state: &Service) -> Result<Editable> {
 #[derive(Serialize)]
 pub struct SaveResult {
     id: String,
-    issues: Vec<Issue>,
-    saved: bool,
+    pub(crate) issues: Vec<Issue>,
+    pub(crate) saved: bool,
     /// What happened to the timer, for a toast.
     schedule: Option<String>,
 }
@@ -396,22 +396,98 @@ pub fn exclude_suggestions_impl(_state: &Service, sources: Vec<String>) -> Resul
 
 /// Apparent size of a tree, giving up at `deadline`.
 fn du(dir: &Path, deadline: Instant) -> Option<u64> {
+    match du_partial(dir, deadline)? {
+        (total, true) => Some(total),
+        (_, false) => None,
+    }
+}
+
+/// Disk space a tree takes, and whether it was counted to the end (`false`: `deadline`
+/// came first, and the total is what was counted by then). `None` if `dir` can't be read.
+/// Doesn't follow links or cross into other filesystems.
+pub(crate) fn du_partial(dir: &Path, deadline: Instant) -> Option<(u64, bool)> {
+    let top = std::fs::symlink_metadata(dir).ok()?;
+    if !top.is_dir() {
+        return Some((top.blocks() * 512, true));
+    }
+    let dev = top.dev();
     let mut total = 0u64;
     let mut stack = vec![dir.to_path_buf()];
+    let mut first = true;
     while let Some(d) = stack.pop() {
         if Instant::now() > deadline {
-            return None;
+            return Some((total, false));
         }
-        for e in std::fs::read_dir(&d).ok()?.flatten() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) if !first => continue,
+            Err(_) => return None,
+        };
+        first = false;
+        for e in rd.flatten() {
             let Ok(m) = e.metadata() else { continue };
             if m.is_dir() {
-                stack.push(e.path());
+                if m.dev() == dev {
+                    stack.push(e.path());
+                }
             } else {
                 total += m.blocks() * 512;
             }
         }
     }
-    Some(total)
+    Some((total, true))
+}
+
+#[derive(Debug, Serialize)]
+pub struct FolderSize {
+    /// As asked for (`~/Videos/`, `/home/ann`).
+    path: String,
+    /// Disk space it takes; `None` for patterns (`*.iso`, `node_modules/`) and paths that
+    /// aren't there or can't be read.
+    size: Option<u64>,
+    /// Counting stopped at the time limit: `size` is what was counted by then, so "at
+    /// least" that much.
+    partial: bool,
+}
+
+/// How much each of `paths` holds, for showing beside a backup's folders and its
+/// exclusions. Patterns aren't measured; `~/` is the home folder. Everything shares one
+/// time limit, so a huge home folder doesn't hold up the rest for long: what isn't
+/// finished by then says "at least".
+pub fn folder_sizes_impl(_state: &Service, paths: Vec<String>) -> Result<Vec<FolderSize>> {
+    let home = sys::home_dir();
+    let start = Instant::now();
+    let budget = Duration::from_secs(6);
+    let n = paths.len().max(1) as u32;
+    let mut out = Vec::with_capacity(paths.len());
+    for (i, path) in paths.into_iter().enumerate() {
+        let resolved = if path.contains(['*', '?', '[']) || path.starts_with('!') {
+            None
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            home.as_ref().map(|h| h.join(rest.trim_end_matches('/')))
+        } else if path.starts_with('/') {
+            Some(
+                PathBuf::from(path.trim_end_matches('/'))
+                    .components()
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        // Each path gets an equal share of what's left of the budget.
+        let left = budget.saturating_sub(start.elapsed());
+        let share = left / (n - i as u32).max(1);
+        let (size, partial) = match resolved.and_then(|p| du_partial(&p, Instant::now() + share)) {
+            Some((s, done)) => (Some(s), !done),
+            None => (None, false),
+        };
+        out.push(FolderSize {
+            path,
+            size,
+            partial,
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -461,7 +537,12 @@ pub fn drives_impl(_state: &Service) -> Result<Vec<Drive>> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            fs_type: m.fs_type,
+            // ntfs-3g and exfat-fuse mount as `fuseblk`: what the partition really holds.
+            fs_type: if m.fs_type == "fuseblk" {
+                flux_core::target_check::filesystem_of(&m.mount_point).unwrap_or(m.fs_type)
+            } else {
+                m.fs_type
+            },
             fs_uuid,
             free: vfs.as_ref().map(|v| v.f_bavail * v.f_frsize),
             total: vfs.as_ref().map(|v| v.f_blocks * v.f_frsize),
@@ -952,5 +1033,60 @@ mod template_tests {
                 .all(|t| !t.own)
         );
         assert!(new_from_template_impl(&state, "own:gone".into()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    use flux_core::Paths;
+
+    #[test]
+    fn folders_are_measured_and_patterns_are_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        std::fs::create_dir_all(t.join("docs/deep")).unwrap();
+        std::fs::write(t.join("docs/a"), vec![1u8; 100_000]).unwrap();
+        std::fs::write(t.join("docs/deep/b"), vec![2u8; 300_000]).unwrap();
+        std::fs::write(t.join("single"), vec![3u8; 50_000]).unwrap();
+        let state = Service::new(Paths::under(t.join("home"), Scope::User));
+        let docs = format!("{}/", t.join("docs").display());
+        let r = folder_sizes_impl(
+            &state,
+            vec![
+                docs.clone(),
+                t.join("single").display().to_string(),
+                "*.iso".into(),
+                "node_modules/".into(),
+                "!keep".into(),
+                t.join("missing").display().to_string(),
+            ],
+        )
+        .unwrap();
+        let size = |i: usize| r[i].size;
+        // Disk space, in whole blocks: at least the bytes written.
+        assert!(size(0).unwrap() >= 400_000, "{r:?}");
+        assert!(!r[0].partial);
+        assert_eq!(r[0].path, docs, "answered under the name it was asked by");
+        assert!(size(1).unwrap() >= 50_000);
+        assert_eq!(
+            (size(2), size(3), size(4), size(5)),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_count_cut_short_says_at_least() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("x")).unwrap();
+        std::fs::write(tmp.path().join("x/f"), "data").unwrap();
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(du_partial(tmp.path(), past), Some((0, false)));
+        assert!(
+            du_partial(tmp.path(), Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .1
+        );
+        assert_eq!(du_partial(&tmp.path().join("nope"), past), None);
     }
 }

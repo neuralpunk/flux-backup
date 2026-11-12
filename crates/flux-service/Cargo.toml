@@ -23,6 +23,7 @@ rustix.workspace = true
 zeroize = "1.9"
 globset = "0.4"
 similar = "3.2"
+base64 = "0.23"
 
 [dev-dependencies]
 tempfile.workspace = true

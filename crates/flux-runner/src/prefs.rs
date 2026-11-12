@@ -39,6 +39,58 @@ pub struct Settings {
     /// The app has said once that it stays in the tray when its window is closed.
     #[serde(skip_serializing_if = "is_default")]
     pub told_about_tray: bool,
+    /// No weekly "all good" notification (it's on unless turned off).
+    #[serde(skip_serializing_if = "is_default")]
+    pub weekly_note_off: bool,
+    /// Hours when the notifications that only inform (a successful backup, the weekly
+    /// note) aren't sent. Failures and warnings always are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
+}
+
+/// From `from` to `to`, local time, as "HH:MM"; past midnight when `to` is earlier
+/// ("22:00" to "08:00").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuietHours {
+    pub from: String,
+    pub to: String,
+}
+
+/// "08:00" (or "8:00") as minutes past midnight.
+fn minutes(hhmm: &str) -> Option<u16> {
+    let (h, m) = hhmm.trim().split_once(':')?;
+    let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+impl QuietHours {
+    /// Both times are times of day, and not the same.
+    pub fn is_valid(&self) -> bool {
+        matches!((minutes(&self.from), minutes(&self.to)), (Some(a), Some(b)) if a != b)
+    }
+
+    /// Is `hour:minute` (local time) inside them? The start counts, the end doesn't.
+    pub fn contains(&self, hour: i8, minute: i8) -> bool {
+        let (Some(from), Some(to)) = (minutes(&self.from), minutes(&self.to)) else {
+            return false;
+        };
+        let t = (hour.clamp(0, 23) as u16) * 60 + minute.clamp(0, 59) as u16;
+        if from < to {
+            from <= t && t < to
+        } else {
+            t >= from || t < to
+        }
+    }
+}
+
+impl Settings {
+    /// Whether it's quiet hours now (local time).
+    pub fn quiet_now(&self) -> bool {
+        let now = jiff::Zoned::now();
+        self.quiet_hours
+            .as_ref()
+            .is_some_and(|q| q.contains(now.hour(), now.minute()))
+    }
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -135,6 +187,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quiet_hours_past_midnight_and_within_a_day() {
+        let night = QuietHours {
+            from: "22:00".into(),
+            to: "08:00".into(),
+        };
+        assert!(night.is_valid());
+        assert!(night.contains(22, 0) && night.contains(23, 59) && night.contains(3, 0));
+        assert!(night.contains(7, 59) && !night.contains(8, 0) && !night.contains(12, 0));
+        let lunch = QuietHours {
+            from: "12:30".into(),
+            to: "13:30".into(),
+        };
+        assert!(lunch.contains(12, 30) && lunch.contains(13, 0) && !lunch.contains(13, 30));
+        let same = QuietHours {
+            from: "9:00".into(),
+            to: "09:00".into(),
+        };
+        assert!(!same.is_valid());
+        assert!(
+            !QuietHours {
+                from: "25:00".into(),
+                to: "08:00".into()
+            }
+            .is_valid()
+        );
+    }
+
+    #[test]
     fn settings_and_pause() {
         let t = tempfile::tempdir().unwrap();
         let paths = Paths::under(t.path(), flux_core::Scope::User);
@@ -154,6 +234,11 @@ mod tests {
             }],
             quit_on_close: true,
             told_about_tray: true,
+            weekly_note_off: true,
+            quiet_hours: Some(QuietHours {
+                from: "22:00".into(),
+                to: "07:30".into(),
+            }),
         };
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths), s);

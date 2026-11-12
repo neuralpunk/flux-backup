@@ -547,6 +547,19 @@ pub fn page(name: &str) -> Option<Page> {
             &[],
             &["flux-key-store"],
         ),
+        "flux-key-recovery" => p(
+            "Make a recovery code for the Vault: a long random code (six groups of five characters), shown once, that opens the Vault like a password when every password is lost, and without the unlock file. Print it or keep it somewhere safe, away from the backups. It can be typed in any case, with or without the dashes. A new one replaces the old; --remove takes it away. Changing the password after opening with the code keeps the code.",
+            &[
+                ("Make one", "flux key recovery home"),
+                (
+                    "List the snapshots, typing the code when the password is asked for",
+                    "flux snapshots home",
+                ),
+                ("Remove it", "flux key recovery home --remove"),
+            ],
+            &[],
+            &["flux-key-list", "flux-key-passwd"],
+        ),
         "flux-key-store" => p(
             "Ask for the Vault's password once and keep it in the desktop keyring, so scheduled backups can run without anyone typing it (the profile's password_source must be keyring).",
             &[("Keep it in the keyring", "flux key store home")],
@@ -820,6 +833,24 @@ pub fn page(name: &str) -> Option<Page> {
             &[("Copy it", "flux profile duplicate home")],
             &[],
             &["flux-profile-edit", "flux-profile-destination-add"],
+        ),
+        "flux-profile-leave-out" => p(
+            "Leave a file or folder out of every profile that backs it up, or only those named with --only: each gets an exclusion rule naming just it (~/Downloads/big.iso), or, when it's one of the profile's folders, stops taking that folder. A profile it's the only folder of is left alone. What would change is shown first, and you're asked. Snapshots already made keep it. The app's Leave out of backups… (from the file manager's right-click menu) does the same.",
+            &[
+                ("Leave a folder out", "flux profile leave-out ~/Videos/raw"),
+                (
+                    "Only from one profile",
+                    "flux profile leave-out ~/Downloads/big.iso --only home",
+                ),
+            ],
+            &[],
+            &["flux-profile-add-folder", "flux-profile-edit"],
+        ),
+        "flux-profile-add-folder" => p(
+            "Back up a folder in a profile: it's added to the profile's folders (in place of any of them inside it), or, when an exclusion rule names just this folder, that rule is removed. A folder left out by a broader rule (node_modules/, *.iso) is left as it is: change the rules with flux profile edit. What would change is shown first, and you're asked. The app's Back up this folder… does the same.",
+            &[("Add a folder", "flux profile add-folder home ~/Projects")],
+            &[],
+            &["flux-profile-leave-out", "flux-profile-edit"],
         ),
         "flux-profile-export" => p(
             "Export a profile: as a Flux profile file to import on another computer (secrets left out), or as the configuration or script of another backup tool (borgmatic, restic, rsync, borg). Whatever a format can't express is listed as a note, in the file and on stderr.",
@@ -1125,6 +1156,7 @@ FLUX_SECRET_TOOL\tThe secret-tool program, for the desktop keyring.
 FLUX_SYSTEMCTL, FLUX_SYSTEMD_UNIT_DIR\tHow systemd is called, and where timers are written.
 FLUX_CRONTAB, FLUX_CRON_DIR\tThe crontab program and the /etc/cron.d folder, with cron.
 FLUX_CURL\tThe curl program webhooks are sent with.
+FLUX_NOTIFY_WAIT\tSeconds a scheduled backup waits after it ends for a click on its notification's buttons (Try again, Open); 600 by default.
 VISUAL, EDITOR\tThe editor flux profile edit opens.";
 
 const FILES: &str = ".SH FILES

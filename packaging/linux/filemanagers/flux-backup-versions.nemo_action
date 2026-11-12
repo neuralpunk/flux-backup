@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Previous versions…
+Comment=Earlier versions of this in your Flux backups
+Exec=flux-backup --previous-versions %F
+Icon-Name=flux-backup
+Selection=s
+Extensions=any;
+Dependencies=flux-backup;

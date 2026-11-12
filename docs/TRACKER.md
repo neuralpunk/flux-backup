@@ -82,6 +82,39 @@ Status legend: ☐ not started · ◐ in progress · ☑ done
 | 90 | 1.1: All backups' table and the glance grid | ☑ | see `git log` |
 | 91 | 1.1: The Overview's order | ☑ | see `git log` |
 | 92 | Release 1.1, again | ☑ | see `git log` |
+| 114 | 1.2: Version 1.2 and the plan | ☑ | see `git log` |
+| 115 | 1.2: Under the hood: sizes hidden by default, the threat model's words | ☑ | see `git log` |
+| 116 | 1.2: Safe to unplug | ☑ | see `git log` |
+| 117 | 1.2: Delete several snapshots at once | ☑ | see `git log` |
+| 118 | 1.2: Sizes next to every folder | ☑ | see `git log` |
+| 119 | 1.2: Skip what a project's .gitignore ignores | ☑ | see `git log` |
+| 120 | 1.2: Browse in Files | ☑ | see `git log` |
+| 121 | 1.2: Previous versions from the file manager | ☑ | see `git log` |
+| 122 | 1.2: A recovery code | ☑ | see `git log` |
+| 123 | 1.2: A calm weekly "all good" | ☑ | see `git log` |
+| 124 | 1.2: Files copied whole, not half-written | — left out | see PLAN.md |
+| 125 | Release 1.2 | ☑ | see `git log` |
+| 126 | The window at the monitor's frame rate | — taken out | see the log |
+| 127 | A Compact layout, the default | ☑ | see `git log` |
+| 128 | Compact's Overview on one screen | ☑ | see `git log` |
+| 129 | Compact, fitted and symmetrical | ☑ | see `git log` |
+| 130 | Shorter values in Settings at a glance | ☑ | see `git log` |
+| 131 | The desktop's accent colour | ☑ | see `git log` |
+| 132 | Text size | ☑ | see `git log` |
+| 133 | Sections at the side of Settings and Preferences | ☑ | see `git log` |
+| 134 | Buttons on desktop notifications | ☑ | see `git log` |
+| 135 | Undo after deleting snapshots | ☑ | see `git log` |
+| 136 | A preview before restoring | ☑ | see `git log` |
+| 137 | What the last backup changed | ☑ | see `git log` |
+| 138 | A sidebar that folds into a row of icons | ☑ | see `git log` |
+| 139 | Checked in the real app, screenshots | ◐ screenshots done; the real window not looked at | see `git log` |
+| 140 | A lost password, after the recovery code | ☑ | see `git log` |
+| 141 | "Leave out of backups" and "Back up this folder" from the file manager | ☑ | see `git log` |
+| 142 | Whether the drive suits the backup | ☑ | see `git log` |
+| 143 | Time left, everywhere a backup or restore runs | ☑ | see `git log` |
+| 144 | Quiet hours for notifications | ☑ | see `git log` |
+| 145 | A warning when the backup drive is failing | ☑ | see `git log` |
+| 146 | Nautilus: a Flux Backup submenu | ☑ | see `git log` |
 
 ## Log
 
@@ -3228,3 +3261,789 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [ ] The all-backups table's Sentry cell still goes to the settings page
 - [x] USER_GUIDE, CHANGELOG; site guide rebuilt
 - [x] Checks: svelte-check, app tests, Vite build
+
+### Phase 114 — 1.2: Version 1.2 and the plan (2026-11-10)
+- [x] PLAN.md: *Toward 1.2: better for the one person at the desk*, Phases 114–125,
+      from the consumer-focused review of ideas; what the owner left out of 1.2 (two
+      drives that take turns, a cloud drive through rclone, moving a backup to a new
+      drive, the list of installed apps, translations)
+- [x] Version 1.2.0: workspace `Cargo.toml` (and `Cargo.lock`), `app/package.json`,
+      `app/package-lock.json`, `tauri.conf.json`; `flux --version` says 1.2.0
+- [x] CHANGELOG: an *Unreleased* section for 1.2
+- [ ] AppStream release entry, README status and the website's version labels wait for
+      Phase 125
+- [x] Checks: `cargo build`
+
+### Phase 115 — 1.2: Under the hood: sizes hidden by default, the threat model's words (2026-11-10)
+- [x] `VaultOptions::default()` has `hide_sizes: true`: `flux profile create --engine
+      vault`, a Back In Time import as a Vault, and the CLI's engine switch write
+      `hide_sizes = true`. The field's serde default stays `false`, so a profile file
+      that doesn't name it (every Vault profile from before 1.2) keeps it off
+- [x] The app: a new Vault (setup, a backup switched to Vault, another place stored as
+      a Vault) starts with *Hide file sizes* on; turning *Encrypt* off while setting up
+      turns it off with it (it only applies to encrypted Vaults)
+- [x] THREAT_MODEL.md: chunk boundaries are no longer said to hide a known file; it
+      names the two 2025 papers, says the reach to Flux isn't assessed, and that hidden
+      sizes take away the exact pack sizes. VAULT_FORMAT.md and the guide say what's
+      on by default; site guide rebuilt
+- [x] Test: a new Vault profile pads and says so in its file; a pre-1.2 file without the
+      key stays off. Checked end to end: `flux profile create --engine vault` writes
+      `hide_sizes = true` and validates
+- [ ] The assessment itself (reading both papers against what an observer of a Vault
+      sees) is not done; no chunker change
+- [x] CHANGELOG (Security)
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 116 — 1.2: Safe to unplug (2026-11-10)
+- [x] `schedule.release_drive` (off by default; written only when on); a warning when
+      neither the target nor a destination is a drive
+- [x] `flux_runner::release`: `plan` (from mountinfo and sysfs) finds the device to
+      unmount, the LUKS partition under a `dm-…` mapping to lock, and the whole disk to
+      power off (none while another filesystem of that disk is mounted); refuses drives
+      not mounted by the desktop (outside `/run/media`, `/media`), LVM and other
+      mappings, and network shares. `execute` runs `udisksctl unmount / lock /
+      power-off --no-user-interaction` (never a password prompt; `FLUX_UDISKSCTL` for
+      tests); unmounting is what counts, a failed lock or power-off leaves it unmounted
+- [x] The runner releases the main target's and local destinations' drives (each once)
+      after the run is recorded, webhooks sent and the restore test done, before the
+      shutdown-when-done decision; not for dry runs, stopped or skipped runs. An info
+      event (`Backup is unmounted and powered off: safe to unplug`) or a warning with the
+      reason; a notification either way when notifications are on
+- [x] The app: *Unmount the drive when done* under *When*, beside *Also when this drive
+      is plugged in*; the glance line says "unmounts the drive after"
+- [x] Tests: eight unit tests (a partition, a LUKS drive, a shared disk, a whole-disk
+      filesystem, refusals; the udisksctl calls in order, a busy drive, power-off
+      failing) and a runner test (a plain folder: backed up, left mounted, said why)
+- [ ] Not tried on a real USB drive (it would unmount the dev machine's drives), nor
+      in the built app; the toggle was type-checked only
+- [ ] A system backup (run as root) releases through udisks as root; its notification
+      goes nowhere, as all of a system backup's do
+- [x] USER_GUIDE (*Safe to unplug* under Automatic backups, the settings table and the
+      sample profile); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 117 — 1.2: Delete several snapshots at once (2026-11-10)
+- [x] Service call `delete_snapshots` (`Call::DeleteSnapshots`, Tauri command, `api.deleteSnapshots`,
+      the demo's mock): finds every id first (an unknown one fails before anything is
+      deleted), keeps pinned ones and lists them, deletes the rest in one `delete`, and
+      returns what went, what stayed and the bytes freed (Vaults)
+- [x] The snapshot list: Ctrl-click (⌘) adds a snapshot to a selection that starts from
+      the one shown, Shift-click takes a range, *Select several…* in a snapshot's menu
+      starts it for people who don't use modifier keys; while selecting, rows have a
+      check box and a plain click adds or removes; Esc or *Cancel* stops. The right side
+      shows how many, from when to when, which pinned ones stay, *Delete N…* with the
+      usual *Delete for good? Delete / Keep*; the toast says what went, what was kept
+      and the space freed
+- [x] `flux delete` already took several snapshots (CLI parity unchanged)
+- [x] No estimate of the space freed before confirming (the plan said so): for a Vault it
+      means reading every snapshot's data; the toast gives the real figure. PLAN.md says
+      this now
+- [x] Test: four snapshots, one pinned; an unknown id deletes nothing; three asked for
+      (one twice) delete two and keep the pinned one
+- [x] Looked at in headless Chrome against the demo: Ctrl-click then Shift-click selects
+      five, *Delete 5…*, confirm, the toast, 34 rows → 29
+- [ ] Not looked at in the built app (WebKitGTK), nor with a Vault (the demo's figures
+      are made up)
+- [x] USER_GUIDE (*Deleting by hand*, under What to keep); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 118 — 1.2: Sizes next to every folder (2026-11-10)
+- [x] Service call `folder_sizes` (Tauri command, `api.folderSizes`, the demo's mock): for
+      each path, the disk space it takes (blocks, not following links or crossing into
+      other filesystems); `~/` is the home folder; patterns (`*`, `?`, `[`, `!…`,
+      relative names like `node_modules/`) and missing paths get none. All share a 6 s
+      budget, each path an equal share of what's left; one not finished says `partial`
+      with what was counted. `du` (the suggestions' sizes) now uses the same walk
+- [x] `ListEditor` takes `sizes` and shows each beside its item ("≥ 384 GiB" when
+      partial, with a tooltip); the editor asks for the folders' and exclusions' sizes
+      half a second after the lists change, once per path while it's open
+- [x] Tests: folders and a single file measured, patterns, a re-include and a missing
+      path not; a count cut short says so; an unreadable start is `None`
+- [x] Looked at in headless Chrome against the demo: the exclusions show 5.8 GiB beside
+      `~/.cache/`, nothing beside `node_modules/` and `*.tmp`; the home folder "≥ 384 GiB"
+- [ ] Not looked at in the built app, nor for a system backup (its folders are measured
+      as the user, so root-only ones show nothing)
+- [ ] No CLI counterpart beyond what was there: `flux backup --dry-run` says what a
+      backup would copy; `du` does the rest
+- [x] USER_GUIDE (Choosing what to back up); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 119 — 1.2: Skip what a project's .gitignore ignores (2026-11-10)
+- [x] `sources.exclude_gitignored` (off by default; written only when on); a warning for
+      rsync and Borg backups, which don't read `.gitignore` files
+- [x] `flux_core::filter`: `GitScope` (a folder's `.gitignore` rules, then its parents'
+      up to the repository's top folder), `Filter::git_enter` (a folder with `.git`
+      starts afresh, one with `.gitignore` adds its rules, outside a working tree
+      nothing), `git_scope_of_dir` (the same read from the disk, for starting folders),
+      and `excluded_in`: hard excludes, then the profile's own patterns (a `!pattern`
+      keeps what a `.gitignore` ignores), then the `.gitignore` rules. `is_excluded` is
+      `excluded_in(None, …)`, so nothing changes with the switch off
+- [x] The scanner (Mirror, Vault, the size estimate) carries each folder's scope to its
+      subfolders; a source inside a working tree gets its parents' rules
+- [x] The rule tester: `Why::GitIgnored { file, line, at }`, "Left out: …/.gitignore
+      ignores it (.env), and this backup skips what .gitignore files ignore"; scopes are
+      cached per folder
+- [x] Exact restore: what the destination folder's `.gitignore` files ignore isn't
+      removed (it was never in the snapshot either); without the switch, as before
+- [x] The app: *Skip what .gitignore files ignore* under *Exclude Files/Directories*,
+      with what it means for files like `.env`; disabled for rsync and Borg
+- [x] Tests: the filter (top and subfolder files, `!` lines, a nested repository, a
+      `.gitignore` outside any repository, the backup's own `!pattern` first, off by
+      default), the scanner (a working tree and a source inside one), the rule tester
+      (file, line and the folder that decides), exact restore (ignored files stay; off,
+      they'd go). End to end: `flux backup` of a project kept `.git/`, `.gitignore`,
+      `main.rs` and left out `.env` and `target/`
+- [ ] `.git/info/exclude` and git's global excludes file aren't read (said in the guide)
+- [ ] Not looked at in the app (the switch was type-checked only)
+- [x] USER_GUIDE (Choosing what to back up, the sample profile); site guide rebuilt;
+      CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 120 — 1.2: Browse in Files (2026-11-11)
+- [x] `flux_service::browse`: `browse_in_files` runs `flux mount <id> <dir> --snapshot`
+      (the app's own `flux`, with the password the app holds) in
+      `<runtime>/browse/<profile>@<snapshot>`, waits for the mount (30 s; the mount's
+      last words if it fails), and returns where it is and what to open (the snapshot's
+      only source, else the mount). One at a time: another snapshot, `stop_browsing`, or
+      the app's `RunEvent::Exit` unmounts it (SIGINT, which `flux mount` answers by
+      unmounting; a busy one is detached with `fusermount3 -u -z`), and the folder is
+      removed. A mount left by an app that didn't quit cleanly is detached the next time.
+      `browsing` says what's open (and forgets one unmounted from outside). Refused for
+      system backups (root's files; the user's file manager couldn't read them)
+- [x] Tauri: `browse_in_files` mounts, then `xdg-open`s the folder as the user;
+      `browsing`, `stop_browsing`; the app's run loop now `build()`s and unmounts on exit
+- [x] The app: *Browse in Files* in a snapshot's ⋯ menu (not for system backups); a line
+      above the browser, "The snapshot of … is open in Files, read-only. Close"; a
+      locked Vault asks for its password first
+- [x] Test, for real (FUSE and the built `flux`; skipped without them): a snapshot mounted,
+      a file read through it, writing refused, another snapshot replacing it (the first
+      unmounted and its folder gone), Close, an unknown snapshot refused. Looked at in
+      headless Chrome against the demo: the menu, the line, Close
+- [ ] Not tried in the built app with a real file manager (Nautilus, Dolphin), nor with a
+      file manager window still open inside at Close (the lazy unmount is for that)
+- [ ] The app can't tell when a file manager window is closed: the mount stays until
+      Close, another snapshot or quitting (PLAN.md says so)
+- [x] CLI parity: `flux mount --snapshot` was there
+- [x] USER_GUIDE (*Browse in Files*, under Getting files back › In the app); site guide
+      rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 121 — 1.2: Previous versions from the file manager (2026-11-11)
+- [x] `flux-backup --previous-versions PATH` / `--restore-deleted FOLDER` (made
+      absolute). The session bus gains `Open (kind, path)`: a second copy started with a
+      request hands it to the running one (which shows its window) instead of
+      `Activate`; the first copy keeps it for the page (`take_open_request`, once) and
+      says `flux://open` when one arrives while running
+- [x] Service call `backup_for_path`: the backup whose folder holds the path most closely
+      (canonical paths), or none
+- [x] The page takes the request at start and on `flux://open`: no backup takes it →
+      "None of your backups takes …"; versions → the backup's Snapshots with the Versions
+      dialog (its *Restore…* opens the restore dialog); deleted → the newest snapshot,
+      opened at that folder with *Only deleted* on (`FileBrowser` gains `openAt` and
+      `onlyDeleted`)
+- [x] `packaging/linux/filemanagers/`: a nautilus-python extension (Nautilus 4.1/4.0/3.0
+      APIs; a file → *Previous versions…*, a folder adds *Restore deleted files here…*,
+      a folder's background both), two Nemo actions, two Dolphin service menus
+      (KF5/KF6). In the `.deb` and `.rpm` (`tauri.conf.json`) and `install.sh`; not in
+      the AppImage (it can't install system files)
+- [x] Tests: the session bus (an `Open` reaches the running copy and shows its window,
+      on a private bus); the closest backup for a path. Looked at in headless Chrome
+      against the demo (`?open=…` stands in for a file manager there): Versions of
+      `.bashrc`, *Only deleted (2)* in Documents, the message for a path no backup takes
+- [ ] Not tried in Nautilus, Nemo or Dolphin themselves, nor through the built app
+      (no file manager session here); the Python was only parsed
+- [ ] `desktop-file-validate` objects to the Dolphin files' `Type=Service`, `all/all`
+      and `Actions`, which is how KDE service menus are written
+- [ ] For something deleted before the newest snapshot, the person picks an older one
+      (the guide says so)
+- [x] Fixed on the way: Phase 116's fake `udisksctl` and Phase 120's `flux` wrapper were
+      written by the test process itself and once failed with "Text file busy" in a
+      full run; both are now created with `install`, as `flux_transport::testing` does
+- [x] USER_GUIDE (*From the file manager*, under Getting files back); site guide rebuilt;
+      CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (twice), svelte-check,
+      app tests (16), Vite build
+
+### Phase 122 — 1.2: A recovery code (2026-11-11)
+- [x] `flux_vault::crypto`: `new_recovery_code` (19 random bytes → 30 symbols of
+      Crockford's base32, 150 bits, `XXXXX-XXXXX-…`), `normalize_recovery_code` (any case,
+      spaces and dashes anywhere, O → 0, I and L → 1; exactly 30 symbols), `RECOVERY_LABEL`
+- [x] `VaultRepo::set_recovery_code`: one more key slot labelled "recovery code", written
+      without the unlock file (as a LUKS recovery key), with the Vault's hashing; an
+      earlier code's slot is removed. `remove_recovery_code`. Opening tries a recovery
+      slot with the typed text normalised, so a loosely typed code opens the Vault (in
+      Flux, the app and `flux-vault-recover`); no format change
+- [x] `flux key recovery <profile>` (`--remove`), with a man page; `flux key passwd`
+      after opening with the code keeps the code (it would have removed the slot in use)
+- [x] The recovery checklist: "There's a recovery code" / "No recovery code yet" for an
+      encrypted Vault (remembered when Flux makes or removes one), with *Make one…*
+- [x] Service call `recovery_code` (not for system backups: `sudo flux --system key
+      recovery`); `RecoveryCodeDialog`: what it is, *Make a recovery code*, the code once
+      (Copy; "I've written it down or kept it somewhere safe" enables Done), forgotten
+      when closed. Offered on the closing screen of a new encrypted Vault backup, under
+      *Security › Recovery code* (make a new one, remove), and from the checklist
+- [x] The note next to a Vault on a drive says a recovery code works when the password is
+      lost
+- [x] Tests: the code's shape and alphabet; opening with it exactly, in lower case without
+      dashes with O and l, with spaces; a new code replaces the old; removing it; the
+      password still works; it opens without the unlock file a password needs. The
+      checklist line. End to end with `flux`: made, opened with it typed loosely,
+      removed (then refused). Looked at in headless Chrome against the demo: the
+      Security section and the dialog with a code
+- [ ] Not looked at in the built app; the closing screen's offer was type-checked only
+- [ ] Strengthening or adding an unlock file while opened with the code re-makes the
+      code's slot with those settings (as for any password in use)
+- [x] USER_GUIDE (*A recovery code*, under Vault passwords; "no way to recover" now says
+      unless there's a code); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 123 — 1.2: A calm weekly "all good" (2026-11-11)
+- [x] `flux_service::weekly`: `all_good` (every backup of yours valid, its last run not
+      failed, a last good copy, and no health item at all, the same facts the app's
+      "Protected" and "to look at" come from) gives the note's text: how recent the newest
+      and oldest copies are, and when the last restore test passed; `maybe_send` sends it
+      ("Your backups are fine") when it's on and a week has passed since the last, and
+      remembers when (`<state>/weekly-note`); the first check only starts the week. Your
+      own backups only
+- [x] Checked when `flux backup --scheduled` ends (not dry runs), so it comes with the app
+      closed; costs a file read until a week is up
+- [x] `Settings::weekly_note_off` (so it's on unless turned off), `Preferences.weekly_note`,
+      `set_weekly_note`; *Preferences › Notifications › A weekly note when all is well*
+- [x] Tests: never backed up → nothing; backed up → the text; the first check starts the
+      week, nothing within it, nothing when turned off; durations in words; settings
+      round-trip
+- [ ] Not seen as a real notification (the test checks the text, not the pop-up), nor in
+      the app (the switch was type-checked)
+- [ ] A backup with restore tests on and none passed yet has a health item ("Not tested
+      lately"), so no note until one passes: by design, it isn't all good
+- [x] USER_GUIDE (*A weekly note when all is well*, under Keeping an eye on things); site
+      guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 124 — 1.2: Files copied whole, not half-written (left out, 2026-11-11)
+- [x] Looked at before building: `/home` here is a Btrfs subvolume owned by root (inode
+      256), the home folder an ordinary folder in it (inode 257), mounted without
+      `user_subvol_rm_allowed`. A user can't snapshot what root owns, nor delete a
+      non-empty snapshot without that option; so a home backup couldn't take one without
+      an administrator password, and a scheduled one can't ask
+- [x] Put to the owner, who chose to leave it out of 1.2; PLAN.md says why and what could
+      come later (system backups through a private mount namespace; home backups through
+      the helper with a polkit rule)
+- [ ] Nothing built
+
+### Phase 125 — Release 1.2 (2026-11-11)
+- [x] CHANGELOG: *Unreleased* became 1.2.0 (2026-11-11) with a summary of the release
+- [x] AppStream: a 1.2.0 release entry (`appstreamcli validate` passes)
+- [x] README: status 1.2 and *What 1.2 adds*; the website: version labels, a *New in 1.2*
+      row (1.1 and 1.0 below it), the guide page's labels; site guide rebuilt
+- [x] Screenshots retaken where the screens changed and looked at: Preferences (the weekly
+      note), the rule tester (rules-dark), the settings page
+- [x] `packaging/prepare-dist.sh`: release `flux` (1.2.0), 76 man pages (with
+      `flux-key-recovery`), static `flux-vault-recover`
+- [ ] Not built as `.deb`/`.rpm`/AppImage here (`npm run tauri build`); the packages' new
+      file-manager entries are in `tauri.conf.json` but not installed and tried
+- [ ] Publishing (tag `v1.2.0`, the public repository): only when the owner says so
+- [x] Checks: `cargo fmt`, clippy -D warnings, 427 Rust tests, svelte-check, app tests
+      (16), Vite build
+
+### Phase 126 — The window at the monitor's frame rate (taken out, 2026-11-11)
+- [x] Measured, on a 120 Hz monitor (WebKitGTK 2.54, Wayland, Radeon 680M), in a bare
+      WebKitGTK window showing the built app with demo data: 8 ms a frame idle, 17 ms
+      while a page scrolls (60 a second); with the hardware acceleration policy *never*,
+      8 ms while scrolling too, at 1200×780. A 600-row test page gave the same, also
+      maximized (1920×1080). The app's CSS wasn't the cause (no blur, no filters)
+- [x] First try, wrong: setting that policy on the window's webview at start
+      (`with_webview`). The release app came up as a black window; it had been checked
+      by its threads, never looked at. The owner found it
+- [x] `smooth_frames` in the app's `lib.rs` now starts the app again (`exec`, same
+      process id) with `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which WebKit reads before the
+      webview exists (8 ms while scrolling in the test window, as the policy gave);
+      `FLUX_GPU_RENDERING=1` leaves WebKit's default. No `unsafe`, no new dependency
+- [x] The release app looked at (a screenshot through the desktop portal): the window
+      draws, the variable reaches the web process, its compositor threads are gone
+- [ ] Frame times inside the release app itself not measured (its content security policy
+      keeps a test script out); not tried on a 4K or fractionally scaled screen. Programs
+      the app starts (a diff tool) inherit the variable
+- [x] Taken out the same day, at the owner's word: it worked (no lag, backups and diffs
+      fine), but a backup tool should draw the way WebKit and Tauri are tested to, and
+      that matters more than the frame rate. The code, the CHANGELOG entry and the
+      USER_GUIDE variable are reverted; the app is as 1.2.0 was. What was measured stays
+      above, for when WebKitGTK's own pacing is worth trying again
+- [x] Checks: `cargo fmt`, clippy, the app's Rust tests, Vite build; the code is 1.2.0's
+      to the byte (`git diff d52c4a5` shows only this file)
+- [ ] The rebuilt release app not looked at: the owner's copy of the earlier build was
+      running, so the new one handed over to it and left
+
+### Phase 127 — A Compact layout, the default (2026-11-11)
+- [x] Five refinement directions shown to the owner first as mock-ups in a page of their
+      own (demo data, nothing in the app changed): Settled, Graphite & ink, Quiet, Ledger,
+      Timeline. The owner chose Ledger, as *Compact*, with the current design kept as
+      *Full*, and Compact the default for existing installs too
+- [x] `app.layout` (`state.svelte.ts`): `loadLayout()` reads `flux.layout` from local
+      storage and is Compact unless it says `full`, so installs that never chose start
+      Compact; `setLayout()` stores it and sets `<html data-layout>`. Demo mode takes
+      `?layout=compact|full` for screenshots
+- [x] *Preferences › App › Layout*: Compact / Full, with a line saying what each does
+- [x] Sidebar (Compact): 272px, a backup on one line, name and `sideLabel()` (a word or
+      two: "21%", "Failed", "Low on space", a healthy backup's age). The name keeps its
+      whole width; the status gives way, down to 3rem; the whole status is in the title
+- [x] All backups (Compact): a column head and one row a backup (backup, last 30 days,
+      last good copy, next) from 800px of room, so the strips line up; narrower, the Full
+      rows, with their hairlines kept
+- [x] A backup's header (Compact): the view switcher on the title's line
+- [x] Overview (Compact): from 760px of room, *Settings at a glance* (one cell a line,
+      `SettingsGlance column`) and *Where it's kept* in a column on the right; the
+      place's status under its path there
+- [x] Rows a step shorter in Compact (44px, 8px block padding)
+- [x] Looked at in the demo app, dark and light, at 1200×780, 900×640 (the minimum: both
+      pages fall back to the Full arrangement) and 1600×1000; Full checked unchanged
+- [x] Tests: `sideLabel` for every status line `protection()` makes (17 app tests)
+- [x] Docs: DESIGN.md (*Two layouts*), USER_GUIDE (the layout), CHANGELOG *Unreleased*,
+      PLAN.md
+- [x] Checks: svelte-check (0 errors, 0 warnings), app tests, Vite build
+- [x] After the owner looked: in Compact, *Settings at a glance* starts open (its open
+      state is remembered apart from Full's, so closing it in Full doesn't close it here),
+      and the side column is wider, 18.5rem instead of 16.5rem, with a 24px gap, so values
+      such as the retention rules fit on one line. Checked in the demo app at 1200×780
+      and 1600×1000 with Full's glance stored as closed
+- [ ] Not looked at in the real app (WebKitGTK), only in Chrome with demo data
+- [ ] Screenshots in `docs/screenshots/` and on the website still show Full; retake them
+      in Compact at the next release
+- [ ] In the Compact sidebar, long status words are shortened ("Source m…", "Unusual
+      cha…") at 272px; the whole status is in the item's title and on the backup's page
+
+### Phase 128 — Compact's Overview on one screen (2026-11-11)
+- [x] The owner, after using Phase 127 on a real backup: the settings column is right, but
+      the left side is far too busy. The aim: the Overview fits the window
+- [x] The answer and the last 30 days in one card (40px glyph, 18px sentence, the chart
+      under a hairline; its caption moved to the chart's title)
+- [x] Recent backups in 36px rows; the restore test, *Usable without Flux* and the space
+      as rows of one flat list. The space row: free of size, a meter, how full; it opens
+      to the forecast and what the snapshots take (`SpaceCard flat`), and is open when the
+      drive fills within 60 days, as the chart was
+- [x] *Storage* (no space row, e.g. a drive not connected) folds to one line,
+      `StorageCard folded`; *Where it's kept* folds to "3 places · 1 failed last time"
+- [x] The header leaves out the informational tags on Compact's Overview (the settings
+      column says them); *on hold* and *system* stay. Snapshots and Activity keep them all
+- [x] *Settings at a glance* in Compact: label and value on one line, no chevron, so it
+      is about 40% shorter
+- [x] Compact's page bottom padding 24px
+- [x] Measured in the demo app at 1200×780: Home folder's Overview is 732px in a 732px
+      view (no scrolling; it was 1155px); Photo library 825px, the rest being its
+      *This Vault can be upgraded* notice. Looked at in dark and light, and at 900×640
+      (one column); Full unchanged (1845px, as before)
+- [x] Checks: svelte-check (0 errors, 0 warnings), app tests (17), Vite build, the design
+      detector (no findings)
+- [ ] Not looked at in the real app (WebKitGTK); the owner's backup (Vault, manual, one
+      place) not reproduced in the demo
+- [ ] Long glance values still wrap to a second line in the 18.5rem column ("7 daily ·
+      4 weekly · 12 monthly · 5 yearly")
+
+### Phase 129 — Compact, fitted and symmetrical (2026-11-11)
+- [x] Every Compact page measured at 1200×780 in the demo app (what scrolls, what's cut
+      off): All backups, with system backups unlocked, each backup's Overview, Snapshots,
+      Activity, Settings, Preferences, New backup, and a backup running
+- [x] The Overview's columns: a "Status" heading on the left in the style of *Settings at
+      a glance*, both 28px, so the first card and the first glance box start level
+      (166px, every backup measured); the glance's group titles are now the first line of
+      their boxes; the columns stretch and each one's last block sits at its foot, so they
+      end level (755px and 755px for Home folder, idle and running)
+- [x] A running backup's progress is in the answer card (`JobPanel inline`, the shutdown
+      choice at the end of the bar), not a full-width card above both columns, which had
+      pushed the page down and the columns out of line
+- [x] The answer card a step tighter (12.5px facts line on one line, the chart 32px tall
+      with `HistoryStrip low`, the ramp scaled), recent backups 34px rows, 16px between
+      sections: Home folder's Overview is 732px in a 732px view, idle and running
+- [x] The header's tags have a line of their own under the title's line in Compact (on
+      Snapshots and Activity the four had wrapped to two lines)
+- [x] All backups: 24px between sections and 24px at the foot (it was 9px over); the
+      *Next* column 10.75rem so "when its drive is connected" fits
+- [x] Activity's run list 19.5rem in Compact, so "Completed with problems" fits; the New
+      backup page's foot 24px (it was 12px over)
+- [x] The space row's glyph lines up with the restore test's above it
+- [x] Still scrolling, and meant to: a backup with Flux Sentry's warning, or with *This
+      Vault can be upgraded*; All backups with system backups listed too; Settings and
+      Preferences (long forms); the lists inside Snapshots and Activity
+- [x] Looked at in dark and light, 1600×1000 (columns end level) and 900×640 (one column)
+- [x] Checks: svelte-check (0 errors, 0 warnings), app tests (17), Vite build, the design
+      detector (no findings)
+- [ ] Not looked at in the real app (WebKitGTK)
+
+### Phase 130 — Shorter values in Settings at a glance (2026-11-11)
+- [x] In Compact's side column a value is shown in full while it fits its line, and in its
+      short form when it doesn't (`tight`, measured with a ResizeObserver on the cell and
+      again once the fonts are in); the full wording stays for screen readers and is in
+      the cell's tooltip, with the detail after it
+- [x] New short forms in `glance.ts`: *Excluded* and *Network* and *Other copies* cut to
+      their first part(s) and "+N"; *Restore tests* ("Each backup · 1% damage");
+      *Password* with an extra ("Keyring + unlock file"); *Notifications* with webhooks
+      ("Desktop + 2 webhooks"). The All backups settings table, which already used
+      `short`, uses them too
+- [x] Measured in the demo at 1200 and 1600 wide: no glance value on two lines (Home
+      folder: *Keeps* "7d · 4w · 12m · 5y", *Restore tests* "Monthly · 1% damage"; the
+      rest in full). Full's grid unchanged
+- [x] Checks: svelte-check (0 errors, 0 warnings), app tests (18, one new), Vite build,
+      the design detector
+
+### Phase 131 — The desktop's accent colour (2026-11-11)
+- [x] The app reads `org.freedesktop.appearance accent-color` from the XDG settings portal
+      (`ReadOne`, or `Read` on portals before version 2) and watches `SettingChanged`,
+      emitting `flux://accent` (`session::accent`, `session::watch_accent`, command
+      `desktop_accent`); out of range or no portal: none. Read on this desktop: teal
+      (0.129, 0.565, 0.643)
+- [x] `lib/accent.ts`: `primary`, `on-primary`, `accent` and `chart` made from it per
+      theme, the hue kept and the lightness moved (OKLCH, the chroma lowered to stay in
+      gamut) only as far as needed to be as strong as Flux's blue (white on the fill
+      4.8:1, text 5.3:1 on groups and shell, chart 4.5:1), checked as written (#rrggbb)
+- [x] *Preferences › App › Accent colour*: *The desktop's* (default) or *Flux blue*, each
+      with a swatch; kept on this computer (`flux.accent`); the line under it says when
+      the desktop gives no accent. The demo takes `?accent=rrggbb`
+- [x] Tests: Rust (the portal's value, wrapped or not, out of range); app (GNOME's nine
+      accents and six others readable everywhere in both themes, a readable colour left
+      as it is, the hue kept)
+- [x] Looked at in the demo: teal (dark, light), orange (Preferences), purple (light), none
+- [x] Checks: cargo clippy (no warnings), cargo test (session), svelte-check (0, 0), app
+      tests (22), Vite build, the design detector
+- [ ] Not looked at in the real app (WebKitGTK), nor with KDE's portal
+
+### Phase 132 — Text size (2026-11-11)
+- [x] *Preferences › App › Text size*: Small (90%), Default, Large (115%), each with an
+      "A" at its size; kept on this computer (`flux.textSize`), applied at start
+- [x] Command `set_text_size`: zooms the webview (`WebviewWindow::set_zoom`, 0.75–1.5) and
+      sets the window's smallest size to 900×600 times it, so a layout has the room it
+      had. No new capability (the command does it, not the webview API)
+- [x] The demo zooms `<html>` (CSS `zoom`) in its place: at Large in a 1380×897 window
+      the Overview is the Default one at 1200×780 (732 of 732, no scrolling), nothing
+      overflows; Small at 1200×780 has room to spare
+- [x] Checks: cargo clippy (no warnings), cargo fmt, svelte-check (0, 0), app tests (22),
+      Vite build, the design detector
+- [ ] Not looked at in the real app (WebKitGTK's zoom), with the window's minimum
+
+### Phase 133 — Sections at the side of Settings and Preferences (2026-11-11)
+- [x] `SectionNav`: a sticky list of a page's sections; the one in view is marked as the
+      page scrolls (the last whose top is within 96px of the view's, or the last at the
+      bottom), a click scrolls to one (smooth unless motion is reduced) and moves focus
+      into it; a folded section is opened first (`onopen`, then a tick)
+- [x] A backup's Settings (Name, What to back up, Where to keep it, Other copies, When,
+      What to keep, More) and Preferences (Scheduled backups, Notifications, App,
+      Advanced, which opens) in Compact, from 800px of page width (container query);
+      the page 880px wide, the title and the Settings header over both columns. Full,
+      the wizard and the section dialogs unchanged
+- [x] Measured in the demo at 1200×780: the list starts level with the first section
+      (154/154 Settings, 150/150 Preferences); *When* and *Advanced* clicked land there
+      and are marked; at 900×640 no list and the page as before
+- [x] Checks: svelte-check (0, 0), app tests (22), Vite build, the design detector
+
+### Phase 134 — Buttons on desktop notifications (2026-11-11)
+- [x] `desktop::notify_with`: a notification with buttons, sent over the runner's own
+      session-bus connection (the server tells that connection of a click) when the
+      server lists `actions`; "default" (a click on it) and *Open* open the backup,
+      *Try again* runs it again; `desktop-entry: flux-backup`. Otherwise as before
+- [x] Only in a process that answers them (`enable_actions`): `flux backup --scheduled`,
+      and runs the app starts (`FLUX_NOTIFY_ACTIONS=1`). `flux backup` in a terminal or
+      a script never waits
+- [x] At the end of such a run, `desktop::follow_up` waits up to 10 minutes
+      (`FLUX_NOTIFY_WAIT`) or until its notifications are closed. *Try again* re-runs
+      the same command in the process's place (`exec`), so a scheduled run stays its
+      timer's; *Open* asks the running app over D-Bus (`Open("backup", id)`), or starts
+      `flux-backup --show-backup ID` with `systemd-run --user` so it outlives the run's
+      service (a plain detached start without systemd-run)
+- [x] With buttons: failed and finished with problems, a place failed (*Try again*,
+      *Open*); unusual changes, on hold, a failed restore test, the monthly check's
+      problems or repairs (*Open*). The rest plain (safe to unplug, shutting down, a
+      scheduled success)
+- [x] The app: `--show-backup ID` and the `Open` request "backup" open that backup's
+      Overview
+- [x] Test on a private bus with a stand-in notification server: no buttons until a
+      process answers them; *Try again* and a click on the notification come back with
+      the backup; closed, the run ends at once. The unit test never notifies on the
+      desktop's bus (a first run of it did show one "Backup failed" there). The CLI tests
+      set `FLUX_NOTIFY_WAIT=0`: a scheduled test run had waited for a click (and shown its
+      notification on the desktop, as the CLI tests' failed runs always have)
+- [x] The plan said *Low space* offers *Open*: there's no low-space desktop notification
+      (only a webhook), so none was added
+- [x] Checks: cargo fmt, clippy (no warnings), tests (runner 69, CLI 6 + 36, service,
+      app backend, app 22), svelte-check (0, 0), Vite build
+- [ ] Not tried on the real desktop's notification server (GNOME, KDE): a click reaching
+      a scheduled run, and the app started by systemd-run
+
+### Phase 135 — Undo after deleting snapshots (2026-11-11)
+- [x] Confirming a deletion (one snapshot, or several) takes them out of the list at once
+      and deletes them 8 seconds later (`UNDO_MS`, `app.deleteSoon`); a bar above the
+      toasts says "Deleting N snapshots" with *Undo* and a line running out; Ctrl+Z
+      undoes too (not while typing; listed under the shortcuts). Then the usual toast
+      (how much was freed, pinned ones kept)
+- [x] The deletion waits in the app's state, so moving to another backup or page doesn't
+      stop it; a second deletion finishes the one waiting first. The list leaves out a
+      waiting snapshot when it's read again; *Undo* reads it again
+- [x] Departure from the plan: if the app quits while a deletion waits, nothing is
+      deleted (the plan said leaving finishes it). Kept the safe way round: a quit can't
+      be relied on to finish a call, and keeping snapshots asked to go loses nothing
+- [x] The confirmation stays ("Delete for good?"); `flux delete` unchanged
+- [x] Tried in the demo: delete, Ctrl+Z (back in the list), delete and wait (deleted,
+      toast)
+- [x] Checks: svelte-check (0, 0), app tests (22), Vite build, the design detector
+
+### Phase 136 — A preview before restoring (2026-11-11)
+- [x] `preview_file` (service call, the app's command, the helper protocol's name): a file
+      of a snapshot copied out read-only (`copy_out`) up to 32 MB, read, and the copy
+      removed. Pictures by name (PNG, JPEG, GIF, WebP, BMP, AVIF, ICO, SVG shown as an
+      `<img>`, so no script runs) as a `data:` URL; text (no NUL, UTF-8 short of a cut
+      character) as its first 400 lines or 64 KiB, cut after a line; anything else, a
+      folder, or too large: details only. System backups: not previewed (root's files),
+      as with opening a copy
+- [x] `PreviewDialog`: the path, size and the snapshot's time; the picture (fitted, 60vh),
+      the text (mono, scrolling), or a note; *Versions…*, *Open a copy*, *Restore…*. A
+      locked Vault asks for its password and goes on
+- [x] The file browser: an eye button beside *Restore* on a file's row (on hover or
+      focus), *Preview* first in a file's menu (Space shown), Space on a file's name;
+      Enter opens a copy. Symlinks have none
+- [x] Tests: the text and picture rules; a Mirror backup previewed end to end (text,
+      picture, other, a folder; no copy left in the cache)
+- [x] Looked at in the demo (dark, light): a picture, a text file, a file without one
+- [x] Checks: cargo fmt, clippy, flux-service tests, svelte-check (0, 0), app tests, Vite
+      build, the design detector
+
+### Phase 137 — What the last backup changed (2026-11-11)
+- [x] Each of the Overview's recent backups says what it changed, from its run's counts
+      (`lib/changes.ts`): "214 new · 38 changed · 2 deleted" in Full, `+214 ~38 −2` in
+      Compact (the words cut off there at 1200 wide), the words in the title and for
+      screen readers; "No changes" when there were none; a failed run keeps its error
+- [x] A click opens the comparison (`CompareDialog`) with the snapshot of the backup
+      before it in the list, or that snapshot on the Snapshots tab when there's none
+      listed
+- [x] Every recent backup rather than only the last: the same row, no extra height
+- [x] Measured in the demo: Home folder's Compact Overview still 732 of 732 at 1200×780,
+      nothing cut off at 1200 or 900; Full unchanged in height
+- [x] Checks: svelte-check (0, 0), app tests (24, two new), Vite build, the design
+      detector
+
+### Phase 138 — A sidebar that folds into a row of icons (2026-11-11)
+- [x] Asked by the owner during Phase 136: the sidebar folds to a small vertical toolbar,
+      animated, with beautiful icons
+- [x] Folded (64px): every item keeps its place and height; words fade, the width eases
+      (260ms) and the status glyphs cross-fade to icons of what each backup backs up
+      (`backupIcon`, by its first folder: home, documents, pictures, music, mail, code,
+      videos, system, the whole disk, else a folder) with a status dot; All backups,
+      New backup and Preferences as plain icons; the section heads a short rule; the
+      pause notice its glyph. Every icon centred at 32px (measured)
+- [x] A label on pointing (350ms) or keyboard focus (`lib/tip.ts`): the name and status;
+      the items' own titles are left out while folded
+- [x] The title bar's sidebar button (`aria-pressed`) and F9, listed in the shortcuts;
+      kept as `flux.sidebar`; reduced motion: no transitions
+- [x] New icons: image, music, mail, code, film, document, sidebar
+- [x] Tests: the icon rule (13 cases). Looked at in the demo: dark while backing up,
+      light with system backups, Compact and Full, mid-transition, reopened with F9
+- [x] Checks: svelte-check (0, 0), app tests (25), Vite build, the design detector
+
+### Phase 139 — Checked in the real app, screenshots (2026-11-11)
+- [x] Screenshots retaken in Compact (the default) from the demo with `site/shots.mjs`:
+      the 25 in docs/screenshots (and the site's copies) and the website's WebP shots
+      and crops, the clock at 4 PM. Two shots adapted to Compact: *space-dark* opens the
+      space row and its forecast (the crops: the opened row, and the 30-day chart in the
+      answer card); *rules-dark* clicks folders only inside the dialog (it had clicked
+      the sidebar's "Projects (rsync)"). The site's `<img>` sizes set from the new files
+- [x] Looked at: Overview (running), space, All backups' settings, the rules dialog,
+      the two crops
+- [ ] **Not looked at in the real app window (WebKitGTK).** Tried WebKitGTK's own
+      MiniBrowser (the same webkit2gtk 2.54 the app uses) under WebKitWebDriver on a
+      hidden GTK Broadway display, so nothing would open on the owner's screen: Broadway
+      gave a 0×0 screen without a real viewer, so no usable window. Left for the owner:
+      `cargo tauri dev` (or the built app) and a look at Compact, the folded sidebar,
+      text size Large, the desktop's accent, a notification's buttons
+
+### Phase 140 — A lost password, after the recovery code (2026-11-11)
+- [x] The unlock dialog's foot (Vaults, not Borg): "Forgot the password? Paste the
+      recovery code in its place to unlock."
+- [x] `unlock` answers `{recovery_code}`: whether the key slot that opened the Vault is
+      the recovery code's (`VaultRepo::opened_by_recovery_code`)
+- [x] Then the dialog asks for a new password, with no Close, Cancel or Escape (Modal's
+      new `required`). With several passwords, a list of which stop working (all ticked);
+      with one, "The old password stops working"
+- [x] `replace_password` (service, `security.rs`): only after opening with the code,
+      and opened with what the app was given, not the profile's keyring or key file
+      (which may still hold the lost password: a test caught it). Adds the new password
+      (with the unlock file when the profile has one and it's there; when it's gone, the
+      new password works without it and the profile stops naming it), makes a new
+      recovery code, then removes the chosen slots: something always opens the Vault.
+      Keeps the new password in the keyring or rewrites the key file (0600, moved into
+      place); a command can't be changed, so the app says so. A system backup gets no new
+      code from the app (root makes it: the toast gives the command)
+- [x] The new code shown once (`RecoveryCodeShown`, shared with the recovery code
+      dialog), wrapping only in the middle, three groups a line
+- [x] Not done, on purpose: re-encrypting the backups (see the plan)
+- [x] Tests: two in flux-service (the whole way with an unlock file, a spare kept, the
+      file then gone; a key file rewritten); the demo walked through in both themes
+
+### Phase 141 — "Leave out of backups" and "Back up this folder" from the file manager (2026-11-11)
+- [x] Service (`folders.rs`): `folder_plan` says, for a path, what each backup would
+      change, using the rule tester's verdict (`coverage::explain`). Leaving out: every
+      backup that takes it gets a rule naming just it (`~/x/` or `/x`, gitignore
+      characters and trailing spaces escaped), or loses the folder when it's one of its
+      folders; a backup it's the only folder of is left alone. Backing up: added to the
+      folders (those inside it dropped), or the rule naming exactly it removed; left out
+      by a broader rule, the size limit, a marker or another disk: said, not changed.
+      A path spelled through a link (`/var/home/me` for `/home/me`) is matched as the
+      backup spells its folders
+- [x] `apply_folder_change` works the changes out again (the page sends only ids) and
+      saves through `save_profile_impl`, so they're validated like an edit
+- [x] App: `flux-backup --leave-out PATH`, `--back-up FOLDER` (the session bus passes
+      them to a running copy, as Phase 121's); `FolderChangeDialog` over whatever shows:
+      leaving out, a ticked list with each rule; backing up, a choice of backup or *A new
+      backup* (the guide opens with that folder, from the usual settings). The main
+      button takes focus once the dialog has loaded
+- [x] Menus: Nautilus shows *Leave out of backups…* on what a backup takes and *Back up
+      this folder…* on a folder none takes (it reads the profiles' folders with
+      `tomllib`, again only when the profiles folder changes; Python before 3.11: both).
+      Nemo actions and Dolphin service menus for both. In the `.deb`, `.rpm` and
+      `install.sh`
+- [x] CLI: `flux profile leave-out PATH [--only ID]`, `flux profile add-folder ID PATH`:
+      what changes, then a question (`--yes`); manual pages
+- [x] Tests: five in flux-service (rules added to every backup that takes it, the
+      neighbours still taken, a second ask finds nothing; a folder dropped, not the only
+      one; a folder added in place of one inside it; only a rule naming the folder
+      removed; escaping). The Nautilus choice with a stand-in `gi` (taken, not taken, a
+      file, `docsx` beside `docs`). The CLI against a scratch config. Both dialogs looked
+      at in headless Chrome against the demo (`?open=exclude:…`, `include:…`), dark and
+      light
+- [ ] Not tried in Nautilus, Nemo or Dolphin themselves, nor in the built app (as for
+      Phase 121)
+- [x] USER_GUIDE (*Leave out or add from the file manager*, under Choosing what to back
+      up; a pointer from *From the file manager*); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (438), svelte-check (0, 0),
+      app tests (25), Vite build
+
+### Phase 142 — Whether the drive suits the backup (2026-11-11)
+- [x] `target_check::filesystem_of`: the mounted filesystem of a path; `fuseblk`
+      (ntfs-3g, exfat-fuse) looked up in udev's database (`ID_FS_TYPE`) by the device's
+      major:minor. The drive list uses it too
+- [x] `filesystem_fit(fs, engine)`: plain folders (Mirror, rsync) on FAT32 or exFAT, in
+      words (every snapshot a full copy, links and permissions lost, FAT32's 4 GB), with
+      what to do (a Vault, or ext4); NTFS a milder note (owners and permissions). Vault and
+      Borg: nothing, they keep all that in their own files
+- [x] Said in: `Profile::validate_in` (so the editor under *Where*, the review, and
+      `flux profile create/validate/show`); the Overview as a warning (`filesystem`,
+      "Drive's format") for FAT32 and exFAT only, not while the drive is unplugged;
+      `flux check` as a note; the new-backup guide's drive rows ("FAT32: plain-folder
+      backups would copy everything every time here. A Vault suits it."), only while the
+      backup would make plain folders and only on drives not yet chosen (the full
+      warning is under the list)
+- [x] A Mirror copy that fails with `EFBIG` says "too big for this drive: FAT32 holds no
+      file of 4 GB or more (…)" instead of "File too large"
+- [x] Tests: three in flux-core (which engine and filesystem get what; `EFBIG` in words;
+      a temporary folder's filesystem is known). The guide's drive step looked at in the
+      demo (its USB stick is FAT32), dark and light, before and after choosing it
+- [ ] Not tried on a real FAT32, exFAT or NTFS drive (mounting one here would go through
+      udisks on the owner's desktop): the udev lookup and the `EFBIG` path are covered
+      by unit tests only
+- [x] USER_GUIDE (*An external drive*: the drive's format); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (441), svelte-check (0, 0),
+      app tests (25), Vite build
+
+### Phase 143 — Time left, everywhere a backup or restore runs (2026-11-11)
+- [x] `Progress`: the copy rate is an exponential moving average over time (20 s memory,
+      worked out at most once a second, seeded with the average so far, reset with each
+      phase), so it doesn't depend on how often anyone looks; the time left follows it.
+      Before, it was the average since copying began
+- [x] `time_left_words` (flux-core) and `timeLeft` (the page, `lib/timeleft.ts`): "less
+      than a minute left", "about 6 minutes left", "about 1 hour 10 minutes left"; a
+      short form for narrow columns ("6 min left")
+- [x] The tray's tooltip: "Flux Backup: backing up · 21% · about 6 minutes left" (several:
+      "2 backups running"), set only when the words change; the icon as before
+- [x] The restore dialog: speed and time left. The progress panel: the words instead of
+      "5m 23s left". All backups: the time left under *Backing up now* (Full), in the
+      *Next* column (Compact). The sidebar: in the item's title and folded label
+- [x] The demo's running backup says minutes, as a real one of its size would
+- [x] Tests: the smoothing (follows a change within a minute, the same however often it's
+      looked at, a dip of a few seconds doesn't swing it); time left only while copying;
+      the words, in Rust and on the page; the tooltip. All backups looked at in the demo
+      while backing up, Compact (dark) and Full (light)
+- [ ] The CLI's progress bar keeps indicatif's own estimate
+- [x] USER_GUIDE (the tray; *How long is left*); site guide rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (445), svelte-check (0, 0),
+      app tests (27), Vite build
+
+### Phase 144 — Quiet hours for notifications (2026-11-11)
+- [x] `settings.toml` `[quiet_hours] from/to` ("HH:MM", local time; past midnight when
+      `to` is earlier); `Settings::quiet_now` (jiff's local zone, so scheduled runs with
+      the app closed follow it)
+- [x] Held in quiet hours: a scheduled backup's success notification, and the weekly note
+      (not marked sent, so the first check after them sends it). Every other
+      notification is unchanged: failures, finished with problems, unusual changes and
+      backups on hold, failed restore tests, what monthly checks found, safe to unplug,
+      the drive still in use, shutting down
+- [x] `set_quiet_hours` (service, app); refused when start and end are the same.
+      *Preferences › Notifications › Quiet hours*: a switch (10 PM to 8 AM when turned
+      on) and two time fields, "the next morning" when it goes past midnight
+- [x] The demo's preferences gained `quiet_hours` and the `weekly_note` it was missing
+- [x] Tests: past midnight and within a day, the start counting and the end not, invalid
+      times; kept, refused unchanged, turned off. Looked at in the demo (light)
+- [ ] No CLI for preferences (there wasn't one before): `settings.toml`, as the guide says
+- [x] USER_GUIDE (*Quiet hours*, under Keeping an eye on things); site guide rebuilt;
+      CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (447), svelte-check (0, 0),
+      app tests (27), Vite build
+
+### Phase 145 — A warning when the backup drive is failing (2026-11-11)
+- [x] `flux_runner::drive_health`: the whole disk under a place (`release::disk_of`, through
+      LUKS), then udisks on the system bus (`Properties.GetAll`, no password): the
+      Block's `Drive`; the Drive's vendor, model and id; `Drive.Ata` (`SmartFailing`,
+      `SmartNumBadSectors`, once `SmartUpdated`) or `NVMe.Controller`
+      (`SmartCriticalWarning`). Nothing there: the drive reports nothing
+- [x] What was seen is kept per place (`state/drive-health/<id>[+<dest>].json`): bad
+      sectors against those seen first (only growth counts, said for 30 days after it
+      grows), another drive in its place starting afresh, and what was last notified
+- [x] Said: failing, spare space running out, no longer reliable (NVMe degraded,
+      read-only, backup power) as danger; bad sectors growing, too hot as warnings.
+      After every backup that reached its places (before a drive is released): in the
+      log, and a notification once per new finding (with *Open*; never held for quiet
+      hours). On the Overview and in the status (`drive_failing`, "Drive's health").
+      The space card: what was seen last, or "can't tell". `flux check`: asks the drive
+      at once and says the same, or that it reports nothing
+- [x] Tests: bad sectors (old ones aren't news, growth is, it fades after a month, failing
+      outranks it, a new drive starts afresh); NVMe warnings and drives that say nothing;
+      udisks object names; reading from a stand-in udisks on a private bus. The property
+      names checked against the real udisks with `busctl`, and this computer's disk read
+      through the real path (an ignored test: an NVMe drive under LUKS, no warnings).
+      The space card looked at in the demo
+- [ ] Not seen with a drive that really reports SMART trouble, nor through a USB
+      enclosure that passes SMART on
+- [x] USER_GUIDE (*When the drive starts to fail*, under An external drive); site guide
+      rebuilt; CHANGELOG
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (451), svelte-check (0, 0),
+      app tests (27), Vite build
+
+### Phase 146 — Nautilus: a Flux Backup submenu (2026-11-11)
+- [x] Asked by the owner after trying the 1.2 package: Nautilus's right-click menu has one
+      *Flux Backup* entry, with *Previous versions…*, *Restore deleted files here…*,
+      *Leave out of backups…* or *Back up this folder…* under it (`Nautilus.Menu`,
+      `MenuItem.set_submenu`), on files, folders and a folder's empty space
+- [x] Tested with a stand-in `gi` (the submenu and what's in it for a taken folder, a file,
+      a folder's background; nothing for two files)
+- [ ] Not tried in Nautilus itself (nautilus-python isn't installed here). Nemo and Dolphin
+      unchanged
+- [x] USER_GUIDE (where the items are in Nautilus); site guide rebuilt; CHANGELOG
+
+### Phase 147 — Release 1.2, again: the docs and screenshots (2026-11-11)
+- [x] 1.2.0 was never published, so what came after Phase 125 (Phases 126–146) ships in
+      it: CHANGELOG's *Unreleased* folded into 1.2.0 with a new summary (Compact, preview,
+      undo, notification buttons, quiet hours, a failing drive); the compare link for
+      1.2.0; *Full* is "the layout of 1.1 and before" (and in `state.svelte.ts`)
+- [x] AppStream 1.2.0 entry extended (`appstreamcli validate` passes); README *What 1.2
+      adds* and the captions of the space and Preferences shots; the website's *New in
+      1.2* chips, the hero's alt text (21%, the time left, settings at a glance), the
+      space crop's size (1096×731) and caption. Site guide rebuilt (unchanged)
+- [x] Screenshots retaken from the demo with `site/shots.mjs` (Compact, 4 PM): changed
+      and looked at were the Overview dark and light (time left), space (the drive's
+      health), Preferences (quiet hours), and the site's `running` and `d-space`. The
+      site's other PNG copies differed only in metadata (pixel-identical) and were left
+- [x] Checks: `cargo fmt`, clippy -D warnings, the Rust tests (451), svelte-check (0, 0),
+      app tests, Vite build

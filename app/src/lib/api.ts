@@ -3,6 +3,13 @@
 // reviewed without the Rust side.
 
 import {
+  type Browsing,
+  type FolderApplied,
+  type FolderPlan,
+  type FolderWant,
+  type FilePreview,
+  type Replaced,
+  type Unlocked,
   ApiError,
   type ApiErrorCode,
   type CheckSummary,
@@ -90,7 +97,10 @@ export const api = {
   /** `filter`: only names containing it; `missing`: only what isn't on the computer any more. */
   listDir: (id: string, snapshot: string, path: string, filter: string | null = null, missing = false) =>
     call<Listing>("list_dir", { id, snapshot, path, filter, missing }),
-  unlock: (id: string, password: string, create = false) => call<void>("unlock", { id, password, create }),
+  unlock: (id: string, password: string, create = false) => call<Unlocked | null>("unlock", { id, password, create }),
+  /** After unlocking with the recovery code: a new password in place of the lost ones
+   * (`remove`: their key slots), and a new recovery code. */
+  replacePassword: (id: string, password: string, remove: string[]) => call<Replaced>("replace_password", { id, password, remove }),
   /** Keep the unlocked Vault password in a root-only key file, for scheduled backups. */
   saveKeyFile: (id: string) => call<string>("save_key_file", { id }),
   /** While setting a backup up: create its encrypted repository now with this password
@@ -130,6 +140,8 @@ export const api = {
   suggestId: (name: string, system = false) => call<string>("suggest_id", { name, system }),
   retentionPreview: (id: string, retention: Profile["retention"]) => call<PreviewRow[]>("retention_preview", { id, retention }),
   excludeSuggestions: (sources: string[]) => call<Suggestion[]>("exclude_suggestions", { sources }),
+  /** How much each folder holds (`partial`: at least that; counting stopped at the time limit). */
+  folderSizes: (paths: string[]) => call<{ path: string; size: number | null; partial: boolean }[]>("folder_sizes", { paths }),
   drives: () => call<Drive[]>("drives"),
   testTarget: (profile: Profile, system = false) => call<TargetTest>("test_target", { profile, system }),
 
@@ -153,6 +165,22 @@ export const api = {
     }),
   /** Bytes freed (Vault, Borg), or `null` (Mirror, rsync: folders simply go). */
   deleteSnapshot: (id: string, snapshot: string) => call<number | null>("delete_snapshot", { id, snapshot }),
+  /** Mount a snapshot read-only and open it in the file manager (one at a time). */
+  browseInFiles: (id: string, snapshot: string) => call<Browsing>("browse_in_files", { id, snapshot }),
+  /** A file manager's request (a path), or a notification's *Open* (`backup`: an id). */
+  takeOpenRequest: () => call<{ kind: "versions" | "deleted" | "exclude" | "include" | "backup"; path: string } | null>("take_open_request"),
+  /** The backup that takes a path, if any. */
+  backupForPath: (path: string) => call<string | null>("backup_for_path", { path }),
+  /** What each backup would change to leave out (or take) a path. */
+  folderPlan: (path: string, want: FolderWant) => call<FolderPlan>("folder_plan", { path, want }),
+  /** Make that change in backups `ids`. */
+  applyFolderChange: (path: string, want: FolderWant, ids: string[]) => call<FolderApplied>("apply_folder_change", { path, want, ids }),
+  /** What's open in the file manager, if anything. */
+  browsing: () => call<Browsing | null>("browsing"),
+  /** Unmount what's open in the file manager. */
+  stopBrowsing: () => call<null>("stop_browsing"),
+  /** Delete several snapshots; pinned ones are kept and listed. */
+  deleteSnapshots: (id: string, snapshots: string[]) => call<{ deleted: string[]; pinned: string[]; freed: number | null }>("delete_snapshots", { id, snapshots }),
   compare: (id: string, old: string, newer: string | null) => call<Comparison>("compare", { id, old, new: newer }),
   runs: (id: string, limit = 100) => call<RunRecord[]>("runs", { id, limit }),
   runEvents: (id: string, runId: string) => call<LoggedEvent[]>("run_events", { id, runId }),
@@ -165,6 +193,8 @@ export const api = {
   saveRecoveryKit: (id: string, dir: string) => call<string[]>("save_recovery_kit", { id, dir }),
   /** Copy a file out of a snapshot and open it in its usual program; returns the copy. */
   openFile: (id: string, snapshot: string, path: string) => call<string>("open_snapshot_file", { id, snapshot, path }),
+  /** A look at a file in a snapshot before restoring it. */
+  previewFile: (id: string, snapshot: string, path: string) => call<FilePreview>("preview_file", { id, snapshot, path }),
   /** Compare `path` in snapshot `oldSnap` with `newSnap`, or with the file now (null). */
   diffFile: (id: string, path: string, oldSnap: string, newSnap: string | null) => call<FileDiff>("diff_file", { id, path, old: oldSnap, new: newSnap }),
   /** Open two files in the comparison program chosen in the preferences. */
@@ -186,10 +216,18 @@ export const api = {
   setAutostart: (on: boolean) => call<void>("set_autostart", { on }),
   /** Keep the app in the tray when its window is closed (or quit). */
   setCloseToTray: (on: boolean) => call<Preferences>("set_close_to_tray", { on }),
+  /** The weekly "all good" notification, on or off. */
+  setWeeklyNote: (on: boolean) => call<Preferences>("set_weekly_note", { on }),
+  /** Quiet hours, or `null` for none. */
+  setQuietHours: (q: { from: string; to: string } | null) => call<Preferences>("set_quiet_hours", { from: q?.from ?? null, to: q?.to ?? null }),
   /** The next runs of a calendar expression (ISO times); rejects one Flux can't read. */
   calendarPreview: (expr: string) => call<string[]>("calendar_preview", { expr }),
   /** Is the app's icon shown in a system tray? */
   trayAvailable: () => call<boolean>("tray_available"),
+  /** The desktop's accent colour (red, green, blue, 0–1), if it has one. */
+  desktopAccent: () => call<[number, number, number] | null>("desktop_accent"),
+  /** The whole interface at this scale (1 = 100%), the window's smallest size with it. */
+  setTextSize: (scale: number) => call<void>("set_text_size", { scale }),
   find: (id: string, query: string) => call<FindResult>("find", { id, query }),
   versions: (id: string, path: string) => call<Version[]>("versions", { id, path }),
   estimate: (profile: Profile, system = false) => call<Estimate>("estimate", { profile, system }),
@@ -200,6 +238,8 @@ export const api = {
   about: () => call<About>("about"),
   /** A Vault's passwords, their hashing and unlock file (lists keys even while locked). */
   vaultSecurity: (id: string) => call<VaultSecurity>("vault_security", { id }),
+  /** Make a recovery code (returned, shown once), or with `remove`, remove it. */
+  recoveryCode: (id: string, remove = false) => call<string | null>("recovery_code", { id, remove }),
   /** Hash the password in use again with this strength (needs the Vault unlocked). */
   strengthenKey: (id: string, hashing: PasswordHashing) => call<void>("strengthen_key", { id, hashing }),
   /** Require an unlock file (`create`: a new one at `path`), or stop (`path: null`). */

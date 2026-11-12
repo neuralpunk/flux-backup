@@ -86,6 +86,24 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.2.0" date="2026-11-11">
+      <description>
+        <p>Getting files back, made to start where they were lost.</p>
+        <ul>
+          <li>Previous versions and Restore deleted files here in the right-click menu of Nautilus, Nemo and Dolphin, with Leave out of backups and Back up this folder beside them</li>
+          <li>Browse in Files: any snapshot, read-only, in the file manager</li>
+          <li>A recovery code that opens an encrypted backup when the password is lost</li>
+          <li>A Compact layout by default: a backup's Overview on one screen, a sidebar that folds to icons, a text size and the desktop's accent colour</li>
+          <li>A preview before restoring, and undo after deleting snapshots</li>
+          <li>Safe to unplug: the USB drive is unmounted and powered off when its backup ends</li>
+          <li>A warning when the backup drive is failing, and when a drive doesn't suit the backup</li>
+          <li>Notifications with buttons, quiet hours, and the time left wherever a backup or restore runs</li>
+          <li>Delete several snapshots at once, sizes next to every folder, and skipping what a project's .gitignore ignores</li>
+          <li>A calm weekly note when every backup is fine</li>
+          <li>New encrypted Vaults hide file sizes by default</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-11-09">
       <description>
         <p>A refinement release: what was there, made clearer, safer and quicker to use.</p>

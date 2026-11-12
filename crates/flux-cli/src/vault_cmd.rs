@@ -34,7 +34,7 @@ pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
         let (_, p) = load_profile(ctx, &args.profile)?;
         repaired_first = flux_runner::repo::repair_vault_basics(&ctx.paths, &p);
     }
-    let (_, _, repo) = repo_for(ctx, &args.profile)?;
+    let (_, profile, repo) = repo_for(ctx, &args.profile)?;
     if args.repair && repo.engine() != Engine::Vault {
         bail!(
             "--repair is for Vault backups, which can keep repair data (this one is {})",
@@ -56,6 +56,32 @@ pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
     drop(live);
     let mut r = r?;
     r.repaired.splice(0..0, repaired_first);
+    // Plain folders on a FAT32, exFAT or NTFS drive: worth knowing, not a problem found.
+    if let Some(fit) = flux_core::target_check::filesystem_fit_of(&profile) {
+        r.warnings.push(fit.sentence());
+    }
+    // What the backup drives say about their own health (asked now; nothing is kept).
+    let now = jiff::Timestamp::now();
+    for (key, path) in flux_runner::drive_health::places(args.profile.as_str(), &profile) {
+        let Some(reading) = flux_runner::drive_health::read(&path) else {
+            continue;
+        };
+        let drive = if reading.model.is_empty() {
+            "the backup drive".to_owned()
+        } else {
+            format!("the backup drive ({})", reading.model)
+        };
+        let known = flux_runner::drive_health::load(&ctx.paths, &key)
+            .unwrap_or_default()
+            .update(&reading, now);
+        r.warnings.push(match known.said(now) {
+            Some(s) => format!("{} {}", s.text, s.hint),
+            None if !known.reports => format!(
+                "{drive} doesn't report its health (most USB sticks and many USB enclosures don't), so Flux can't tell how it is"
+            ),
+            None => format!("{drive} reports no problems with its health"),
+        });
+    }
     if ctx.json {
         output::print_json(&r)?;
     } else {
@@ -129,6 +155,15 @@ pub enum KeyCmd {
     },
     /// Remove a password by its key id.
     Remove { profile: String, key: String },
+    /// Make a recovery code: a long random code, shown once, that opens the Vault like a
+    /// password when every password is lost (and without the unlock file). Print it or keep
+    /// it somewhere safe, away from the backups. A new one replaces the old.
+    Recovery {
+        profile: String,
+        /// Remove the recovery code instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Change the password: add the new one, then remove the one used to open.
     Passwd { profile: String },
     /// Hash the password in use harder (or less hard): makes guessing a stolen drive's
@@ -220,6 +255,26 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
             let id = v.add_key(&pw, &label)?;
             println!("Added key {id}. Both passwords now open this Vault.");
         }
+        KeyCmd::Recovery { profile, remove } => {
+            let (id, _, repo) = repo_for(ctx, &profile)?;
+            let v = vault_of(&repo, &profile)?;
+            let _l = v.lock(true)?;
+            if remove {
+                if v.remove_recovery_code()? {
+                    println!("Removed the recovery code: it no longer opens this Vault.");
+                } else {
+                    println!("This Vault has no recovery code.");
+                }
+                let _ = flux_runner::recover::set_answer(&ctx.paths, &id, "recovery_code", false);
+            } else {
+                let code = v.set_recovery_code()?;
+                println!(
+                    "Recovery code for {profile}:\n\n    {}\n\nIt opens this Vault like a password, also without the unlock file. Print it or\nkeep it somewhere safe, away from the backups: it's shown only now. Any recovery\ncode made before no longer works.",
+                    code.as_str()
+                );
+                let _ = flux_runner::recover::set_answer(&ctx.paths, &id, "recovery_code", true);
+            }
+        }
         KeyCmd::Remove { profile, key } => {
             let (_, _, repo) = repo_for(ctx, &profile)?;
             let v = vault_of(&repo, &profile)?;
@@ -233,8 +288,19 @@ pub fn run_key(ctx: &Ctx, cmd: KeyCmd) -> anyhow::Result<ExitCode> {
             let old = v.slot.clone().context("this Vault is not encrypted")?;
             let pw = ask_new("New password: ")?;
             let _l = v.lock(true)?;
+            // Opened with the recovery code (the password was lost): the code stays.
+            let by_code = v
+                .keys()?
+                .iter()
+                .any(|k| k.id == old && k.label == flux_vault::crypto::RECOVERY_LABEL);
             let new = v.add_key(&pw, "changed")?;
-            v.remove_key(&old)?;
+            if by_code {
+                println!(
+                    "Opened with the recovery code, which still works; `flux key recovery {profile}` makes a new one."
+                );
+            } else {
+                v.remove_key(&old)?;
+            }
             if matches!(
                 p.vault.as_ref().map(|v| &v.password_source),
                 Some(flux_core::profile::PasswordSource::Keyring) | None

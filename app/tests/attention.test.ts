@@ -31,3 +31,18 @@ test("health kinds in a few words", () => {
   assert.equal(kindLabel("something_new"), null);
   assert.equal(kindLabel(undefined), null);
 });
+
+test("the Compact sidebar's word or two", async () => {
+  const { sideLabel } = await import("../src/lib/attention.ts");
+  assert.equal(sideLabel("run", "Backing up · 21%"), "21%");
+  assert.equal(sideLabel("run", "Backing up…"), "Backing up");
+  assert.equal(sideLabel("run", "Waiting for its turn…"), "Waiting");
+  assert.equal(sideLabel("ok", "Protected · 59 minutes ago"), "59 minutes ago");
+  assert.equal(sideLabel("bad", "Failed 2 days ago"), "Failed");
+  assert.equal(sideLabel("bad", "Can't run: needs fixing"), "Needs fixing");
+  assert.equal(sideLabel("idle", "Not backed up yet"), "No copy yet");
+  assert.equal(sideLabel("warn", "Not backed up yet"), "No copy yet");
+  assert.equal(sideLabel("warn", "Low on space · 5 hours ago"), "Low on space");
+  assert.equal(sideLabel("bad", "Unusual changes · 2 hours ago"), "Unusual changes");
+  assert.equal(sideLabel("warn", "Some files skipped · 1 hour ago"), "Some files skipped");
+});

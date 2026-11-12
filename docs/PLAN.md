@@ -619,6 +619,240 @@ flat sections. The demo's checklist agrees with its offsite copy.
 ### Phase 92 — Release 1.1, again
 CHANGELOG and AppStream, a *New in 1.1* row on the website, screenshots retaken.
 
+## Toward 1.2: better for the one person at the desk (agreed 2026-11-10)
+
+The owner's list for 1.2, from the consumer-focused review of ideas: things a single
+person on a Linux desktop or workstation notices, grouped by the moments they have with
+their backup (losing a file, not wanting to think about it, forgetting a password, a
+full drive). Not in 1.2, by the owner's word: two drives that take turns, a cloud drive
+through rclone, moving a backup to a new drive, the list of installed apps, and
+translations. The rules for 1.x still hold (the main experience stays simple; new tests
+are simulated; the CLI keeps parity; formats stay frozen). The version is 1.2.0 from
+Phase 114; CHANGELOG *Unreleased* becomes 1.2.0 at the release.
+
+### Phase 114 — Version 1.2 and this plan
+Version 1.2.0 everywhere (workspace, app, Tauri); this section; the tracker's rows; a
+CHANGELOG *Unreleased* section.
+
+### Phase 115 — Under the hood: sizes hidden by default, the threat model's words
+Published 2025 research recovers the secret of keyed content-defined chunkers. Flux's is
+one 64-bit seed XORed into fastcdc's public gear table. Until that is assessed: new
+encrypted Vaults pad their packs (*hide sizes*) by default, and THREAT_MODEL.md no longer
+says chunk boundaries can't reveal a known file. Existing Vaults are unchanged.
+
+### Phase 116 — Safe to unplug
+A backup to a USB drive can release the drive when it's done: unmount it (and power it
+off where the desktop allows), then a notification says it's safe to unplug. A setting
+per backup (the app's *When* section, `flux profile`), off by default.
+
+### Phase 117 — Delete several snapshots at once
+Select several snapshots in the list (click, Shift-click, Ctrl-click) and delete them
+together; pinned snapshots are kept and said to be, and the space freed is shown once
+they're gone (an estimate before would mean reading every snapshot's data). `flux
+delete` already takes several snapshots.
+
+### Phase 118 — Sizes next to every folder
+The size of each backed-up folder and each excluded folder, where they're listed in the
+editor (computed in the background, with a deadline, as the suggestions' sizes are).
+
+### Phase 119 — Skip what a project's .gitignore ignores
+One switch: inside a folder that has a `.gitignore` (and is in a git working tree), leave
+out what it ignores. Off by default; the rule tester says when a file is left out by a
+`.gitignore`, and which one.
+
+### Phase 120 — Browse in Files
+A snapshot's ⋯ menu gets *Browse in Files*: mount it read-only, open it in the desktop's
+file manager, and unmount it on *Close*, when another snapshot is opened, or when Flux
+quits (the app can't tell when a file manager window is done with it). The in-app
+browser stays the default and the fallback.
+
+### Phase 121 — Previous versions from the file manager
+Right-click a file or folder in Nautilus, Nemo or Dolphin: *Previous versions…* opens
+Flux on that path's Versions; *Restore deleted files here…* opens the restore dialog with
+*Only deleted* for that folder. Installed by the packages; Flux handles them as a
+command-line request to the running app.
+
+### Phase 122 — A recovery code
+Setting up an encrypted Vault offers a recovery code: a long generated code kept as one
+more password slot, shown once to print or save. It can be made, replaced or removed
+later (app and `flux`). The recovery kit and the checklist say whether one exists.
+
+### Phase 123 — A calm weekly "all good"
+Once a week, one quiet notification when everything is protected: last backup, snapshots,
+the last restore test, space left. A Preferences switch; nothing is sent when something
+needs attention (those warnings already exist).
+
+### Phase 124 — Files copied whole, not half-written
+On Btrfs, a backup can read its sources from a read-only snapshot taken at its start
+(and removed at its end), so files that change during a backup are copied as they were
+at one moment. Paths stored are the real ones, and unchanged files aren't seen as
+changed. Where the source isn't a Btrfs subvolume, or the snapshot can't be made, the
+backup reads the live files as before and says so.
+
+**Left out of 1.2 (owner's decision, 2026-11-11).** Taking and deleting a Btrfs snapshot
+needs root, or a subvolume the user owns plus the `user_subvol_rm_allowed` mount option.
+On a stock Fedora, `/home` is a root-owned subvolume and a home folder is an ordinary
+folder in it, so a home backup (the one most people have) couldn't take the snapshot
+without an administrator password, which a scheduled backup can't ask for. Only system
+backups could use it, and that path couldn't be run for real here. Candidates for later:
+system backups through a private mount namespace (the snapshot bind-mounted over the
+source, so paths and engines stay as they are), or home backups through the helper with
+a polkit rule.
+
+### Phase 125 — Release 1.2
+CHANGELOG and AppStream, README and website, the guide, screenshots where screens
+changed. Publishing only when the owner says so.
+
+## After 1.2: a Compact layout (agreed 2026-11-11)
+
+From five refinement directions shown to the owner as mock-ups (Settled, Graphite & ink,
+Quiet, Ledger, Timeline), the owner chose **Ledger** as a *Compact* layout, with the
+existing design kept as *Full*, a choice in Preferences. Compact is the default, for
+existing installs too; whoever wants Full changes it there.
+
+### Phase 127 — A Compact layout, the default
+A *Layout* preference (Compact, Full) kept on this computer like the theme, Compact when
+nothing was chosen. Compact: one-line sidebar items with a word or two of status; All
+backups in columns with the 30-day strips aligned; the view switcher on a backup's title
+line; the Overview in two columns (settings and places on the right); shorter rows. Full
+is unchanged. Narrow windows fall back to the Full arrangement.
+
+### Phase 128 — Compact's Overview on one screen
+The owner's word after using it: Compact's Overview was still too busy beside the
+settings column. Its left side becomes compact too, so a backup's Overview fits a
+1200×780 window: the answer and the 30-day chart in one card, tighter recent backups,
+the restore test and the space as rows of one list (the space opens to its forecast),
+storage and places folded to a line each, the header's informational tags left out (the
+side column has them), and the glance's cells on one line each.
+
+### Phase 129 — Compact, fitted and symmetrical
+The owner: make sure everything fits in Compact, and make the Overview's two columns
+symmetrical (the page's first card started higher than the settings column's first box).
+Both columns get a heading row in the same style and start level, and end level; the
+glance's group titles go inside their boxes; a running backup's progress goes into the
+answer card; the header's tags get a line of their own; every Compact page is measured
+at 1200×780.
+
+## After 1.2: small things people notice (agreed 2026-11-11)
+
+From a list of eleven suggestions, the owner chose nine (not: dropping a file on the
+window to see its versions, a Ctrl+K palette); the folding sidebar was asked for along the
+way. One phase at a time, each committed. The
+rules for 1.x still hold: formats stay frozen, the CLI keeps parity where it applies,
+new tests are simulated.
+
+### Phase 130 — Shorter values in Settings at a glance
+In Compact's side column a value fits its line: "7d · 4w · 12m · 5y" rather than
+"7 daily · 4 weekly · 12 monthly · 5 yearly"; the full wording in the cell's title (and
+for screen readers). Full keeps the long forms.
+
+### Phase 131 — The desktop's accent colour
+A preference *Accent colour*: the desktop's (the default), or Flux's own blue. The
+desktop's comes from the XDG settings portal (`org.freedesktop.appearance accent-color`,
+GNOME 47+, KDE), and follows a change while the app is open; with no portal, or no accent
+set, Flux's blue. The selected and focus colours follow it, with text on it kept readable
+in light and dark.
+
+### Phase 132 — Text size
+A preference *Text size*: Small, Default, Large (90%, 100%, 115%), kept on this computer
+like the theme. The whole interface scales, the window's minimum size with it.
+
+### Phase 133 — Sections at the side of Settings and Preferences
+In Compact, a backup's Settings and the Preferences page get a short list of their
+sections at the side, which follows the scrolling and jumps to a section. Full unchanged.
+
+### Phase 134 — Buttons on desktop notifications
+A failed or warned backup's notification offers *Try again* and *Open* (opens the app on
+that backup); *Low space* offers *Open*. Notification servers without actions show the
+text as before.
+
+### Phase 135 — Undo after deleting snapshots
+Deleting snapshots in the app waits a few seconds with "Deleted 3 snapshots · Undo"
+before it happens; until then they're shown as going and can be brought back. Leaving
+the app finishes the deletion. The CLI is unchanged (it asks first, as before).
+
+### Phase 136 — A preview before restoring
+In a snapshot's file browser, a file can be previewed: an image as a picture, a text file
+as its first lines, the rest as its details. From the snapshot as it was, read-only, with
+a size limit.
+
+### Phase 137 — What the last backup changed
+On a backup's Overview: what the newest snapshot changed against the one before
+("+214 files · 38 changed · 2 deleted"), opening the existing comparison.
+
+### Phase 138 — A sidebar that folds into a row of icons
+Asked by the owner during Phase 136. The sidebar folds to a slim vertical toolbar: a
+beautiful column of icons (All backups, each backup by its status, New backup,
+Preferences), each with its name on hover, and opens again, with an animated transition
+between the two (none under reduced motion). The choice is kept on this computer; a
+button and a shortcut fold it.
+
+### Phase 139 — Checked in the real app, screenshots
+The Compact work (127–129) and 130–138 looked at in the real app window (WebKitGTK);
+the docs' and website's screenshots retaken in Compact.
+
+### Phase 140 — A lost password, after the recovery code (asked 2026-11-11)
+The unlock dialog says, in small type at its foot, that the recovery code can be pasted
+in place of a forgotten password. Unlocking with the code then asks for a new password
+before going on (a step that can't be skipped): the new password replaces the lost one
+(with several passwords, the owner picks which stop working), and a new recovery code
+replaces the one just typed, shown once. The new password goes where the profile keeps
+its password (keyring, key file) and needs the unlock file if the old one did.
+
+Re-encrypting the backups was asked for and left out on purpose: every password and the
+code wrap the same data key, which opening with the code exposes to no one; removing the
+lost password's key slot is what stops it working. A full re-encryption would rewrite
+every snapshot (hours, twice the space) for no gain in this case.
+
+## After 1.2: five more for the person at the desk (agreed 2026-11-11)
+
+From a numbered list of eleven, the owner chose five (1, 3, 4, 5, 6). Not chosen: retrying
+a failed scheduled backup, a system backup before system updates, restoring a folder as
+it was on a date, checking for updates, a Flathub package, a screen-reader pass. One phase
+at a time, each committed. The rules for 1.x still hold: formats stay frozen, the CLI
+keeps parity where it applies, new tests are simulated.
+
+### Phase 141 — "Leave out of backups" and "Back up this folder" from the file manager
+Two more items in the right-click menu that Phase 121 put in Nautilus, Nemo and Dolphin.
+*Leave out of backups* on a file or folder that a backup takes opens Flux on a short
+confirmation: which backups take it, how much it holds, and the rule that would be added
+(per backup, all ticked). *Back up this folder* on a folder no backup takes offers to
+add it to an existing backup's folders or to start a new backup with it. Nothing changes
+without the confirmation. Also `flux-backup --leave-out PATH` and `--back-up PATH`, and
+in the CLI `flux profile leave-out PATH` and `flux profile add-folder ID PATH`.
+
+### Phase 142 — Whether the drive suits the backup
+Flux knows each drive's filesystem but doesn't use it. On FAT32 or exFAT (and NTFS
+through FUSE), a Mirror can't hard-link unchanged files, so every snapshot is a full
+copy; FAT32 can't hold a file of 4 GB or more; none of them keep Linux permissions or
+owners. Setting up a backup, choosing a drive, and the Overview say so in words with
+what to do (a Vault, which needs none of it, or formatting the drive as ext4). A backup
+that meets a file too big for FAT32 names it. The CLI's `profile create` and `check` say
+the same.
+
+### Phase 143 — Time left, everywhere a backup or restore runs
+The progress panel already shows speed and time left. Missing: the restore dialog
+shows none; the estimate is an average since copying began, so it jumps after a slow
+start; the sidebar, All backups and the tray show only a percentage. A steadier estimate
+(a recent-speed average), "about 6 minutes left" in the restore dialog, and the time left
+in the sidebar's and the tray's tooltips.
+
+### Phase 144 — Quiet hours for notifications
+A preference: *Quiet hours*, off by default, a start and end time (22:00–08:00 to
+begin with). In those hours the notifications that only inform (a successful backup, the
+weekly note) aren't sent; the weekly note goes at the next check after them. Failures,
+low space, unusual changes and failed restore tests are always sent. Kept with the
+other notification preferences, so scheduled backups follow it with the app closed.
+
+### Phase 145 — A warning when the backup drive is failing
+UDisks2 reads a drive's own health report (SMART for ATA disks, NVMe health) without an
+administrator password. When a backup drive reports it's failing, or its reallocated or
+pending sectors grow, or an NVMe drive's spare runs low, the Overview says so in words
+("The backup drive is starting to fail. Copy the backups to a new drive soon") and a
+notification says it once. Checked when a backup to that drive runs. Drives that report
+nothing (most USB sticks, many USB enclosures) are left alone and Flux says it can't
+tell. `flux check` shows the same.
+
 ## Out of scope for v1 (candidates later)
 S3/B2 and other cloud backends (Vault's backend trait is designed for them), SMB/NFS
 mount management, Windows/macOS. (Back In Time import was done in 0.3.)

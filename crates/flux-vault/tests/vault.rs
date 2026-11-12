@@ -338,6 +338,110 @@ fn passwords_and_key_slots() {
 }
 
 #[test]
+fn a_recovery_code_opens_the_vault_however_it_is_typed() {
+    use flux_vault::crypto::{RECOVERY_LABEL, normalize_recovery_code};
+    let e = env();
+    write(&e.src.join("f"), b"x");
+    let repo = e.init(Some(PW));
+    e.snap(&repo);
+    let b = || Box::new(LocalBackend::new(&e.root));
+    let mut repo = e.open();
+    repo.kdf = KdfParams::TESTING;
+
+    let code = repo.set_recovery_code().unwrap();
+    // XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX, Crockford's alphabet.
+    assert_eq!(code.len(), 35);
+    assert_eq!(code.matches('-').count(), 5);
+    assert!(
+        code.chars()
+            .all(|c| c == '-' || "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c))
+    );
+    let keys = repo.keys().unwrap();
+    assert_eq!(keys.iter().filter(|k| k.label == RECOVERY_LABEL).count(), 1);
+
+    // As printed, in lower case without dashes, with O for 0 and l for 1.
+    let sloppy: String = code
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| match c {
+            '0' => 'o',
+            '1' => 'l',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect();
+    for typed in [
+        code.as_str(),
+        &sloppy,
+        &format!(" {} ", code.replace('-', " ")),
+    ] {
+        let r = VaultRepo::open(b(), Some(typed)).unwrap();
+        assert_eq!(r.snapshots(&e.owner).unwrap().len(), 1, "{typed}");
+    }
+    assert_eq!(
+        normalize_recovery_code(&sloppy)
+            .as_deref()
+            .map(String::as_str),
+        Some(code.as_str())
+    );
+    assert!(normalize_recovery_code("too-short").is_none());
+    assert!(
+        normalize_recovery_code(&format!("{}U", code.as_str())).is_none(),
+        "U isn't in the alphabet"
+    );
+    // The password still works, and a password that happens to look like a code doesn't
+    // open the recovery slot.
+    VaultRepo::open(b(), Some(PW)).unwrap();
+
+    // A new code replaces the old one.
+    let again = repo.set_recovery_code().unwrap();
+    assert_ne!(*again, *code);
+    assert!(matches!(
+        VaultRepo::open(b(), Some(&code)),
+        Err(VaultError::WrongPassword)
+    ));
+    VaultRepo::open(b(), Some(&again)).unwrap();
+    assert_eq!(
+        repo.keys()
+            .unwrap()
+            .iter()
+            .filter(|k| k.label == RECOVERY_LABEL)
+            .count(),
+        1
+    );
+
+    // Removed: only the password opens it.
+    assert!(repo.remove_recovery_code().unwrap());
+    assert!(!repo.remove_recovery_code().unwrap());
+    assert!(matches!(
+        VaultRepo::open(b(), Some(&again)),
+        Err(VaultError::WrongPassword)
+    ));
+    VaultRepo::open(b(), Some(PW)).unwrap();
+}
+
+#[test]
+fn a_recovery_code_needs_no_unlock_file() {
+    let e = env();
+    write(&e.src.join("f"), b"x");
+    let repo = e.init(Some(PW));
+    e.snap(&repo);
+    let b = || Box::new(LocalBackend::new(&e.root));
+    let mut repo = e.open();
+    repo.kdf = KdfParams::TESTING;
+    let file = [7u8; 32];
+    repo.rewrap(PW, KdfParams::TESTING, Some(&file)).unwrap();
+    let repo = VaultRepo::open_with(b(), Some(PW), Some(file)).unwrap();
+    let code = repo.set_recovery_code().unwrap();
+    // The password alone no longer opens it; the recovery code does.
+    assert!(matches!(
+        VaultRepo::open(b(), Some(PW)),
+        Err(VaultError::UnlockFileNeeded)
+    ));
+    let r = VaultRepo::open(b(), Some(&code)).unwrap();
+    assert_eq!(r.snapshots(&e.owner).unwrap().len(), 1);
+}
+
+#[test]
 fn check_detects_damage() {
     let e = env();
     write(&e.src.join("a"), &noise(2 << 20, 3));

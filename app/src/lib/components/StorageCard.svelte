@@ -4,8 +4,10 @@
   import { api } from "../api";
   import { bytes, count } from "../format";
   import type { Storage } from "../types";
+  import Icon from "./Icon.svelte";
 
-  let { id, embedded = false }: { id: string; embedded?: boolean } = $props();
+  /** `folded`: one line (what all the snapshots take) until opened, for the Compact layout. */
+  let { id, embedded = false, folded = false }: { id: string; embedded?: boolean; folded?: boolean } = $props();
   let st = $state<Storage | null>(null);
   $effect(() => {
     const want = id;
@@ -53,6 +55,17 @@
   {/snippet}
   {#if embedded}
     {@render details()}
+  {:else if folded}
+    <details class="group/storage">
+      <summary class="flex cursor-pointer list-none items-center gap-2 rounded-md px-0.5 py-1 text-[13px] font-semibold text-fg-2 select-none hover:text-fg [&::-webkit-details-marker]:hidden">
+        <Icon name="chevronRight" size={14} class="transition-transform group-open/storage:rotate-90" />
+        Storage
+        <span class="num font-normal text-fg-muted">
+          {count(s.snapshots)} {s.snapshots === 1 ? "snapshot" : "snapshots"}{#if s.stored_bytes != null}{" "}take {bytes(s.stored_bytes)}{:else}, the newest {bytes(s.latest_bytes)}{/if}
+        </span>
+      </summary>
+      <div class="card mt-2 px-5 py-4">{@render details()}</div>
+    </details>
   {:else}
     <section>
       <h2 class="group-title">Storage</h2>

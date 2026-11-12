@@ -1933,3 +1933,20 @@ fn the_look_reads_a_vaults_file_list_from_the_cache() {
     assert!(r.outcome.is_ok(), "{:?}", r.outcome);
     assert_eq!(r.record.sentry_seen.map(|s| s.touched), Some(1));
 }
+
+#[test]
+fn a_drive_the_desktop_didnt_mount_is_left_mounted_and_said_so() {
+    // "Safe to unplug" on, but the target is a plain folder: the backup is made as
+    // always, nothing is unmounted, and the run says why.
+    let mut e = env();
+    e.profile.schedule.release_drive = true;
+    let r = e.run();
+    assert_eq!(r.record.status, RunStatus::Completed);
+    let events = runlog::run_events(&e.paths, &e.id, &r.record.run_id);
+    assert!(
+        events.iter().any(|ev| matches!(&ev.event, flux_core::progress::Event::Warning { message, .. }
+            if message.starts_with("couldn't release the drive:") && message.contains("isn't a drive the desktop mounted"))),
+        "{events:?}"
+    );
+    assert!(e.root.join("tgt").exists());
+}

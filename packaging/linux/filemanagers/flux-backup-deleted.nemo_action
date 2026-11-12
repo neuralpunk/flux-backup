@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Restore deleted files here…
+Comment=Files your Flux backups have from this folder that aren't here any more
+Exec=flux-backup --restore-deleted %P
+Icon-Name=flux-backup
+Selection=none
+Extensions=any;
+Dependencies=flux-backup;

@@ -26,12 +26,13 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SystemUnlockDialog from "./lib/components/SystemUnlockDialog.svelte";
   import ExportDialog from "./lib/components/ExportDialog.svelte";
+  import FolderChangeDialog from "./lib/components/FolderChangeDialog.svelte";
   import Logo from "./lib/ui/Logo.svelte";
   import TitleBar from "./lib/ui/TitleBar.svelte";
 
   onMount(() => {
     void app.start().then(async () => {
-      // Demo mode only: ?profile=…&tab=…&theme=… set the starting view (for screenshots).
+      // Demo mode only: ?profile=…&tab=…&theme=…&layout=… set the starting view (for screenshots).
       if (inTauri) return;
       const q = new URLSearchParams(location.search);
       const profile = q.get("profile");
@@ -43,6 +44,8 @@
       if (q.get("new") === "1") app.newProfile(false);
       if (q.get("new") === "system") app.newProfile(true);
       if (theme === "dark" || theme === "light" || theme === "auto") app.setTheme(theme);
+      const layout = q.get("layout");
+      if (layout === "compact" || layout === "full") app.setLayout(layout);
       if (q.get("simulate") === "backup" && app.selectedId) void api.backupNow(app.selectedId);
       if (q.get("open") === "recovery" && app.selectedId) app.dialog = { kind: "recovery", id: app.selectedId };
       if (q.get("open") === "delete" && app.selectedId) app.dialog = { kind: "delete-profile", id: app.selectedId };
@@ -99,6 +102,8 @@
       const i = app.home ? -1 : app.profiles.findIndex((p) => p.id === app.selectedId);
       const next = app.profiles[(i + (e.key === "ArrowDown" ? 1 : -1) + app.profiles.length) % app.profiles.length];
       if (next) app.open(next.id);
+    } else if (e.key === "F9") {
+      app.toggleSidebar();
     } else if (!typing(e) && e.key === "?") {
       app.showShortcuts = true;
     } else if (e.key === "F5" || (ctrl && e.key.toLowerCase() === "r")) {
@@ -140,7 +145,7 @@
           </p>
         </div>
         {#if app.creatingTemplate === null}
-          <div class="mx-auto w-full max-w-[760px] overflow-y-auto px-10 pb-10">
+          <div class="mx-auto w-full max-w-[760px] overflow-y-auto px-10 {app.layout === 'compact' ? 'pb-6' : 'pb-10'}">
             <TemplatePicker system={app.creatingSystem} onpick={(t) => (app.creatingTemplate = t)} />
             {#if !app.creatingSystem && app.system.available}
               <!-- System backups start here (not in the sidebar): rare, and they need an administrator. -->
@@ -182,15 +187,19 @@
       {:else if app.selected}
         {#key app.selected.id}
           {#if app.tab === "settings"}
-            <div class="mx-auto w-full max-w-[760px] px-10 pt-6"><ProfileHeader profile={app.selected} /></div>
+            <!-- As wide as the settings below it (Compact: with their sections at the side). -->
+            <div class="@container px-10 pt-6">
+              <div class="mx-auto w-full max-w-[680px] {app.layout === 'compact' ? '@min-[800px]:max-w-[880px]' : ''}"><ProfileHeader profile={app.selected} /></div>
+            </div>
             <div class="min-h-0 flex-1 pt-4">
               <ProfileEditor id={app.selected.id} onsaved={() => (app.tab = "overview")} oncancel={() => (app.tab = "overview")} />
             </div>
           {:else}
             <div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
-              <div class="mx-auto flex w-full max-w-[1180px] flex-1 flex-col gap-6 px-10 pt-6 pb-10 {app.tab !== 'overview' ? 'min-h-0' : ''}">
+              <div class="mx-auto flex w-full max-w-[1180px] flex-1 flex-col gap-6 px-10 pt-6 {app.layout === 'compact' ? 'pb-6' : 'pb-10'} {app.tab !== 'overview' ? 'min-h-0' : ''}">
                 <ProfileHeader profile={app.selected} />
-                {#if job}
+                <!-- Compact's Overview shows it in its answer card. -->
+                {#if job && !(app.layout === "compact" && app.tab === "overview")}
                   <JobPanel {job} />
                 {/if}
                 {#if app.selected.errors.length}
@@ -288,6 +297,12 @@
   <SystemUnlockDialog onclose={() => (app.dialog = null)} />
 {:else if app.dialog?.kind === "about"}
   <AboutDialog onclose={() => (app.dialog = null)} />
+{/if}
+
+{#if app.folderRequest}
+  {#key app.folderRequest}
+    <FolderChangeDialog want={app.folderRequest.want} path={app.folderRequest.path} onclose={() => (app.folderRequest = null)} />
+  {/key}
 {/if}
 
 {#if app.showShortcuts}

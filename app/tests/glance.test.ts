@@ -104,3 +104,30 @@ test("short forms, idle cells and groups", async () => {
   const grouped = GLANCE_GROUPS.flatMap((x) => x.keys);
   for (const i of glance(p, false)) assert.equal(grouped.filter((k) => k === i.key).length, 1, i.key);
 });
+
+test("short forms for one line: lists cut to their first, tests and passwords in brief", () => {
+  const p = profile();
+  p.sources.one_file_system = true;
+  p.destinations = [
+    { name: "usb", label: "USB stick", engine: "vault", target: { kind: "local", path: "/run/media/me/STICK" }, offsite: false },
+    { name: "office", label: "Office NAS", engine: "rsync", target: { kind: "ssh", host: "office-nas", path: "/srv" }, offsite: true },
+  ];
+  p.restore_test = { every: "backup", mode: "confidence", damage: "1%" };
+  p.webhooks = [{ url: "https://ntfy.sh/x" }, { url: "https://ntfy.sh/y" }];
+  p.vault = { ...p.vault!, unlock_file: "/media/key/unlock" };
+  p.network = { wifi_only: ["HomeWifi"], bandwidth: [{ from: "08:00", to: "18:00", limit: "1MB" }] } as Profile["network"];
+  const g = glance(p, false);
+  assert.equal(at(g, "excluded").value, "2 rules · caches · over 4 GB · one disk");
+  assert.equal(at(g, "excluded").short, "2 rules · caches +2");
+  assert.equal(at(g, "places").short, "USB stick +1");
+  assert.equal(at(g, "tests").short, "Each backup · 1% damage");
+  assert.equal(at(g, "notify").short, "Desktop + 2 webhooks");
+  assert.equal(at(g, "password").value, "Desktop keyring, plus an unlock file");
+  assert.equal(at(g, "password").short, "Keyring + unlock file");
+  assert.equal(at(g, "network").short, "Only on HomeWifi +1");
+  // Short enough already: no short form.
+  const plain = glance(profile(), false);
+  assert.equal(at(plain, "places").short, undefined);
+  assert.equal(at(plain, "excluded").short, "2 rules · caches +1");
+  assert.equal(at(plain, "notify").short, undefined);
+});

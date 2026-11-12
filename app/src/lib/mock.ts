@@ -5,6 +5,10 @@ import type { DirEntry, Found, Issue, JobMessage, Listing, Overview, PreviewRow,
 import { type TestReport, type Destination, type Webhook, ApiError } from "./types";
 import { fraction, sampleBound } from "./confidence";
 
+/** What the demo pretends is open in the file manager. */
+let mockBrowsing: { profile: string; snapshot: string; dir: string; open: string } | null = null;
+let mockOpenTaken = false;
+
 const DAY = 86_400_000;
 const now = Date.now();
 const iso = (t: number) => new Date(t).toISOString();
@@ -159,6 +163,8 @@ let prefs = {
   one_at_a_time: false,
   diff_tool: null as string | null,
   close_to_tray: true,
+  weekly_note: true,
+  quiet_hours: null as { from: string; to: string } | null,
   webhooks: [{ url: "https://ntfy.sh/flux-laptop-backups", preset: "ntfy" }] as Webhook[],
 };
 const DIFF_TOOLS: [string, string][] = [["meld", "Meld"]];
@@ -237,12 +243,16 @@ const prefsView = () => ({
   webhooks: prefs.webhooks,
   diff_tool_used: prefs.diff_tool === "" ? null : prefs.diff_tool ? ([prefs.diff_tool, DIFF_TOOLS.find(([c]) => c === prefs.diff_tool)?.[1] ?? prefs.diff_tool] as [string, string]) : DIFF_TOOLS[0]!,
   diff_tools: DIFF_TOOLS,
+  weekly_note: prefs.weekly_note,
+  quiet_hours: prefs.quiet_hours,
 });
 
 /** Demo: `?first=1` gives "Home folder" a single snapshot (the first-backup card). */
 if (typeof location !== "undefined" && new URLSearchParams(location.search).get("first") === "1") snapshots.home = snapshots.home!.slice(-1);
 
 let unlocked = new Set<string>(["home", "photos", "plain"]);
+/** The demo Vaults' recovery code (it unlocks them, then asks for a new password). */
+let mockRecoveryCode = "7KQ2M-WX9RT-3HJ5B-NP8VD-C4FZ6-Y1GAE";
 
 function locked(id: string) {
   const p = allProfiles().find((x) => x.id === id);
@@ -524,6 +534,10 @@ function validate(p: Profile): Issue[] {
   if (p.target.kind === "ssh" && !p.target.host.trim()) err("target.host", "host must be a non-empty name without spaces");
   if (p.schedule.trigger === "calendar" && !p.schedule.on_calendar?.trim()) err("schedule.on_calendar", "choose the times it runs (for example: daily, or Mon..Fri 18:00)");
   if (p.schedule.on_connect && !(p.target.kind === "local" && p.target.fs_uuid)) err("schedule.on_connect", "backup on connect needs a drive (fs_uuid)");
+  // The demo's USB stick is FAT32.
+  if (p.target.kind === "local" && p.target.path.startsWith("/run/media/me/USB STICK") && (p.engine === "mirror" || p.engine === "rsync")) {
+    v.push({ severity: "warning", field: "target.path", message: "This drive is formatted FAT32, which can't keep hard links, links or Linux permissions: every snapshot is a full copy, links and permissions are lost, and no file of 4 GB or more fits. A Vault backup suits it (it keeps all of that in its own files); or format the drive as ext4, which erases it." });
+  }
   return v;
 }
 
@@ -609,7 +623,8 @@ function simulateBackup(id: string, shutdown = false) {
         warnings: tick > 20 ? 1 : 0,
         elapsed_secs: secs,
         bytes_per_sec: done / Math.max(1, secs - 2),
-        eta_secs: phase === "transferring" ? ((total - done) / total) * 10 : null,
+        // As a real backup of this size would say (the demo's is over in seconds).
+        eta_secs: phase === "transferring" ? ((total - done) / total) * 480 : null,
       },
       shutdown_after: shutdownAfter[id] ?? false,
     });
@@ -674,6 +689,8 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         free_bytes: id === "photos" ? null : 742_000_000_000,
         repo_error: null,
         space: spaceFor(id),
+        // Demo: BackupDisk reports its health; Archive (Photo library's) doesn't.
+        drive_health: p.remote ? null : { reports: id !== "photos", checked: new Date(now - 2 * 3_600_000).toISOString(), said: null },
         health:
           id === "photos"
             ? [
@@ -740,10 +757,18 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "list_dir":
       needsUnlock();
       return listing((args.path as string) || "/", (args.filter as string | null) ?? null, !!args.missing);
-    case "unlock":
-      if (args.password !== "demo") throw new ApiError("wrong_password", "Wrong password (try “demo”).");
+    case "unlock": {
+      // The demo's recovery code (the one "recovery_code" shows), typed any which way.
+      const code = String(args.password).toUpperCase().replace(/[^0-9A-Z]/g, "").replace(/O/g, "0").replace(/[IL]/g, "1");
+      const byCode = code === mockRecoveryCode.replace(/-/g, "");
+      if (args.password !== "demo" && !byCode) throw new ApiError("wrong_password", "Wrong password (try “demo”).");
       unlocked = new Set([...unlocked, id]);
-      return null;
+      return { recovery_code: byCode };
+    }
+    case "replace_password":
+      await delay(700);
+      mockRecoveryCode = "3MZ8Q-HT5KW-R2NVD-9CJ4X-PB7FA-6YGE0";
+      return { recovery_code: mockRecoveryCode, kept: "keyring", unlock_file: false, unlock_file_dropped: null, removed: (args.remove as string[]).length };
     case "backup_now":
       if (allProfiles().find((x) => x.id === id)?.running) throw new ApiError("busy", "A backup is already running.");
       if (id === "photos")
@@ -924,6 +949,14 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return ((args.name as string).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "profile");
     case "retention_preview":
       return preview(id, args.retention as Profile["retention"]);
+    case "folder_sizes": {
+      await delay(300);
+      const known: Record<string, number> = { "/home/me": 412_000_000_000, "/home/me/Documents": 18_400_000_000, "/home/me/Pictures": 96_300_000_000, "~/Videos/": 210_000_000_000, "~/.cache/": 6_204_000_000, "~/Downloads/": 23_400_000_000 };
+      return (args.paths as string[]).map((path) => {
+        const k = Object.keys(known).find((x) => x.replace(/\/$/, "") === path.replace(/\/$/, ""));
+        return { path, size: k ? known[k]! : /[*?[]/.test(path) || !/^[~/]/.test(path) ? null : 1_300_000_000, partial: path.replace(/\/$/, "") === "/home/me" };
+      });
+    }
     case "exclude_suggestions":
       return [
         { pattern: "~/.cache/", label: "Application caches", why: "rebuilt automatically", size: 6_204_000_000 },
@@ -951,6 +984,69 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       if (args.setNote) snap.note = ((args.note as string | null) ?? "").trim() || null;
       if (args.tags) snap.tags = [...new Set((args.tags as string[]).map((t) => t.trim()).filter(Boolean))];
       return structuredClone(snap);
+    }
+    case "browse_in_files": {
+      await delay(500);
+      mockBrowsing = { profile: id, snapshot: args.snapshot as string, dir: `/run/user/1000/flux-backup/browse/${id}@${args.snapshot}`, open: `/run/user/1000/flux-backup/browse/${id}@${args.snapshot}/home/me` };
+      return mockBrowsing;
+    }
+    case "take_open_request": {
+      // Demo only: `?open=versions:/home/me/notes.md` acts as a file manager's request.
+      const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("open") : null;
+      if (!q || mockOpenTaken) return null;
+      mockOpenTaken = true;
+      const [kind, ...rest] = q.split(":");
+      return { kind, path: rest.join(":") };
+    }
+    case "backup_for_path":
+      return (args.path as string).startsWith("/home/me") ? "home" : null;
+    case "folder_plan": {
+      // Demo: every backup of your own takes /home/me (the home folder).
+      await delay(300);
+      const path = (args.path as string).replace(/\/+$/, "");
+      const shown = path.startsWith("/home/me") ? "~" + path.slice(8) : path;
+      const inHome = path.startsWith("/home/me/");
+      const dir = !/\.[a-z0-9]{1,5}$/i.test(path);
+      const mine = profiles.filter((p) => p.scope === "user");
+      const want = args.want as "exclude" | "include";
+      return {
+        path,
+        shown,
+        is_dir: dir,
+        size: 2_400_000_000,
+        partial: false,
+        backups: mine
+          .filter(() => want === "include" || inHome)
+          .map((p) => ({
+            id: p.id,
+            name: p.name,
+            backed_up: inHome,
+            why: inHome ? "Backed up: it's in /home/me." : "Not in any folder this backup takes.",
+            change: want === "exclude" ? { kind: "add_rule", rule: `${shown}${dir ? "/" : ""}` } : inHome ? null : { kind: "add_folder", folder: path, replaces: [] },
+            blocked: null,
+          })),
+      };
+    }
+    case "apply_folder_change":
+      await delay(400);
+      return { changed: (args.ids as string[]).map((id) => [id, profiles.find((p) => p.id === id)?.name ?? id]), failed: [] };
+    case "recovery_code":
+      await delay(600);
+      return args.remove ? null : mockRecoveryCode;
+    case "browsing":
+      return mockBrowsing;
+    case "stop_browsing":
+      mockBrowsing = null;
+      return null;
+    case "delete_snapshots": {
+      const asked = new Set(args.snapshots as string[]);
+      const list = snapshots[id] ?? [];
+      const pinned = list.filter((x) => asked.has(x.id) && x.pinned).map((x) => x.id);
+      const gone = list.filter((x) => asked.has(x.id) && !x.pinned);
+      snapshots[id] = list.filter((x) => !gone.includes(x));
+      const e = allProfiles().find((p) => p.id === id)?.engine;
+      const freed = e === "vault" || e === "borg" ? gone.reduce((t, x) => t + x.stats.stored_bytes, 0) : null;
+      return { deleted: gone.map((x) => x.id), pinned, freed };
     }
     case "delete_snapshot": {
       const gone = snapshots[id]?.find((x) => x.id === args.snapshot);
@@ -1031,6 +1127,22 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       return { snapshots: snapshots[id]?.length ?? 0, checked: 112_435, bytes_read: args.readData ? 92_000_000_000 : 0, errors: [], warnings: [] };
     case "tools":
       return tools();
+    case "preview_file": {
+      await delay(250);
+      const p = String(args.path);
+      if (/\.(png|jpe?g|gif|webp|svg)$/i.test(p))
+        return {
+          kind: "image",
+          url: `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a6ea5"/><stop offset="1" stop-color="#f2b880"/></linearGradient></defs><rect width="640" height="420" fill="url(#g)"/><circle cx="470" cy="120" r="54" fill="#fff6d8"/><path d="M0 330 L160 210 L290 300 L420 190 L640 340 V420 H0Z" fill="#2c3e50"/></svg>')}`,
+        };
+      if (/\.(md|txt|toml|conf|rc|sh|py|rs|ts|json|gitconfig|bashrc)$|\/\.[a-z]+$/i.test(p))
+        return {
+          kind: "text",
+          text: `# ${p.split("/").pop()}\n\nAs it was in this snapshot.\n\n[user]\n    name = Me\n    email = me@example.org\n\n[core]\n    editor = nano\n`,
+          more: false,
+        };
+      return { kind: "other", too_large: false };
+    }
     case "open_snapshot_file":
       await delay(400);
       return `/home/me/.cache/flux-backup/opened/${args.snapshot}/${(args.path as string).split("/").pop()}`;
@@ -1126,8 +1238,25 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "set_close_to_tray":
       prefs = { ...prefs, close_to_tray: args.on as boolean };
       return prefsView();
+    case "set_quiet_hours":
+      if (args.from && args.from === args.to) throw new ApiError("bad_request", "Quiet hours need a start and an end, at different times of day.");
+      prefs = { ...prefs, quiet_hours: args.from && args.to ? { from: args.from as string, to: args.to as string } : null };
+      return prefsView();
+    case "set_weekly_note":
+      prefs = { ...prefs, weekly_note: args.on as boolean };
+      return prefsView();
     case "tray_available":
       return true;
+    case "set_text_size":
+      // The demo has no window to zoom: the page is zoomed instead.
+      if (typeof document !== "undefined") document.documentElement.style.setProperty("zoom", String(args.scale));
+      return null;
+    case "desktop_accent": {
+      // The demo: `?accent=2190a4` stands in for the desktop's choice.
+      const a = typeof location !== "undefined" ? new URLSearchParams(location.search).get("accent") : null;
+      const n = a && /^#?[0-9a-f]{6}$/i.test(a) ? parseInt(a.replace("#", ""), 16) : null;
+      return n == null ? null : [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+    }
     case "calendar_preview": {
       // The demo reads "[days] HH:MM" only; the app reads what systemd does.
       const m = /^(?:([A-Za-z,.]+)\s+)?(?:\*-\*-\*\s+)?(\d{1,2}):(\d{2})(?::00)?$/.exec(String(args.expr).trim());

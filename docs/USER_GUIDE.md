@@ -272,6 +272,28 @@ drive isn't connected (and where it should be mounted) instead of starting.
 
 Backups go into a `flux-backup/` folder on the drive (Mirror) or `flux-vault/` (Vault).
 
+**The drive's format matters for plain folders.** A Mirror (or rsync) backup keeps each
+unchanged file once, hard-linked into every snapshot, and keeps links, owners and
+permissions as they are. A drive formatted **FAT32** or **exFAT** (most USB sticks, many
+drives sold for Windows and Macs) can do none of that: every snapshot is a full copy, links
+and permissions are lost, and FAT32 can't hold a file of 4 GB or more. **NTFS** keeps hard
+links but not Linux owners and permissions. Flux says so when you choose such a drive,
+under the backup's settings, on its Overview (FAT32 and exFAT), and in `flux profile
+validate` and `flux check`. A **Vault** keeps all of that in its own files, so it suits any
+drive; or format the drive as ext4 (in GNOME Disks or KDE Partition Manager), which erases
+it. A file too big for the drive is named in the backup's log as such.
+
+**When the drive starts to fail.** After each backup, Flux asks the backup drive how it is,
+as GNOME Disks would (through udisks, without a password): a disk's SMART report, or an
+NVMe drive's warnings. If the drive says it's failing, is running out of spare space for
+worn-out cells, says it's no longer reliable, or its bad sectors start growing, the
+Overview says so in words and a notification says it once; *Copy the backups to a new
+drive soon*. A drive that's hot gets a milder note. Bad sectors a drive already had when
+Flux first looked aren't news: only more of them are. The space card says what was seen
+last ("The drive reports no problems with its health"). Most USB sticks and many USB
+enclosures don't pass the report on: then Flux says it can't tell. `flux check` asks the
+drive too.
+
 ### An SSH server
 
 ```sh
@@ -380,9 +402,24 @@ Also available: skip folders with a `CACHEDIR.TAG` (on by default), skip folders
 contain a marker file (`exclude_if_present = [".nobackup"]`), skip big files
 (`exclude_larger_than = "4GB"`), and stay on one filesystem (`one_file_system`).
 
+**What a project's `.gitignore` ignores.** With *Skip what .gitignore files ignore*
+(`exclude_gitignored = true`), inside a git working tree (a folder with `.git`) the
+backup also leaves out what its `.gitignore` files ignore, read the way git reads them:
+each relative to its folder, a subfolder's own file adding to its parents', and a nested
+repository starting afresh. Build output and downloaded dependencies stay out, but so does
+anything else git leaves out on purpose, such as a `.env` file with keys or a local
+settings file: if you want one of those kept, add `!.env` to your own rules, which come
+first. Only `.gitignore` files count (not `.git/info/exclude` or a global excludes file),
+and only for Mirror and Vault backups; rsync and Borg don't read them. The rule tester
+says which `.gitignore` left a file out, and an exact restore leaves such files alone.
+
 In the app, *What to back up* › **Exclude Files/Directories** suggests common exclusions
 (caches, trash, build output) with how much space each takes in your sources; the ones
 you've added are shown in green.
+
+Each folder you back up, and each folder you leave out, shows how much it holds beside it
+(a pattern like `*.iso` doesn't). Counting has a few seconds; a folder too big to count in
+that time shows what was counted so far as "≥ 384 GiB".
 
 ### Checking the rules
 
@@ -407,6 +444,34 @@ flux explain home ~/Projects --list         # each item, with what's in and out 
 
 These are the rules Flux's own scan uses (for rsync and Borg backups, Flux turns the same
 rules into theirs).
+
+### Leave out or add from the file manager
+
+Right-click a file or folder in **Nautilus** (GNOME Files; the items are under **Flux
+Backup**), **Nemo** or **Dolphin**:
+
+- **Leave out of backups…** lists the backups that take it, each ticked, with what would
+  change: a rule naming just that file or folder (`~/Videos/raw/`) added to what it leaves
+  out, or, when it's one of the folders the backup takes, that folder dropped. A backup
+  it's the only folder of is left alone (delete the backup instead). Snapshots already
+  made keep it.
+- **Back up this folder…** (on a folder) asks which backup should take it: it's added to
+  that backup's folders (in place of any of them inside it), or, when a rule naming just
+  this folder leaves it out, that rule is removed. Or choose **A new backup** to set one up
+  that starts with this folder. A folder left out by a broader rule (`node_modules/`,
+  `*.iso`) isn't changed here: the dialog says which rule, to change in the backup's
+  settings.
+
+Nothing changes until you confirm. Nautilus shows whichever of the two applies (it reads
+your backups' folders); Nemo and Dolphin show both, and Flux says when there's nothing to
+do. From a terminal: `flux-backup --leave-out PATH`, `flux-backup --back-up FOLDER`, or,
+without the app:
+
+```sh
+flux profile leave-out ~/Videos/raw              # every profile that takes it
+flux profile leave-out ~/Downloads/big.iso --only home
+flux profile add-folder home ~/Projects
+```
 
 ### Folders on an external drive
 
@@ -445,8 +510,20 @@ created when you save a profile with a schedule (or with `flux schedule install 
 | `trigger = "calendar"` | `on_calendar = "daily"`, `"Mon..Fri 18:00"`, `"*-*-* 03:30"` | at those times; with `catch_up`, a time missed while the computer was off runs at the next start |
 | `trigger = "interval"` | `every = "4h"` | when the last successful backup is older than that |
 | `on_connect = true` | | also when the profile's drive is plugged in |
+| `release_drive = true` | | when a backup ends, unmount the drive and power it off, so it's safe to unplug (see below) |
 | `skip_on_battery = true` | | scheduled runs wait for mains power |
 | `skip_on_metered = true` | | scheduled runs to a server wait while the connection is metered (mobile data, a phone's hotspot, as NetworkManager reports it) |
+
+**Safe to unplug.** With *Unmount the drive when done* (under *When*, for a backup to a
+drive; `release_drive = true`), each backup ends by unmounting its drive and powering it
+off, as the file manager's *Eject* does, and a notification says it's safe to unplug. An
+encrypted drive is locked again first. It applies to drives the desktop mounted (under
+`/run/media` or `/media`); a drive mounted from `/etc/fstab` would need an administrator's
+password, so it stays mounted and the run says why. A drive something else is using (a
+file open in another program, another partition of it mounted) stays as it is, and the
+notification says to eject it from the file manager before unplugging it. Together with
+*Also when this drive is plugged in*, a USB drive backs up when it's plugged in and can be
+unplugged when the notification comes.
 
 ```sh
 flux schedule status        # every profile's timer and next run
@@ -503,7 +580,8 @@ removed, and this deletes the data only they used. Results appear in the run's l
 *Activity*.
 
 **Closing the window keeps Flux in the system tray.** Its icon lights up while a backup
-runs, and its menu opens the window, backs up everything, pauses schedules or quits. The
+runs (pointing at it says how far it is: "21% · about 6 minutes left"), and its menu
+opens the window, backs up everything, pauses schedules or quits. The
 first time, a notification says where Flux went. To quit when the window closes instead,
 turn off *Preferences › App › Keep running in the tray when the window is closed*. On a
 desktop with no tray to show the icon (GNOME without the AppIndicator extension, say),
@@ -511,9 +589,37 @@ closing the window quits, so the app is never left running where you can't reach
 Starting Flux again while it runs brings back its window rather than a second copy.
 Scheduled backups never need the app either way.
 
+**How long is left** shows wherever a backup or restore runs: in its progress, in the
+restore dialog, beside it in All backups, and when pointing at it in the sidebar. The
+estimate follows the recent speed (about the last 20 seconds), so a slow start or a few
+big files don't hold it back for long, and it's rounded to the minute.
+
 **Preferences** (bottom of the sidebar) also hold: start in the tray when you log in, the
-theme, the clock (12-hour, 24-hour, or like the system: how the app shows and takes
-times), and the exclusions new backups start with.
+theme, the layout, the clock (12-hour, 24-hour, or like the system: how the app shows and
+takes times), and the exclusions new backups start with.
+
+The **layout** is *Compact* unless you change it: each backup is one line in the sidebar,
+All backups shows your backups in columns (their last 30 days line up, so you can compare
+them), and a backup's Overview has its settings and where it's kept in a column on the
+right. *Full* is the roomier layout Flux had before: two lines a backup in the sidebar,
+each backup's status on its own lines, the settings below the overview. Change it under
+*Preferences › App › Layout*; it's kept on this computer. In Compact, a backup's
+Settings and the Preferences page list their sections at the side, to jump to one.
+
+The **sidebar** folds to a narrow column of icons (the sidebar button by the title, or
+F9) for more room: each backup shows as an icon of what it backs up, with a dot for how
+it's doing (green fine, amber worth a look, red not protected, blue running). Point at
+one for its name and status. It stays folded until you open it again.
+
+The **text size** (*Preferences › App › Text size*: Small, Default, Large) makes
+everything in the window smaller or larger, 90% or 115%, as zooming a web page does; the
+window's smallest size grows with it so nothing gets cramped. It's kept on this computer.
+
+The **accent colour** (the main button, switches, progress and focus) follows the one
+chosen in your desktop's settings (GNOME's *Appearance*, KDE's *Colors*), and changes
+with it while Flux is open, made a shade lighter or darker where it must be to stay
+readable. *Preferences › App › Accent colour › Flux blue* keeps Flux's own blue. A
+desktop that doesn't say which accent it uses gets Flux's blue either way.
 
 ### systemd timers or cron
 
@@ -552,6 +658,10 @@ Open **Snapshots**, pick a snapshot from the list, browse to what you need, and 
 just that: every file and folder has its own **Restore** button (it shows when you point
 at the row), or tick several, even in different folders, and click **Restore N items**.
 **Restore this whole folder** brings back everything in the folder you're in.
+
+**What a backup changed.** On a backup's Overview, each recent backup says what it
+changed: "214 new · 38 changed · 2 deleted" (in Compact, as a comparison does: *+214 ~38
+−2*). Click it to see the files, compared with the backup before.
 
 **Calendar**, above the list, shows a month at a time: days with a snapshot are marked
 (green, or amber when files were skipped), and a red dot marks a day a backup failed.
@@ -627,10 +737,43 @@ them, and the comparison says how many there are.
 and a unit (MB, GB, TB). A limit under 1 MB leaves out nearly every file, so Flux warns
 when you set one, and Overview and Snapshots say so while it's set.
 
+**Preview.** To see a file before restoring it, select it and press Space, click the eye
+next to *Restore*, or right-click › **Preview**: a picture is shown, a text file's first
+lines (up to 400), and anything else what's known of it, all read from the backup as it
+was. *Restore…*, *Open a copy* and *Versions…* are in the preview too. Files over 32 MB
+aren't previewed.
+
 To just look at a file, double-click it (or right-click › **Open a copy**). Flux restores a
 read-only copy into a temporary folder and opens it with your usual app; nothing on your
 computer changes. Save it somewhere else if you want to keep it, or restore it. Temporary
 copies are removed after a day.
+
+**Browse in Files.** To look through a snapshot with your usual file manager instead,
+choose *Browse in Files* in its ⋯ menu: Flux mounts it read-only and opens it there (at the
+backed-up folder, when there's one). Copy what you need out of it; nothing in it can be
+changed. A line above the browser says it's open; *Close* unmounts it, as does opening
+another snapshot this way or quitting Flux. It needs FUSE (`fusermount3`), like `flux
+mount`, and isn't offered for system backups, whose files belong to root.
+
+### From the file manager
+
+Right-click a file or folder in **Nautilus** (GNOME Files; the items are under **Flux
+Backup**), **Nemo** or **Dolphin**:
+
+- **Previous versions…** opens Flux on the versions of that file or folder in the backup
+  that takes it, newest first, each with *Compare*, *Open* and *Restore…*.
+- **Restore deleted files here…** (on a folder, or a folder's empty space) opens the
+  newest snapshot at that folder with *Only deleted* on: what the backup has that isn't
+  there any more, ready for *Restore N deleted items*. For something deleted before the
+  newest snapshot, pick an older one in the list.
+
+Flux starts if it isn't running (or the running one shows its window). When none of your
+backups takes the folder, it says so. The same menu can leave things out of your backups
+or add a folder to one (see [Leave out or add from the file
+manager](#leave-out-or-add-from-the-file-manager)). The entries come with the `.deb` and `.rpm`
+packages; Nautilus also needs nautilus-python (`nautilus-python` on Fedora,
+`python3-nautilus` on Debian and Ubuntu). From a terminal, the same is `flux-backup
+--previous-versions PATH` or `flux-backup --restore-deleted FOLDER`.
 
 ### In a terminal
 
@@ -801,6 +944,16 @@ say) keeps the default ones; one that sets any means exactly what it says.
 is below them, the oldest snapshots are removed. They never take pinned or named
 snapshots, the `keep_last` newest, or the newest `safety_floor` complete ones, and they do
 nothing when `enabled = false`.
+
+**Deleting by hand.** To make room now, delete snapshots yourself: *Delete…* in a
+snapshot's ⋯ menu for one, or **several at once**: Ctrl-click snapshots in the list (or
+*Select several…* in the menu, then click them), Shift-click to take a range, and
+*Delete N…*. Pinned snapshots among them stay (unpin them first); a Vault frees the data
+only the deleted snapshots used, and the toast says how much. **Changed your mind?** For
+eight seconds after you confirm, the snapshots are only out of the list: *Undo* in the
+corner (or Ctrl+Z) brings them back. Then they're deleted. If Flux is quit within those
+seconds, nothing is deleted. In a terminal: `flux delete
+home 2026-11-01_20-00-00 2026-11-02_20-00-00 …` (`--force` for pinned ones).
 
 Pruning runs after every backup. Run it yourself with a preview:
 
@@ -1003,8 +1156,41 @@ flux key passwd docs
 flux key remove docs <key-id>
 ```
 
-**There is no way to recover a Vault whose passwords are all lost.** Keep a second password
-somewhere safe.
+**There is no way to recover a Vault whose passwords are all lost**, unless it has a
+recovery code (below). Make one, or keep a second password somewhere safe.
+
+### A recovery code
+
+If the password is lost, an encrypted Vault can't be opened by anyone, you included. A
+**recovery code** is the way back: a long random code (six groups of five letters and
+digits) that opens the Vault like a password. Print it or write it down, and keep it
+somewhere safe, away from the computer and the backups.
+
+Setting up an encrypted Vault ends with an offer to make one; later, it's under *How
+backups are stored › Security › Recovery code*, and the recovery checklist has a line for
+it. The code is shown once, when it's made; Flux doesn't keep it. Making a new one stops
+the old one working. To use it, type it wherever the password is asked for, in Flux or
+`flux-vault-recover`: capitals, spaces and dashes don't matter, and O, I and L are read
+as 0, 1 and 1. It doesn't need the unlock file, so keep it as safe as the password. In a
+terminal: `flux key recovery home` makes one, `--remove` removes it.
+
+**After unlocking with it in the app**, Flux asks for a new password straight away, as
+the old one is lost:
+
+- The new password replaces the old one, which stops opening the backups. When the
+  Vault has several passwords, you choose which stop working (untick a spare you still
+  know).
+- It's kept where the old one was: in the keyring, or in the backup's key file. If the
+  password comes from a command, change the command yourself.
+- If the old password needed the unlock file, so does the new one. If the unlock file
+  is gone too, the new password works without it; set one up again under *Security*.
+- You get a new recovery code, shown once, and the one you just typed stops working: it
+  may have been seen, or left in the clipboard. (For a system backup, make the new code
+  with `sudo flux --system key recovery <backup>`.)
+
+Nothing is re-encrypted, and it's instant: the passwords and the code each unlock the
+same key, which only your computer saw. In a terminal, `flux key passwd` after opening
+with the code adds a new password and keeps the code.
 
 ### Security settings
 
@@ -1031,7 +1217,8 @@ switch. The everyday choices are already made for you; these are for when you wa
 - **Hide file sizes.** Someone holding the drive can't read anything in a Vault, but the
   size of each stored file is visible, and a backup that changed one small file stores
   something about that size. This pads what's stored so only a rough size shows. It costs
-  up to a few percent more space and applies to backups from then on.
+  up to a few percent more space and applies to backups from then on. It's on for Vaults
+  set up with Flux 1.2 or later; Vaults from before keep the setting they had.
 - **Lock it again in the app.** After you unlock a Vault in the app, the app keeps its
   password in memory until it closes. Choose 5 minutes to an hour to have it forgotten
   sooner when unused. Scheduled backups get the password from their own source and aren't
@@ -1357,8 +1544,38 @@ differ from the app's (after a partial upgrade), it says so, since scheduled bac
 the `flux` command. *Copy version info* copies it all. The version is also at the foot of
 Preferences, and `flux --version` prints it.
 
+**A weekly note when all is well.** Once a week, when every one of your backups is
+protected with nothing to look at, Flux sends one quiet notification saying so: how
+recent the newest and oldest copies are, and when the last restore test passed. It comes
+at the end of a scheduled backup, so the app needn't be open, and never when something
+needs you (those have their own warnings). The first one comes a week after the first
+check. *Preferences › Notifications › A weekly note when all is well* turns it off (in
+`settings.toml`: `weekly_note_off = true`).
+
+**Quiet hours.** *Preferences › Notifications › Quiet hours* (off at first; 10 PM to 8 AM
+when turned on, and the times can be changed) keeps the notifications that only inform out
+of those hours: a scheduled backup that succeeded, and the weekly note, which then comes
+with the first check after them. Everything that needs you is still sent at once: a failed
+backup, unusual changes, a failed restore test, what a monthly check found. Scheduled
+backups follow it with the app closed. In `settings.toml`:
+
+```toml
+[quiet_hours]
+from = "22:00"
+to = "08:00"     # earlier than from: the next morning
+```
+
 An interrupted backup (power cut, Ctrl-C, unplugged drive) doesn't damage anything. The
 unfinished snapshot is never shown, and the next run continues it.
+
+**Buttons on notifications.** When a scheduled backup, or one started from the app,
+fails or finishes with problems, its notification offers **Try again** (the same backup
+runs again at once) and **Open** (Flux Backup opens on that backup, started if it isn't
+running); clicking the notification itself opens it too. Notifications about unusual
+changes, a failed restore test or a monthly check offer **Open**. The backup waits for a
+click for up to ten minutes after it ends (`FLUX_NOTIFY_WAIT` sets how many seconds), or
+until you close the notification. A desktop whose notifications have no buttons shows
+them as before, and `flux backup` typed in a terminal never waits.
 
 ### Webhooks: notifications off this computer
 
@@ -1467,6 +1684,7 @@ exclude_larger_than = "8GB"
 exclude_caches = true
 exclude_if_present = [".nobackup"]
 one_file_system = false
+exclude_gitignored = false        # in git working trees, skip what .gitignore ignores
 
 [[sources.volumes]]               # a folder on a drive of its own (recorded when saved)
 path = "/mnt/photos"              # one of sources.paths
@@ -1505,6 +1723,7 @@ catch_up = true
 skip_on_battery = false
 skip_on_metered = false           # backups to a server wait on metered connections
 on_connect = false
+release_drive = false             # unmount and power off the drive when a backup ends
 
 [maintenance]                     # upkeep after scheduled backups
 verify_monthly = false            # read every stored byte back about once a month
@@ -1574,6 +1793,7 @@ Durations are written like `90s`, `15min`, `4h`, `1day`, `2weeks`; sizes like `5
 | `FLUX_SECRET_TOOL` | `secret-tool` program to use |
 | `FLUX_SYSTEMCTL`, `FLUX_SYSTEMD_UNIT_DIR` | where timers are written and how systemd is called |
 | `FLUX_CURL` | `curl` program webhooks are sent with |
+| `FLUX_NOTIFY_WAIT` | seconds a backup waits after it ends for a click on its notification's buttons (default 600) |
 | `FLUX_VAULT_RECOVER` | the `flux-vault-recover` program kept next to Vaults on drives |
 | `FLUX_CRONTAB`, `FLUX_CRON_DIR` | the `crontab` program and the `/etc/cron.d` folder used with cron |
 

@@ -246,6 +246,15 @@ are darker in the light theme so text stays AA.
 - **Brand Blue** (`brand`): the lit pill of the logo; reserved for the mark.
 - **Chart Blue** (`chart`): the one data series in the space chart (at least 3:1 on
   groups); area fill at 10% opacity, dashed projection line.
+- **The desktop's accent instead** (*Preferences › App › Accent colour*, the default):
+  when the XDG settings portal gives an accent colour (GNOME 47+, KDE), `primary`,
+  `on-primary`, `accent` and `chart` are made from it (`lib/accent.ts`) and set inline on
+  `<html>`, followed live (`flux://accent`). Each keeps the hue and moves only in OKLCH
+  lightness, as far as it must to be as strong as Flux's blue: white on `accent` 4.8:1,
+  `primary` 5.3:1 on the groups and the shell, `chart` 4.5:1 on the groups; `on-primary`
+  is a near-black of the hue in dark, white in light. GNOME's blue comes out within a
+  shade of Flux's own. `brand` (the logo) and the status hues never change. With no
+  portal, or no accent set, or *Flux blue* chosen, the tokens above stand.
 
 ### Secondary (status)
 - **Protected Green** (`success`): protected, a day that kept a copy, the ok glyph.
@@ -299,6 +308,11 @@ status hues 4.5 to 6.8:1 on every surface; white on `accent` 5.1:1; white on `da
 **Character:** Inter reads as the desktop's own UI face; JetBrains Mono marks what a
 machine produced. Fonts are bundled locally with fontsource so they work offline.
 
+- **Text size** (*Preferences › App*): Small 90%, Default, Large 115%. The webview is
+  zoomed (Tauri `set_zoom`), so every size, gap and breakpoint scales together and the
+  layout at Large in a window 15% larger is the layout at Default; the window's minimum
+  (900×600) scales with it. Kept as `flux.textSize`. The demo zooms `<html>` instead.
+
 ### Hierarchy
 - **Display** (600, 30px, 1.25, -0.015em, balanced): the protection sentence on All
   backups ("4 of 5 backups are protected.").
@@ -325,7 +339,66 @@ labels, no letter-spaced captions.
 
 ## Layout
 
-The window is a titlebar (48px) over a row of sidebar (264px) and view. The view is
+**Two layouts** (*Preferences › App › Layout*, `<html data-layout>`, kept in local
+storage as `flux.layout`). **Compact** is the default, also for installs from before it
+existed (no stored choice reads as Compact); **Full** is the layout described below as it
+was through 1.2.0. Compact changes arrangement and density only; colours, type, shapes
+and components are the same:
+- **Sidebar** 272px; a backup is one line: glyph, name (13.5px/500), and a word or two of
+  status on the right (12px, `sideLabel()` in `lib/attention.ts`: "21%", "Failed", "Low
+  on space", or for a healthy backup how old its copy is). The name takes what it needs;
+  the status gets the rest, down to 3rem, and the whole status is in the item's title.
+- **All backups** from 800px of container: a column head row (12px `fg-muted`) and one
+  44px row a backup in a grid: glyph 24px, backup (name, status word and path), the
+  30-day strip (240px, so every strip starts in the same place and the fixed ramp
+  compares across backups), last good copy (7.5rem), next (10.75rem, so "when its drive
+  is connected" fits), chevron. Sections 24px apart. Narrower, the Full rows.
+- **A backup's header:** the Overview/Snapshots/Activity switcher (28px segments) sits on
+  the title's line; the tags have a line of their own under it, the header's whole
+  width (so four fit on one line). On the Overview the informational tags (where, when, how stored,
+  Flux Sentry) are left out, since the side column says them; tags that warn (on hold,
+  system) stay.
+- **Overview** fits a 1200×780 window without scrolling when nothing extra needs saying,
+  idle or while backing up. From 760px of container: two columns 24px apart.
+  - **The two columns are symmetrical.** Each starts with a 28px heading row in the same
+    style ("Status" on the left, "Settings at a glance" on the right), 8px above its first
+    box, so the first boxes start level; for that, the glance's group titles are the first
+    line of their boxes (12px/500 `fg-muted` on `fg` at 3% over `group`). The columns
+    stretch to the same height and each one's last block sits at its foot (`mt-auto`), so
+    they end level too.
+  - Left, 16px between sections: one card holding the answer (a 40px glyph, the sentence
+    at 18px/600, the facts line at 12.5px, any detail), a running backup's progress
+    (`JobPanel inline`: phase and figures, then the bar with *Shut down when done* at its
+    end; Full shows it as a card above the page) and, under a hairline, the 30-day chart
+    32px tall (`HistoryStrip low`, the ramp scaled); *Recent backups* in 34px rows, each with what it changed as
+    a diff says it (`+214 ~38 −2`, the words in its title; Full says "214 new · 38
+    changed · 2 deleted"), a button opening the comparison with the backup before; then
+    one flat list of the restore test (a 24px glyph, one truncated line, a 28px *Test
+    now*), *Usable without Flux*, and the space as one row (free of size, a 96px meter,
+    how full, a chevron) that opens to the forecast and what the snapshots take;
+    *Storage* is a folded line when there's no space row; the folded sections as in Full,
+    at the column's foot.
+  - Right, an 18.5rem column: *Settings at a glance*, one cell a line with the label on
+    the left and the value on the right (no chevron; the hover lift says it opens). A
+    value that doesn't fit its line switches to its short form ("7d · 4w · 12m · 5y",
+    "USB stick +1"), measured as the column's width changes; the full wording is in the
+    cell's tooltip and read by screen readers. Open
+    unless closed in Compact (remembered apart from Full's, as
+    `flux.glanceClosedCompact`); then *Where it's kept* folded to one line with how many
+    places and how many failed last time, at the column's foot.
+  - The page's bottom padding is 24px instead of 40px (also on the New backup page).
+  - **Settings and Preferences: their sections at the side** (`SectionNav`), when the page
+    is at least 800px wide (a container query on the scroller; narrower, as in Full).
+    The page is 880px: the title over both columns, then a 10.5rem list and the 680px
+    form 32px apart. The list is sticky, marks the section in view (`aria-current=
+    "location"`, the neutral `selected` lift like the sidebar, never blue) and goes to
+    a section on a click (smooth unless motion is reduced; focus moves into it).
+    *Advanced* in Preferences opens as it's gone to.
+- **Activity:** the run list is 19.5rem wide from a 1100px window (18rem in Full), so
+  "Completed with problems" fits.
+- **Rows** are at least 44px with 8px block padding, everywhere.
+
+The window is a titlebar (48px) over a row of sidebar (264px; 272px in Compact) and view. The view is
 the only rounded thing in the frame: its top-left corner carries the panel radius and a
 1px `group-edge` line on its top and left. Content is centred in the view with 40px side
 gutters and 24px top padding, at a maximum width per kind of page:
@@ -347,7 +420,9 @@ overall. The minimum window is 900 by 600.
 
 Dialogs are native `<dialog>` elements on a 55% black backdrop, `view` coloured with the
 panel radius, 24px padding. The close button is last in the DOM (positioned top right) so
-opening a dialog focuses its first real control, not Close.
+opening a dialog focuses its first real control, not Close. A step that has to be done
+before going on (a new password after unlocking with the recovery code) has no Close and
+ignores Escape.
 
 ## Elevation & Depth
 
@@ -449,8 +524,19 @@ one choice of a few (theme, destination type, how often).
   then System backups (locked: a row with a chevron), and Preferences at the foot. Items
   are 8px-radius, 8px by 10px padding; hover `shell-hover`; current is the `selected`
   lift with `aria-current="page"`. A small red dot marks a failure not yet seen.
-- **Titlebar** (48px, `shell`): 24px logo and "Flux Backup" at 13.5px/600 on the left;
-  drag anywhere to move, double-click to maximise.
+- **Folded sidebar** (64px): a column of icons, everything in its place. Each backup's
+  status glyph cross-fades to an 18px icon of what it backs up (`lib/backupIcon.ts`:
+  home, document, image, music, mail, code, film, settings for system ones, drive for
+  `/`, else folder) with a 10px status dot at its corner (`success`, `warning`,
+  `danger`, `primary` pulsing while it runs; a 2px ring of the item's background); All
+  backups is `layers`, New backup and Preferences their plain icons; the section heads
+  become a 28px rule. Every icon is centred 32px in. Names and status fade out (150ms)
+  while the width eases 264/272 → 64px (260ms, `cubic-bezier(0.2,0,0,1)`); no motion
+  under reduced motion. Pointing (after 350ms) or keyboard focus shows a label to the
+  right (`tip`): the name and status. Folded or open by the title bar's sidebar button
+  or F9 (GNOME's key for a sidebar), kept as `flux.sidebar`.
+- **Titlebar** (48px, `shell`): 24px logo and "Flux Backup" at 13.5px/600 on the left,
+  then the sidebar button; drag anywhere to move, double-click to maximise.
 
 ### Menus and toasts
 - **Menu:** `control`, 12px radius, 4px padding, 13.5px items with 15px icons in
@@ -458,6 +544,9 @@ one choice of a few (theme, destination type, how often).
   items red, separators `fg` at 10%.
 - **Toast:** bottom right, 384px wide, `control`, 12px radius, icon in the state colour,
   dismiss icon button.
+- **Undo** (deleting snapshots): a bar above the toasts, "Deleting N snapshots" and an
+  *Undo* button, with a 2px `primary` line along its foot running out over the eight
+  seconds (a still line under reduced motion). Ctrl+Z undoes too, except while typing.
 
 ### Progress
 - A 6px round `track` bar with a `primary` fill (width eases over 300ms); above it the

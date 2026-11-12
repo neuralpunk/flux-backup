@@ -63,6 +63,50 @@ pub fn delete_snapshot_impl(state: &Service, id: String, snapshot: String) -> Re
     Ok(freed)
 }
 
+/// What deleting several snapshots did.
+#[derive(Debug, Serialize)]
+pub struct Deleted {
+    /// The snapshots deleted.
+    pub deleted: Vec<String>,
+    /// Pinned snapshots among those asked for, kept.
+    pub pinned: Vec<String>,
+    /// Bytes freed (Vaults; `None` for the others).
+    pub freed: Option<u64>,
+}
+
+/// Delete several snapshots at once. Pinned ones are kept (and listed), as retention
+/// keeps them; unknown ids are an error before anything is deleted.
+pub fn delete_snapshots_impl(
+    state: &Service,
+    id: String,
+    snapshots: Vec<String>,
+) -> Result<Deleted> {
+    let (pid, p) = state.load(&id)?;
+    let repo = state.open(&pid, &p)?;
+    let mut deleted = Vec::new();
+    let mut pinned = Vec::new();
+    for s in &snapshots {
+        let m = repo.find(s)?;
+        if m.pinned {
+            pinned.push(m.id);
+        } else if !deleted.contains(&m.id) {
+            deleted.push(m.id);
+        }
+    }
+    let ids: Vec<&str> = deleted.iter().map(String::as_str).collect();
+    let freed = if ids.is_empty() {
+        None
+    } else {
+        repo.delete(&ids, &silent)?
+    };
+    state.forget_cached(&pid);
+    Ok(Deleted {
+        deleted,
+        pinned,
+        freed,
+    })
+}
+
 #[derive(Serialize)]
 pub struct Comparison {
     old: String,
@@ -546,5 +590,98 @@ mod export_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod delete_many_tests {
+    use super::*;
+    use flux_core::profile::Target;
+    use flux_core::{Paths, ProfileId, ProfileStore, Scope};
+
+    #[test]
+    fn several_go_at_once_and_pinned_ones_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        std::fs::create_dir_all(t.join("src")).unwrap();
+        std::fs::create_dir_all(t.join("tgt")).unwrap();
+        let paths = Paths::under(t.join("home"), Scope::User);
+        let id = ProfileId::new("p").unwrap();
+        let mut p = flux_core::Profile::new(
+            "P",
+            Target::Local {
+                path: t.join("tgt"),
+                fs_uuid: None,
+            },
+            vec![t.join("src")],
+        );
+        p.options.notify = false;
+        p.options.snapshot_if_unchanged = true;
+        ProfileStore::new(&paths).create(&id, &p).unwrap();
+        for i in 0..4 {
+            std::fs::write(t.join("src/f"), format!("v{i}")).unwrap();
+            flux_runner::run_backup(
+                &flux_runner::BackupJob {
+                    paths: &paths,
+                    id: &id,
+                    profile: &p,
+                    name: None,
+                    dry_run: false,
+                    trigger: flux_runner::Trigger::Manual,
+                    prune: false,
+                    only_if_due: false,
+                    ask: None,
+                    shutdown_after: false,
+                },
+                &flux_core::progress::Progress::new(),
+                &flux_core::progress::silent,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        let state = Service::new(paths.clone());
+        let snaps = crate::views::snapshots_impl(&state, "p".into()).unwrap();
+        assert_eq!(snaps.len(), 4);
+        let ids: Vec<String> = snaps.iter().map(|s| s.id.clone()).collect();
+        update_snapshot_impl(
+            &state,
+            "p".into(),
+            ids[1].clone(),
+            flux_fs::snapshot::SnapshotChange {
+                pinned: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Unknown ids fail before anything is deleted.
+        assert!(
+            delete_snapshots_impl(&state, "p".into(), vec![ids[0].clone(), "nope".into()]).is_err()
+        );
+        assert_eq!(
+            crate::views::snapshots_impl(&state, "p".into())
+                .unwrap()
+                .len(),
+            4
+        );
+
+        let r = delete_snapshots_impl(
+            &state,
+            "p".into(),
+            vec![
+                ids[0].clone(),
+                ids[1].clone(),
+                ids[2].clone(),
+                ids[0].clone(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(r.deleted, vec![ids[0].clone(), ids[2].clone()]);
+        assert_eq!(r.pinned, vec![ids[1].clone()]);
+        let left: Vec<String> = crate::views::snapshots_impl(&state, "p".into())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(left, vec![ids[1].clone(), ids[3].clone()]);
     }
 }

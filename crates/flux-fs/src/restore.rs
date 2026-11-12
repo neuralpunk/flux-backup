@@ -497,6 +497,9 @@ fn extras(
     {
         return Vec::new();
     }
+    // What the folder's .gitignore files ignore was never backed up either (when the
+    // backup skips it): read them where the files are being restored to.
+    let git = filter.git_scope_of_dir(dest);
     found
         .into_iter()
         .filter(|f| {
@@ -510,6 +513,7 @@ fn extras(
                 && !f.name.as_bytes().windows(6).any(|w| w == b".flux-")
                 && f.dev == parent_dev
                 && !filter.is_excluded(&was, f.is_dir)
+                && !git.as_ref().is_some_and(|g| g.ignored(&at, f.is_dir).is_some())
                 && (f.is_dir || !filter.is_too_large(f.size))
         })
         .collect()
@@ -1168,6 +1172,94 @@ mod tests {
         snap.sources.clear();
         let scope = exact_folders(&items, &Above::new(), &snap);
         assert!(scope.folders.is_empty() && scope.notes.len() == 1);
+    }
+
+    /// With a backup that skips what .gitignore files ignore, an exact restore leaves
+    /// those files alone too (they were never in the snapshot, and they aren't extra).
+    #[test]
+    fn exact_restore_leaves_what_gitignore_ignores() {
+        struct Dirs(Vec<Entry>);
+        impl RestoreSource for Dirs {
+            fn entries(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<Entry>> + '_>> {
+                Ok(Box::new(self.0.iter().cloned().map(Ok)))
+            }
+            fn write_file(
+                &self,
+                _e: &Entry,
+                _out: &File,
+                _copier: &Copier,
+                _progress: &Progress,
+            ) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let at = |rel: &str| t.path().join(rel);
+        std::fs::create_dir_all(at("proj/.git")).unwrap();
+        std::fs::create_dir_all(at("proj/build")).unwrap();
+        std::fs::write(at("proj/.gitignore"), "build/\n.env\n").unwrap();
+        std::fs::write(at("proj/.env"), "KEY=1").unwrap();
+        std::fs::write(at("proj/build/app"), "x").unwrap();
+        std::fs::write(at("proj/stray.txt"), "x").unwrap();
+        let rel = |p: &str| {
+            at(p)
+                .strip_prefix("/")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let meta = |p: &str, kind| {
+            let m = std::fs::metadata(at(p)).unwrap();
+            let mut e = entry(&rel(p), kind);
+            (e.mode, e.uid, e.gid, e.dev) = (m.mode() & 0o7777, m.uid(), m.gid(), m.dev());
+            e
+        };
+        let source = Dirs(vec![
+            meta("proj", Kind::Dir),
+            meta("proj/.git", Kind::Dir),
+            meta("proj/.gitignore", Kind::File),
+        ]);
+        let mut snap = test_snapshot();
+        snap.sources = vec![at("proj")];
+        let mut profile = flux_core::Profile::new(
+            "t",
+            flux_core::profile::Target::Local {
+                path: at("target"),
+                fs_uuid: None,
+            },
+            vec![at("proj")],
+        );
+        profile.sources.exclude.clear();
+        let mut removes = |on: bool| {
+            profile.sources.exclude_gitignored = on;
+            let filter = Filter::new(&profile.sources, None).unwrap();
+            let req = RestoreRequest {
+                snapshot: &snap,
+                paths: vec![at("proj")],
+                to: None,
+                keep_existing: false,
+                dry_run: true,
+                xattrs: XattrPolicy {
+                    acl: false,
+                    other: false,
+                },
+                links: LinkPolicy::FollowAll,
+                exact: Some(&filter),
+            };
+            let mut r = preview(source.0.iter().cloned().map(Ok), &req)
+                .unwrap()
+                .remove_paths;
+            r.sort();
+            r
+        };
+        assert_eq!(removes(true), vec![at("proj/stray.txt")]);
+        // Without the setting, those files were backed up, so their absence means extra.
+        assert_eq!(
+            removes(false),
+            vec![at("proj/.env"), at("proj/build"), at("proj/stray.txt")]
+        );
     }
 
     /// An exact restore of the folder above a source leaves what else is in it, and what

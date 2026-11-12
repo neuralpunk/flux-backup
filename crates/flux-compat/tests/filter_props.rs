@@ -203,6 +203,7 @@ proptest! {
             exclude_caches: false,
             exclude_if_present: Vec::new(),
             one_file_system: false,
+            exclude_gitignored: false,
             volumes: Vec::new(),
         };
         sources.exclude = exclude.clone();

@@ -88,6 +88,17 @@ impl State<'_> {
         }
     }
 
+    /// An I/O error in words: a file too big for the drive (FAT32's 4 GB) says so.
+    fn io_words(&self, err: io::Error) -> String {
+        if err.raw_os_error() == Some(27) {
+            let fs = flux_core::target_check::filesystem_of(self.ctx.dest);
+            if let Some(words) = flux_core::target_check::too_big_for_drive(&err, fs.as_deref()) {
+                return words;
+            }
+        }
+        err.to_string()
+    }
+
     fn stopped(&self) -> bool {
         self.abort.load(Relaxed) || self.ctx.progress.is_cancelled()
     }
@@ -156,7 +167,7 @@ pub fn execute(ctx: &ExecCtx<'_>) -> Result<ExecResult, MirrorError> {
                     Action::Special => make_special_file(&st, e),
                 };
                 if let Err(err) = r {
-                    st.fail(idx, e, err);
+                    st.fail(idx, e, st.io_words(err));
                 }
                 done += 1;
             }

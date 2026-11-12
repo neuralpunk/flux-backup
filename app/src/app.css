@@ -380,6 +380,11 @@
     padding: 0.625rem 1rem;
     text-align: left;
   }
+  /* Compact (Preferences › Layout): rows a step shorter, so more fit. */
+  :root[data-layout="compact"] .row {
+    min-height: 2.75rem;
+    padding-block: 0.5rem;
+  }
   .rows > .row + .row,
   .rows > * + .row,
   .rows > .contents > .row + .row {

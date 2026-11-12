@@ -308,9 +308,19 @@ fn readiness_says_what_a_recovery_would_need() {
     let c = recover::readiness(&paths, &id, &p);
     assert_eq!(
         c.iter().map(|c| c.key).collect::<Vec<_>>(),
-        ["settings", "password_elsewhere", "restore_test", "offsite"]
+        [
+            "settings",
+            "password_elsewhere",
+            "recovery_code",
+            "restore_test",
+            "offsite"
+        ]
     );
     assert!(c.iter().all(|c| !c.ok));
+    // Making a recovery code (`flux key recovery`, the app) ticks its line.
+    recover::set_answer(&paths, &id, "recovery_code", true).unwrap();
+    let c = recover::readiness(&paths, &id, &p);
+    assert_eq!(ok(&c, "recovery_code"), Some(true));
     assert_eq!(run(&paths, &id, &p), RunStatus::Completed);
     let c = recover::readiness(&paths, &id, &p);
     assert_eq!(ok(&c, "settings"), Some(true));

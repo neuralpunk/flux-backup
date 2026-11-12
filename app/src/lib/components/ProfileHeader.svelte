@@ -22,6 +22,10 @@
   const starting = $derived(!!app.starting[profile.id]);
   const stopping = $derived(!!app.stopping[profile.id]);
   const editing = $derived(app.tab === "settings");
+  const compact = $derived(app.layout === "compact");
+  // Compact's Overview shows where, when, how and Flux Sentry in its side column, so the
+  // header keeps only the tags that warn.
+  const lean = $derived(compact && app.tab === "overview");
   /** Flux Sentry's own dialog, from its tag. */
   let sentryOpen = $state(false);
 
@@ -40,6 +44,44 @@
   };
 </script>
 
+{#snippet tagsRow()}
+        {#if !lean || profile.held || profile.scope === "system"}
+        <div class="{compact ? '-mt-3' : 'mt-2.5'} flex flex-wrap items-center gap-1.5" aria-label="About this backup">
+          {#if !lean}
+          <span class="tag max-w-72" title="Backs up to {profile.target}"><Icon name={profile.remote ? "server" : "drive"} size={13} /><span class="truncate">{where}</span></span>
+          <span class="tag" title="When it runs"><Icon name="clock" size={13} />{schedule}</span>
+          {#if engineTag[profile.engine]}
+            {@const e = engineTag[profile.engine]}
+            <span class="tag {e.accent ? 'tag-accent' : ''}" title={e.title}><Icon name={e.icon} size={13} />{e.text}</span>
+          {/if}
+          {/if}
+          {#if profile.held}
+            <span class="tag tag-warn" title="Flux Sentry found unusual changes in the last backup. No backup is made until you settle them on the Overview: This was me, or It's dealt with."><Icon name="sentry" size={14} />Flux Sentry · backups on hold</span>
+          {:else if lean}
+            <!-- Flux Sentry is in the side column. -->
+          {:else if profile.sentry && profile.sentry !== "off"}
+            <button class="tag tag-accent tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry learns how much of this backup normally changes, and warns when a backup doesn't fit or shows the marks of ransomware{profile.sentry === 'high' ? ' (watching closely)' : ''}. Click to change how it watches."><Icon name="sentry" size={14} />Flux Sentry active{profile.sentry === "high" ? " · closely" : ""}<Icon name="chevronRight" size={12} /></button>
+          {:else if profile.sentry === "off"}
+            <button class="tag tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry isn't watching this backup: no warnings about unusual changes. Click to turn it on."><Icon name="sentry" size={14} />Flux Sentry off<Icon name="chevronRight" size={12} /></button>
+          {/if}
+          {#if profile.scope === "system"}
+            <span class="tag tag-warn" title="Runs as root; managed through the administrator helper"><Icon name="shield" size={13} />System · runs as root</span>
+          {/if}
+        </div>
+        {/if}
+{/snippet}
+
+{#snippet views(size: string)}
+  <div class="segmented shrink-0 {size}" role="tablist" aria-label="{profile.name}: views">
+    {#each tabs as t (t.id)}
+      <button role="tab" aria-selected={app.tab === t.id} title="{t.label} (Ctrl+{t.key})" onclick={() => (app.tab = t.id)}>
+        <Icon name={t.icon} size={compact ? 14 : 15} />
+        {t.label}
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
 <header class="flex flex-col gap-5">
   {#if editing}
     <div class="flex items-center justify-between gap-6">
@@ -54,25 +96,16 @@
   {:else}
     <div class="flex items-start justify-between gap-6">
       <div class="min-w-0">
-        <h1 class="page-title truncate">{profile.name}</h1>
-        <div class="mt-2.5 flex flex-wrap items-center gap-1.5" aria-label="About this backup">
-          <span class="tag max-w-72" title="Backs up to {profile.target}"><Icon name={profile.remote ? "server" : "drive"} size={13} /><span class="truncate">{where}</span></span>
-          <span class="tag" title="When it runs"><Icon name="clock" size={13} />{schedule}</span>
-          {#if engineTag[profile.engine]}
-            {@const e = engineTag[profile.engine]}
-            <span class="tag {e.accent ? 'tag-accent' : ''}" title={e.title}><Icon name={e.icon} size={13} />{e.text}</span>
-          {/if}
-          {#if profile.held}
-            <span class="tag tag-warn" title="Flux Sentry found unusual changes in the last backup. No backup is made until you settle them on the Overview: This was me, or It's dealt with."><Icon name="sentry" size={14} />Flux Sentry · backups on hold</span>
-          {:else if profile.sentry && profile.sentry !== "off"}
-            <button class="tag tag-accent tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry learns how much of this backup normally changes, and warns when a backup doesn't fit or shows the marks of ransomware{profile.sentry === 'high' ? ' (watching closely)' : ''}. Click to change how it watches."><Icon name="sentry" size={14} />Flux Sentry active{profile.sentry === "high" ? " · closely" : ""}<Icon name="chevronRight" size={12} /></button>
-          {:else if profile.sentry === "off"}
-            <button class="tag tag-button" onclick={() => (sentryOpen = true)} title="Flux Sentry isn't watching this backup: no warnings about unusual changes. Click to turn it on."><Icon name="sentry" size={14} />Flux Sentry off<Icon name="chevronRight" size={12} /></button>
-          {/if}
-          {#if profile.scope === "system"}
-            <span class="tag tag-warn" title="Runs as root; managed through the administrator helper"><Icon name="shield" size={13} />System · runs as root</span>
-          {/if}
-        </div>
+        {#if compact}
+          <!-- Compact: the views share the title's line, so the page starts higher. -->
+          <div class="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+            <h1 class="page-title truncate">{profile.name}</h1>
+            {@render views("[&>button]:h-7 [&>button]:px-3 [&>button]:text-[13px]")}
+          </div>
+        {:else}
+          <h1 class="page-title truncate">{profile.name}</h1>
+        {/if}
+        {#if !compact}{@render tagsRow()}{/if}
       </div>
       <div class="flex shrink-0 items-center gap-2">
         <button class="btn" title="Settings (Ctrl+4)" onclick={() => (app.tab = "settings")}><Icon name="settings" size={15} /> Settings</button>
@@ -95,14 +128,9 @@
       </div>
     </div>
 
-    <div class="segmented self-start" role="tablist" aria-label="{profile.name}: views">
-      {#each tabs as t (t.id)}
-        <button role="tab" aria-selected={app.tab === t.id} title="{t.label} (Ctrl+{t.key})" onclick={() => (app.tab = t.id)}>
-          <Icon name={t.icon} size={15} />
-          {t.label}
-        </button>
-      {/each}
-    </div>
+    <!-- Compact: the tags get the header's whole width, under the title's line. -->
+    {#if compact}{@render tagsRow()}{/if}
+    {#if !compact}{@render views("self-start")}{/if}
   {/if}
 </header>
 

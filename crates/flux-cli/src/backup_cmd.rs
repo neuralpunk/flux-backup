@@ -223,6 +223,32 @@ pub fn install_ctrlc(progress: &Arc<Progress>) {
 }
 
 pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
+    // A scheduled run's notifications, or one the app started, may have buttons: they're
+    // answered here, at its end. Not in a terminal or a script, which would be kept waiting.
+    if args.scheduled || std::env::var_os("FLUX_NOTIFY_ACTIONS").is_some_and(|v| v == "1") {
+        flux_runner::desktop::enable_actions();
+    }
+    let result = run_backup_once(ctx, args);
+    match flux_runner::desktop::follow_up() {
+        // *Try again*: this same backup, as it was asked for, in this process's place
+        // (a scheduled one stays its timer's run).
+        Some((flux_runner::desktop::Action::Retry, _)) => {
+            use std::os::unix::process::CommandExt;
+            let me = std::env::current_exe()?;
+            let err = std::process::Command::new(me)
+                .args(std::env::args_os().skip(1))
+                .exec();
+            Err(anyhow::anyhow!("cannot run the backup again: {err}"))
+        }
+        Some((flux_runner::desktop::Action::Open, id)) => {
+            flux_runner::desktop::open_app(&id);
+            result
+        }
+        None => result,
+    }
+}
+
+fn run_backup_once(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
     let (id, profile) = load_profile(ctx, &args.profile)?;
     let progress = Arc::new(Progress::new());
     install_ctrlc(&progress);
@@ -381,6 +407,11 @@ pub fn run_backup(ctx: &Ctx, args: BackupArgs) -> anyhow::Result<ExitCode> {
         .destinations
         .iter()
         .any(|d| d.status == flux_runner::RunStatus::Failed);
+    // Once a week, when every backup is fine, one quiet note saying so.
+    if args.scheduled && !args.dry_run {
+        let service = flux_service::Service::new(ctx.paths.clone());
+        flux_service::weekly::maybe_send(&service, jiff::Timestamp::now());
+    }
     Ok(match out {
         BackupOutcome::Created { snapshot, .. } if snapshot.status != SnapshotStatus::Complete => {
             ExitCode::from(EXIT_PARTIAL)

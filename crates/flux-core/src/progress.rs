@@ -6,7 +6,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -66,8 +66,34 @@ pub struct Progress {
     cancel: AtomicBool,
     started: Instant,
     phase_started: Mutex<Instant>,
+    /// The copy rate as last worked out, recent speed counting most.
+    rate: Mutex<Rate>,
     /// Where the time goes, for the performance inspector.
     pub timings: Timings,
+}
+
+/// The copy rate, smoothed: when it was last worked out, from how many bytes, and what
+/// it came to (bytes/second; 0 before the first look).
+#[derive(Debug, Default, Clone, Copy)]
+struct Rate {
+    at: Option<Instant>,
+    bytes: u64,
+    per_sec: f64,
+}
+
+/// How quickly an older speed stops counting: after this long, about a third of it is
+/// left. Long enough that a few slow seconds (a big file's first read, a busy disk) don't
+/// swing the estimate, short enough that it follows a real change within a minute.
+const RATE_MEMORY: Duration = Duration::from_secs(20);
+/// Below this, a new look reuses the last rate (consumers poll five times a second).
+const RATE_STEP: Duration = Duration::from_secs(1);
+
+/// The smoothed rate after `secs` seconds at `recent` bytes/second, the rate before being
+/// `before` (an exponential moving average over time, so it doesn't depend on how often
+/// anyone looks).
+fn smooth(before: f64, recent: f64, secs: f64) -> f64 {
+    let keep = (-secs / RATE_MEMORY.as_secs_f64()).exp();
+    before * keep + recent * (1.0 - keep)
 }
 
 /// A stage of the work, timed across threads.
@@ -185,6 +211,7 @@ impl Default for Progress {
             cancel: AtomicBool::new(false),
             started: now,
             phase_started: Mutex::new(now),
+            rate: Mutex::new(Rate::default()),
             timings: Timings::default(),
         }
     }
@@ -201,9 +228,10 @@ pub struct ProgressSnapshot {
     pub bytes_done: u64,
     pub warnings: u64,
     pub elapsed_secs: f64,
-    /// Average copy rate during the transfer phase, bytes/second.
+    /// Copy rate during the transfer phase, bytes/second: recent speed counts most
+    /// (about the last 20 seconds), so a slow start doesn't hold the estimate down.
     pub bytes_per_sec: f64,
-    /// Estimated seconds remaining in the transfer phase.
+    /// Estimated seconds remaining in the transfer phase, at that rate.
     pub eta_secs: Option<f64>,
 }
 
@@ -221,6 +249,9 @@ impl Progress {
             }
             if before != p {
                 *t = Instant::now();
+                if let Ok(mut r) = self.rate.lock() {
+                    *r = Rate::default();
+                }
             }
         }
     }
@@ -238,6 +269,34 @@ impl Progress {
         self.cancel.load(Relaxed)
     }
 
+    /// The copy rate now, `bytes_done` having been copied in `phase_secs`: at first the
+    /// average so far, then smoothed at most once a second.
+    fn rate_now(&self, bytes_done: u64, phase_secs: f64) -> f64 {
+        let average = bytes_done as f64 / phase_secs;
+        let Ok(mut r) = self.rate.lock() else {
+            return average;
+        };
+        let now = Instant::now();
+        match r.at {
+            None => {
+                *r = Rate {
+                    at: Some(now),
+                    bytes: bytes_done,
+                    per_sec: average,
+                };
+            }
+            Some(at) if now.duration_since(at) >= RATE_STEP => {
+                let secs = now.duration_since(at).as_secs_f64();
+                let recent = bytes_done.saturating_sub(r.bytes) as f64 / secs;
+                r.per_sec = smooth(r.per_sec, recent, secs);
+                r.at = Some(now);
+                r.bytes = bytes_done;
+            }
+            Some(_) => {}
+        }
+        r.per_sec
+    }
+
     pub fn snapshot(&self) -> ProgressSnapshot {
         let phase = self.phase();
         let bytes_total = self.bytes_total.load(Relaxed);
@@ -248,10 +307,10 @@ impl Progress {
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or_default();
         let (rate, eta) = if phase == Phase::Transferring && phase_secs > 0.5 && bytes_done > 0 {
-            let rate = bytes_done as f64 / phase_secs;
+            let rate = self.rate_now(bytes_done, phase_secs);
             (
                 rate,
-                Some(bytes_total.saturating_sub(bytes_done) as f64 / rate),
+                (rate > 0.0).then(|| bytes_total.saturating_sub(bytes_done) as f64 / rate),
             )
         } else {
             (0.0, None)
@@ -293,3 +352,71 @@ pub type Reporter<'a> = &'a (dyn Fn(Event) + Sync);
 
 /// A reporter that discards everything.
 pub fn silent(_: Event) {}
+
+/// Time left in words, as the app and the tray say it: "less than a minute left", "about
+/// 6 minutes left", "about 1 hour 10 minutes left". Rounded, so it doesn't tick every second.
+pub fn time_left_words(secs: f64) -> String {
+    let plural = |n: u64, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    if secs < 60.0 {
+        return "less than a minute left".into();
+    }
+    let mins = (secs / 60.0).round() as u64;
+    if mins < 60 {
+        return format!("about {} left", plural(mins, "minute"));
+    }
+    let (h, m) = (mins / 60, mins % 60);
+    if m == 0 || h >= 10 {
+        format!("about {} left", plural(h, "hour"))
+    } else {
+        format!("about {} {} left", plural(h, "hour"), plural(m, "minute"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_left_in_words() {
+        assert_eq!(time_left_words(12.0), "less than a minute left");
+        assert_eq!(time_left_words(70.0), "about 1 minute left");
+        assert_eq!(time_left_words(359.0), "about 6 minutes left");
+        assert_eq!(time_left_words(3600.0), "about 1 hour left");
+        assert_eq!(time_left_words(4210.0), "about 1 hour 10 minutes left");
+        assert_eq!(time_left_words(11.5 * 3600.0), "about 11 hours left");
+    }
+
+    #[test]
+    fn the_rate_follows_recent_speed_whatever_the_polling() {
+        // Ten slow seconds (1 MB/s), then 100 MB/s: after a minute it's nearly there.
+        let mut r = 1e6;
+        for _ in 0..60 {
+            r = smooth(r, 100e6, 1.0);
+        }
+        assert!(r > 90e6, "{r}");
+        // The same minute seen in six looks comes to the same.
+        let mut s = 1e6;
+        for _ in 0..6 {
+            s = smooth(s, 100e6, 10.0);
+        }
+        assert!((r - s).abs() / r < 1e-9, "{r} {s}");
+        // A few slow seconds don't swing it.
+        let dip = smooth(100e6, 1e6, 3.0);
+        assert!(dip > 80e6, "{dip}");
+    }
+
+    #[test]
+    fn time_left_is_known_only_while_copying() {
+        let p = Progress::new();
+        p.bytes_total.store(1000, Relaxed);
+        assert_eq!(p.snapshot().eta_secs, None);
+        p.set_phase(Phase::Transferring);
+        std::thread::sleep(Duration::from_millis(600));
+        p.bytes_done.store(500, Relaxed);
+        let s = p.snapshot();
+        assert!(s.bytes_per_sec > 0.0);
+        assert!(s.eta_secs.is_some_and(|e| e > 0.0));
+        p.set_phase(Phase::Done);
+        assert_eq!(p.snapshot().eta_secs, None);
+    }
+}

@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flux Backup 1.1: snapshot backups for Linux</title>
+  <title>Flux Backup 1.2: snapshot backups for Linux</title>
   <meta name="description" content="Flux Backup keeps snapshots of your Linux desktop on a drive or a server and gets any file back from any day. Fast, encrypted if you like, and your backups never depend on Flux.">
   <meta name="theme-color" content="#18191c">
-  <meta property="og:title" content="Flux Backup 1.1">
+  <meta property="og:title" content="Flux Backup 1.2">
   <meta property="og:description" content="Linux backups, done right: snapshots of your desktop on a drive or a server, and any file back from any day.">
   <meta property="og:image" content="assets/screenshots/overview-dark.png">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
@@ -18,7 +18,7 @@
 
   <header class="nav">
     <div class="wrap">
-      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="24" height="24">Flux Backup <span class="ver">1.1</span></a>
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="24" height="24">Flux Backup <span class="ver">1.2</span></a>
       <nav aria-label="Main" style="display: contents">
         <a class="o" href="#specs">Specs</a>
         <a class="o" href="#restore">Restore</a>
@@ -44,12 +44,12 @@
             <div><span>License</span><b>MIT or Apache-2.0</b></div>
           </div>
           <div class="open-lede">
-            <p>Flux Backup 1.1 keeps snapshots of your Linux desktop on a drive or a server, and gets any file back from any day. A desktop app and the <code>flux</code> command.</p>
-            <div class="actions"><a class="btn btn-p" href="#install">Download 1.1</a><a class="btn btn-m" href="#specs">See the specs</a></div>
+            <p>Flux Backup 1.2 keeps snapshots of your Linux desktop on a drive or a server, and gets any file back from any day. A desktop app and the <code>flux</code> command.</p>
+            <div class="actions"><a class="btn btn-p" href="#install">Download 1.2</a><a class="btn btn-m" href="#specs">See the specs</a></div>
           </div>
         </div>
         <div class="rise">
-          <div class="frame"><img src="assets/screens/running.webp" width="2400" height="1560" alt="Flux Backup backing up the Home folder: 18% copied, a bar for each of the last 30 days, and the three places copies are kept."></div>
+          <div class="frame"><img src="assets/screens/running.webp" width="2400" height="1560" alt="Flux Backup backing up the Home folder: 21% copied, about 6 minutes left, a bar for each of the last 30 days, and the backup's settings at a glance beside it."></div>
         </div>
         <p class="open-note">The real app, shown with its demo data.</p>
       </div>
@@ -132,12 +132,12 @@
     <section class="section wrap" aria-labelledby="details-title">
       <h2 class="r" id="details-title">Every detail, considered.</h2>
       <div class="mosaic">
-        <figure class="m m1 r"><div class="pic"><img src="assets/screens/d-versions.webp" width="1344" height="977" loading="lazy" alt="Versions of .bashrc: four versions, each with Compare, Open and Restore."></div><figcaption>Every version of a file, side by side</figcaption></figure>
-        <figure class="m m2 r"><div class="pic"><img src="assets/screens/d-days.webp" width="1752" height="274" loading="lazy" alt="Last 30 days: one bar a day, taller bars copied more."></div><figcaption>Thirty days at a glance</figcaption></figure>
+        <figure class="m m1 r"><div class="pic"><img src="assets/screens/d-versions.webp" width="1344" height="945" loading="lazy" alt="Versions of .bashrc: four versions, each with Compare, Open and Restore."></div><figcaption>Every version of a file, side by side</figcaption></figure>
+        <figure class="m m2 r"><div class="pic"><img src="assets/screens/d-days.webp" width="1016" height="177" loading="lazy" alt="Last 30 days: one bar a day, taller bars copied more."></div><figcaption>Thirty days at a glance</figcaption></figure>
         <figure class="m m3 r"><div class="pic"><img src="assets/screens/d-restore.webp" width="968" height="422" loading="lazy" alt="What will happen: 3 items added, 2 files that differ kept aside, 9 already identical."></div><figcaption>A restore preview</figcaption></figure>
-        <figure class="m m4 r"><div class="pic"><img src="assets/screens/d-space.webp" width="1752" height="763" loading="lazy" alt="Space on BackupDisk with a forecast: full in about 3 months."></div><figcaption>When the drive will be full</figcaption></figure>
+        <figure class="m m4 r"><div class="pic"><img src="assets/screens/d-space.webp" width="1096" height="731" loading="lazy" alt="Space on BackupDisk with a forecast: full in about 3 months, and the drive reports no problems with its health."></div><figcaption>When the drive will be full, and how it's holding up</figcaption></figure>
         <figure class="m m5 r"><div class="pic"><img src="assets/screens/d-calendar.webp" width="512" height="416" loading="lazy" alt="October 2026, with the days that have snapshots marked."></div><figcaption>A calendar of snapshots</figcaption></figure>
-        <figure class="m m6 r"><div class="pic"><img src="assets/screens/d-timings.webp" width="1056" height="859" loading="lazy" alt="Where the time went: each phase and step of a backup, timed."></div><figcaption>Where the time went</figcaption></figure>
+        <figure class="m m6 r"><div class="pic"><img src="assets/screens/d-timings.webp" width="992" height="859" loading="lazy" alt="Where the time went: each phase and step of a backup, timed."></div><figcaption>Where the time went</figcaption></figure>
       </div>
     </section>
 
@@ -196,9 +196,32 @@ flux recover /run/media/$USER/Backup</code></pre>
       </div>
     </section>
 
-    <!-- New in 1.1, then what 1.0 brought -->
+    <!-- New in 1.2, then 1.1 and 1.0 -->
     <section class="section wrap" id="new" aria-labelledby="new-title">
-      <h2 class="r" id="new-title">New in 1.1.</h2>
+      <h2 class="r" id="new-title">New in 1.2.</h2>
+      <p class="lead r">Getting a file back starts where it was lost, a lost password is no longer the end, and more fits on the screen.</p>
+      <div class="chips r">
+        <span>Previous versions<em>right-click in Files</em></span>
+        <span>Restore deleted files here</span>
+        <span>Leave out, back up<em>right-click too</em></span>
+        <span>Browse in Files<em>any snapshot</em></span>
+        <span>Recovery code<em>for a lost password</em></span>
+        <span>Compact<em>the Overview on one screen</em></span>
+        <span>Preview<em>before restoring</em></span>
+        <span>Undo<em>deleted snapshots</em></span>
+        <span>Safe to unplug</span>
+        <span>Failing drive<em>warned in time</em></span>
+        <span>Notifications<em>with buttons</em></span>
+        <span>Quiet hours</span>
+        <span>Time left<em>everywhere</em></span>
+        <span>Your accent colour</span>
+        <span>Delete several<em>at once</em></span>
+        <span>Sizes<em>next to every folder</em></span>
+        <span>.gitignore<em>skip what git skips</em></span>
+        <span>A weekly note<em>when all is well</em></span>
+        <span>Sizes hidden<em>new Vaults</em></span>
+      </div>
+      <h3 class="r" style="margin-top:2.5rem">And in 1.1</h3>
       <p class="lead r">What was there, made clearer, safer and quicker to use, and three things that put numbers behind what a backup promises.</p>
       <div class="chips r">
         <span>Flux Sentry<em>learns each backup's normal</em></span>
@@ -235,7 +258,7 @@ flux recover /run/media/$USER/Backup</code></pre>
 
     <!-- Install -->
     <section class="section wrap" id="install" aria-labelledby="install-title">
-      <h2 class="r" id="install-title">Get Flux Backup 1.1.</h2>
+      <h2 class="r" id="install-title">Get Flux Backup 1.2.</h2>
       <p class="lead r">Each package holds the app, the <code>flux</code> command, man pages and shell completions.</p>
       <div class="pkgs">
         <a class="pkg r" href="https://github.com/neuralpunk/flux-backup/releases"><span class="pkg-name">.rpm</span><span class="for">Fedora, openSUSE</span><span class="note">With system backups through polkit.</span><span class="get">Download</span></a>
@@ -261,9 +284,9 @@ sudo PREFIX=/usr packaging/install.sh</code></pre>
     <section class="close" aria-labelledby="close-title">
       <div class="wrap">
         <img class="r" src="assets/logo.svg" alt="" width="84" height="84">
-        <h2 class="r" id="close-title">Flux Backup 1.1</h2>
+        <h2 class="r" id="close-title">Flux Backup 1.2</h2>
         <p class="r">Free software for Linux. Your first backup takes a minute to set up.</p>
-        <div class="actions r"><a class="btn btn-p" href="https://github.com/neuralpunk/flux-backup/releases">Download 1.1</a><a class="btn btn-m" href="guide.html#your-first-backup">Start with the guide</a></div>
+        <div class="actions r"><a class="btn btn-p" href="https://github.com/neuralpunk/flux-backup/releases">Download 1.2</a><a class="btn btn-m" href="guide.html#your-first-backup">Start with the guide</a></div>
       </div>
     </section>
   </main>

@@ -9,10 +9,15 @@
 //! * `**/build/out`: a slash in the middle anchors the pattern to the root, so use `**/` to
 //!   match at any depth
 //! * `!keep.tmp`: re-includes a path that an earlier pattern excluded
+//!
+//! With `exclude_gitignored`, a git working tree's own `.gitignore` files leave out what
+//! they ignore too, as git reads them (relative to their folder, deeper files first, a
+//! nested repository starting afresh). A profile's own `!pattern` still brings a path back.
 
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
@@ -39,6 +44,46 @@ pub struct Filter {
     larger_than: Option<ByteSize>,
     exclude_caches: bool,
     if_present: Vec<String>,
+    gitignore: bool,
+}
+
+/// The `.gitignore` rules that apply in one folder of a git working tree: its own file's,
+/// then its parents', up to the repository's top folder.
+#[derive(Debug)]
+pub struct GitScope {
+    parent: Option<Arc<GitScope>>,
+    /// This folder's `.gitignore` (and its path), if it has one.
+    rules: Option<(Gitignore, PathBuf)>,
+}
+
+impl GitScope {
+    /// The `.gitignore` that leaves `abs` out, and the line that does, or `None` (not
+    /// ignored, or brought back by a `!` line).
+    pub fn ignored(&self, abs: &Path, is_dir: bool) -> Option<(&Path, String)> {
+        let mut at = Some(self);
+        while let Some(s) = at {
+            if let Some((g, file)) = &s.rules {
+                match g.matched(abs, is_dir) {
+                    ignore::Match::Ignore(glob) => {
+                        return Some((file.as_path(), glob.original().to_owned()));
+                    }
+                    ignore::Match::Whitelist(_) => return None,
+                    ignore::Match::None => {}
+                }
+            }
+            at = s.parent.as_deref();
+        }
+        None
+    }
+}
+
+fn load_gitignore(dir: &Path) -> Option<(Gitignore, PathBuf)> {
+    let file = dir.join(".gitignore");
+    let mut b = GitignoreBuilder::new(dir);
+    // A line git would also reject is skipped; the rest still count.
+    let _ = b.add(&file);
+    let g = b.build().ok()?;
+    (!g.is_empty()).then_some((g, file))
 }
 
 impl Filter {
@@ -68,6 +113,7 @@ impl Filter {
             larger_than: sources.exclude_larger_than,
             exclude_caches: sources.exclude_caches,
             if_present: sources.exclude_if_present.clone(),
+            gitignore: sources.exclude_gitignored,
         })
     }
 
@@ -78,10 +124,87 @@ impl Filter {
 
     /// Should this path be skipped, judged by its name and type alone?
     pub fn is_excluded(&self, abs: &Path, is_dir: bool) -> bool {
+        self.excluded_in(None, abs, is_dir)
+    }
+
+    /// Should this path be skipped, with the `.gitignore` rules of the folder it's in
+    /// (`git`, from [`Self::git_enter`] or [`Self::git_scope_of_dir`])? The profile's own
+    /// patterns come first: a `!pattern` brings back what a `.gitignore` ignores.
+    pub fn excluded_in(&self, git: Option<&GitScope>, abs: &Path, is_dir: bool) -> bool {
         if self.hard_excludes.iter().any(|h| abs == h) {
             return true;
         }
-        self.globs.matched(abs, is_dir).is_ignore()
+        match self.globs.matched(abs, is_dir) {
+            ignore::Match::Ignore(_) => true,
+            ignore::Match::Whitelist(_) => false,
+            ignore::Match::None => git.is_some_and(|g| g.ignored(abs, is_dir).is_some()),
+        }
+    }
+
+    /// Are `.gitignore` files read (`exclude_gitignored`)?
+    pub fn reads_gitignore(&self) -> bool {
+        self.gitignore
+    }
+
+    /// The `.gitignore` rules for the entries of `dir`, given those of its parent folder
+    /// and whether `dir` holds `.git` (it's a repository's top folder: start afresh) and
+    /// `.gitignore`. `None` outside a git working tree, or when `.gitignore` files aren't
+    /// read.
+    pub fn git_enter(
+        &self,
+        dir: &Path,
+        has_git: bool,
+        has_gitignore: bool,
+        parent: Option<Arc<GitScope>>,
+    ) -> Option<Arc<GitScope>> {
+        if !self.gitignore {
+            return None;
+        }
+        if has_git {
+            return Some(Arc::new(GitScope {
+                parent: None,
+                rules: has_gitignore.then(|| load_gitignore(dir)).flatten(),
+            }));
+        }
+        let parent = parent?;
+        if !has_gitignore {
+            return Some(parent);
+        }
+        match load_gitignore(dir) {
+            Some(rules) => Some(Arc::new(GitScope {
+                parent: Some(parent),
+                rules: Some(rules),
+            })),
+            None => Some(parent),
+        }
+    }
+
+    /// The `.gitignore` rules for the entries of `dir`, read from the disk: `dir` and the
+    /// folders above it up to the nearest one with `.git`. For a walk's starting folders;
+    /// the walk then uses [`Self::git_enter`].
+    pub fn git_scope_of_dir(&self, dir: &Path) -> Option<Arc<GitScope>> {
+        if !self.gitignore {
+            return None;
+        }
+        let mut chain = Vec::new();
+        let mut at = Some(dir);
+        let mut top = None;
+        while let Some(d) = at {
+            chain.push(d);
+            if d.join(".git").symlink_metadata().is_ok() {
+                top = Some(d);
+                break;
+            }
+            at = d.parent();
+        }
+        top?;
+        let mut scope: Option<Arc<GitScope>> = None;
+        for d in chain.into_iter().rev() {
+            let has_gi = d.join(".gitignore").is_file();
+            let has_git = scope.is_none();
+            scope = self.git_enter(d, has_git, has_gi, scope);
+        }
+        scope
     }
 
     /// Should a regular file of `size` bytes be skipped?
@@ -183,6 +306,21 @@ fn is_cachedir_tag(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    impl Filter {
+        fn sources_for_tests(&self) -> Sources {
+            Sources {
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                exclude_larger_than: None,
+                exclude_caches: false,
+                exclude_if_present: Vec::new(),
+                one_file_system: false,
+                exclude_gitignored: false,
+                volumes: Vec::new(),
+            }
+        }
+    }
+
     fn filter(patterns: &[&str]) -> Filter {
         let sources = Sources {
             paths: vec!["/home/me".into()],
@@ -191,6 +329,7 @@ mod tests {
             exclude_caches: true,
             exclude_if_present: vec![".nobackup".into()],
             one_file_system: false,
+            exclude_gitignored: false,
             volumes: Vec::new(),
         };
         Filter::new(&sources, Some(Path::new("/home/me"))).unwrap()
@@ -266,5 +405,80 @@ mod tests {
         )
         .unwrap();
         assert!(f.skip_dir_by_marker(d, [b"CACHEDIR.TAG".as_slice()]));
+    }
+
+    /// A git working tree: `.gitignore` at the top and in a subfolder, a nested
+    /// repository with its own, and a `.gitignore` outside any repository.
+    fn repo() -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path().join("proj");
+        for d in [".git", "sub", "inner/.git", "target"] {
+            fs::create_dir_all(r.join(d)).unwrap();
+        }
+        fs::write(r.join(".gitignore"), "target/\n*.log\n!keep.log\n.env\n").unwrap();
+        fs::write(r.join("sub/.gitignore"), "secret.txt\n").unwrap();
+        fs::write(r.join("inner/.gitignore"), "only-inner.txt\n").unwrap();
+        fs::write(t.path().join(".gitignore"), "*\n").unwrap();
+        t
+    }
+
+    fn git_filter(on: bool, patterns: &[&str]) -> Filter {
+        let mut s = Sources {
+            paths: vec!["/".into()],
+            exclude: patterns.iter().map(|s| s.to_string()).collect(),
+            ..filter(&[]).sources_for_tests()
+        };
+        s.exclude_gitignored = on;
+        Filter::new(&s, None).unwrap()
+    }
+
+    #[test]
+    fn gitignore_files_leave_out_what_git_ignores() {
+        let t = repo();
+        let r = t.path().join("proj");
+        let f = git_filter(true, &[]);
+        let top = f.git_scope_of_dir(&r).expect("a working tree");
+        let out = |dir: &Path, name: &str, is_dir: bool| {
+            let scope = f.git_scope_of_dir(dir);
+            f.excluded_in(scope.as_deref(), &dir.join(name), is_dir)
+        };
+        assert!(out(&r, "target", true));
+        assert!(out(&r, "build.log", false));
+        assert!(!out(&r, "keep.log", false), "a ! line brings it back");
+        assert!(out(&r, ".env", false));
+        assert!(!out(&r, "main.rs", false));
+        assert!(
+            out(&r.join("sub"), "secret.txt", false),
+            "a subfolder's own file"
+        );
+        assert!(out(&r.join("sub"), "x.log", false), "and its parents'");
+        assert!(
+            !out(&r, "secret.txt", false),
+            "a subfolder's rules stay there"
+        );
+        // A nested repository starts afresh: the outer *.log doesn't reach it.
+        assert!(!out(&r.join("inner"), "x.log", false));
+        assert!(out(&r.join("inner"), "only-inner.txt", false));
+        // Outside a working tree, a .gitignore means nothing.
+        assert!(f.git_scope_of_dir(t.path()).is_none());
+        assert!(!out(t.path(), "anything", false));
+        // Which file and line, for the rule tester.
+        let (file, line) = top.ignored(&r.join("a.log"), false).unwrap();
+        assert_eq!(
+            (file, line.as_str()),
+            (r.join(".gitignore").as_path(), "*.log")
+        );
+    }
+
+    #[test]
+    fn the_backups_own_rules_come_first_and_the_switch_is_off_by_default() {
+        let t = repo();
+        let r = t.path().join("proj");
+        let f = git_filter(true, &["!.env"]);
+        let scope = f.git_scope_of_dir(&r);
+        assert!(!f.excluded_in(scope.as_deref(), &r.join(".env"), false));
+        let off = git_filter(false, &[]);
+        assert!(off.git_scope_of_dir(&r).is_none());
+        assert!(!off.excluded_in(None, &r.join("target"), true));
     }
 }

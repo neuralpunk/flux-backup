@@ -13,7 +13,8 @@ export interface GlanceItem {
   label: string;
   /** For a cell of two lines at most. */
   value: string;
-  /** For a table cell of one line, when `value` is longer ("7d · 4w · 12m · 5y"). */
+  /** For one line (a table cell, Compact's side column) when `value` is longer
+   * ("7d · 4w · 12m · 5y"). */
   short?: string;
   /** Says nothing about this backup (no password to keep, no hooks): left out of the grid,
    * shown in the table so its columns stay whole. */
@@ -36,6 +37,11 @@ export type GlanceKey = "schedule" | "sources" | "excluded" | "where" | "places"
 
 const cap = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** The first `keep` of a list, and how many more: "USB stick +1". `undefined` when the
+ * list is short enough already. */
+function firstOf(parts: string[], sep: string, keep = 1): string | undefined {
+  return parts.length > keep ? `${parts.slice(0, keep).join(sep)} +${parts.length - keep}` : undefined;
+}
 /** `~/x` for a home folder path; others as they are. */
 const tilde = (p: string) => p.replace(/^\/home\/[^/]+(?=\/|$)/, "~");
 
@@ -82,7 +88,7 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
 
   // When
   const when = s.trigger === "manual" ? (s.on_connect ? "When its drive is plugged in" : "Only by hand") : cap(scheduleWords(scheduleSummary(p), h24)).replace(" + when drive connected", ", and when plugged in");
-  const conditions = [s.trigger === "calendar" && s.catch_up ? "catches up if missed" : "", s.skip_on_battery ? "waits for mains power" : "", s.skip_on_metered && p.target.kind === "ssh" ? "not on metered networks" : ""].filter(Boolean);
+  const conditions = [s.trigger === "calendar" && s.catch_up ? "catches up if missed" : "", s.skip_on_battery ? "waits for mains power" : "", s.skip_on_metered && p.target.kind === "ssh" ? "not on metered networks" : "", s.release_drive && p.target.kind === "local" ? "unmounts the drive after" : ""].filter(Boolean);
   // For a table cell: "Daily 8:00 PM", "Mondays 07:30", "On plug-in".
   const shortWhen = when
     .replace(/^Every day at /, "Daily ")
@@ -108,6 +114,7 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
     key: "excluded",
     label: "Excluded",
     value: excluded.length ? excluded.join(" · ") : "Nothing",
+    short: firstOf(excluded, " · ", 2),
     detail: ex.exclude.length ? ex.exclude.slice(0, 8).join("  ") + (ex.exclude.length > 8 ? "  …" : "") : undefined,
     tone: excluded.length ? undefined : "off",
     page: "sources",
@@ -121,6 +128,7 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
     key: "places",
     label: "Other copies",
     value: others.length ? others.map((d) => d.label || d.name).join(", ") : "None",
+    short: firstOf(others.map((d) => d.label || d.name), ", "),
     detail: others.length ? `${offsite ? "A copy is kept elsewhere" : "None is marked as kept elsewhere"}. ${others.map((d) => `${d.label || d.name}: ${placeFull(d.target)}${d.offsite ? " (offsite)" : ""}`).join("; ")}` : offsite ? "This place is kept elsewhere" : "Only one copy: a second place guards against a lost or broken drive",
     tone: others.length ? undefined : "off",
     page: "copies",
@@ -150,11 +158,13 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
     const extra = [v?.unlock_file ? "plus an unlock file" : "", v?.hashing?.level && v.hashing.level !== "standard" ? `${v.hashing.level} hashing` : ""].filter(Boolean);
     const asked = source.from === "prompt";
     const value = { keyring: "Desktop keyring", prompt: "Asked each time", file: "Key file", command: "From a command" }[source.from];
+    const brief = { keyring: "Keyring", prompt: "Asked each time", file: "Key file", command: "A command" }[source.from];
     const where = source.from === "file" ? tilde(source.path) : source.from === "command" ? source.command : "";
     out.push({
       key: "password",
       label: "Password",
       value: extra.length ? `${value}, ${extra[0]}` : value,
+      short: extra.length ? `${brief} + ${extra[0]!.replace(/^plus an /, "")}` : undefined,
       detail: asked && runsOnItsOwn(p) ? "Scheduled backups will fail: nobody is there to type it" : [where, ...extra].filter(Boolean).join(" · ") || undefined,
       tone: asked && runsOnItsOwn(p) ? "warn" : undefined,
       page: "destination",
@@ -184,11 +194,13 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
   // Checks
   const t = p.restore_test;
   const every = t?.every ?? "off";
+  const sampleShort = t?.mode === "full" ? "all" : t?.mode === "rolling" ? "rolling" : t?.mode === "confidence" ? `${t.damage ?? "1%"} damage` : undefined;
   const sample = t?.mode === "full" ? "everything" : t?.mode === "percent" ? `${t.percent ?? 5}%` : t?.mode === "rolling" ? "every file monthly" : t?.mode === "confidence" ? `catches ${t.damage ?? "1%"} damage` : plural(t?.files ?? 10, "file");
   out.push({
     key: "tests",
     label: "Restore tests",
     value: every === "off" ? "Only when you ask" : `${{ backup: "After each backup", week: "Weekly", month: "Monthly" }[every]} · ${sample}`,
+    short: every === "off" ? undefined : `${{ backup: "Each backup", week: "Weekly", month: "Monthly" }[every]} · ${sampleShort ?? sample}`,
     detail: every === "off" ? "Scheduled tests read files back to prove a restore works" : t?.mode === "confidence" ? `Enough random files to catch damage to ${t.damage ?? "1%"} of them or more, ${t.certainty ?? "99%"} certain${t.compare_with_source ? "; also compared with the files now" : ""}` : t?.compare_with_source ? "Also compared with the files now" : undefined,
     tone: every === "off" ? "off" : undefined,
     page: "keep",
@@ -218,6 +230,7 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
     key: "notify",
     label: "Notifications",
     value: [p.options.notify ? "On this computer" : "", hooks ? plural(hooks, "webhook") : ""].filter(Boolean).join(" + ") || "Off",
+    short: p.options.notify && hooks ? `Desktop + ${plural(hooks, "webhook")}` : undefined,
     tone: !p.options.notify && !hooks ? "off" : undefined,
     page: "more",
   });
@@ -226,7 +239,7 @@ export function glance(p: Profile, h24: boolean, sentry?: SentryKnows | null, sy
   if (p.target.kind === "ssh" || others.some((d) => d.target.kind === "ssh")) {
     const n = p.network;
     const parts = [n?.wifi_only?.length ? `only on ${n.wifi_only.join(", ")}` : "", n?.wifi_never?.length ? `never on ${n.wifi_never.join(", ")}` : "", n?.bandwidth?.length ? plural(n.bandwidth.length, "upload limit") : ""].filter(Boolean);
-    out.push({ key: "network", label: "Network", value: parts.length ? cap(parts.join(" · ")) : "Any, full speed", tone: parts.length ? undefined : "off", page: "more" });
+    out.push({ key: "network", label: "Network", value: parts.length ? cap(parts.join(" · ")) : "Any, full speed", short: firstOf(parts.map(cap), " · "), tone: parts.length ? undefined : "off", page: "more" });
   }
   const h = p.hooks;
   const before = h?.pre_backup?.length ?? 0;

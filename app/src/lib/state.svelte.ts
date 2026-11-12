@@ -1,8 +1,10 @@
 // Application state shared across components (Svelte 5 runes).
 
+import { accentTokens, type Rgb } from "./accent";
 import { hourCycle } from "./clock.svelte";
+import { bytes, timeLeft } from "./format";
 import { api, listen, pickFile, type JobEventPayload } from "./api";
-import { ApiError, type BackupStatus, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type Scheduler, type SystemStatus } from "./types";
+import { ApiError, type BackupStatus, type FolderWant, type JobEvent, type Pause, type ProfileSummary, type ProgressSnapshot, type RunStatus, type Scheduler, type SystemStatus } from "./types";
 
 export interface Job {
   profile: string;
@@ -15,6 +17,19 @@ export interface Job {
 }
 
 export type Theme = "dark" | "light" | "auto";
+/** How long a deletion in the app can be undone. */
+export const UNDO_MS = 8000;
+
+/** How much fits on a screen: Compact (the default from 1.2) lines backups up in
+ * columns and puts a backup's settings beside its overview; Full is the roomier layout of
+ * 1.1 and before. */
+export type Layout = "compact" | "full";
+/** The colour of the primary button, focus and progress: the desktop's accent colour
+ * (when it has one), or Flux's own blue. */
+export type AccentChoice = "desktop" | "flux";
+/** How large the interface is: Small 90%, Default, Large 115%. */
+export type TextSize = "small" | "default" | "large";
+export const TEXT_SCALE: Record<TextSize, number> = { small: 0.9, default: 1, large: 1.15 };
 export type Tab = "overview" | "snapshots" | "activity" | "settings";
 
 function loadTheme(): Theme {
@@ -26,6 +41,45 @@ function loadTheme(): Theme {
     /* storage unavailable */
   }
   return "dark";
+}
+
+function loadAccent(): AccentChoice {
+  try {
+    if (localStorage.getItem("flux.accent") === "flux") return "flux";
+  } catch {
+    /* storage unavailable */
+  }
+  return "desktop";
+}
+
+/** The sidebar folded to a column of icons (kept on this computer). */
+function loadFolded(): boolean {
+  try {
+    return localStorage.getItem("flux.sidebar") === "folded";
+  } catch {
+    return false;
+  }
+}
+
+function loadTextSize(): TextSize {
+  try {
+    const t = localStorage.getItem("flux.textSize");
+    if (t === "small" || t === "large") return t;
+  } catch {
+    /* storage unavailable */
+  }
+  return "default";
+}
+
+/** Compact unless Full was chosen on this computer: an install that never chose (every
+ * one from 1.1 and before) starts Compact too. */
+export function loadLayout(): Layout {
+  try {
+    if (localStorage.getItem("flux.layout") === "full") return "full";
+  } catch {
+    /* storage unavailable */
+  }
+  return "compact";
 }
 
 /** Failed runs the user has already looked at (profile id → run id), so a failure stays
@@ -48,6 +102,13 @@ class AppState {
   snapshotsOf = $state<string | null>(null);
   /** A snapshot the Snapshots tab should open on (then forgotten). */
   showSnapshot = $state<string | null>(null);
+  /** A file manager's request for the Snapshots tab of backup `id` (then forgotten):
+   * the versions of `path`, or the deleted files in folder `path`. */
+  pathRequest = $state<{ kind: "versions" | "deleted"; path: string; id: string } | null>(null);
+  /** A file manager's *Leave out of backups* or *Back up this folder*: its dialog shows. */
+  folderRequest = $state<{ want: FolderWant; path: string } | null>(null);
+  /** A folder the new backup being set up starts with (*Back up this folder*), then forgotten. */
+  creatingWith = $state<string | null>(null);
   loading = $state(true);
   loadError = $state<string | null>(null);
   selectedId = $state<string | null>(null);
@@ -88,6 +149,12 @@ class AppState {
   stopping = $state<Record<string, boolean>>({});
   jobs = $state<Record<string, Job>>({});
   theme = $state<Theme>(loadTheme());
+  layout = $state<Layout>(loadLayout());
+  accent = $state<AccentChoice>(loadAccent());
+  textSize = $state<TextSize>(loadTextSize());
+  sidebarFolded = $state(loadFolded());
+  /** The desktop's accent colour (`null`: it has none, or there's no portal to ask). */
+  desktopAccent = $state<Rgb | null>(null);
   private systemDark = $state(prefersDark?.matches ?? true);
   /** What's actually shown. */
   resolvedTheme = $derived<"dark" | "light">(this.theme === "auto" ? (this.systemDark ? "dark" : "light") : this.theme);
@@ -97,6 +164,11 @@ class AppState {
    * ("Deleted") check again. */
   diskRevision = $state(0);
   toasts = $state<{ id: number; kind: "ok" | "bad" | "info"; text: string }[]>([]);
+  /** Snapshots deleted in the app, waiting a few seconds before they really are: *Undo*
+   * brings them back. One deletion waits at a time (another finishes it first). If the
+   * app quits meanwhile, nothing is deleted. */
+  deleting = $state<{ profile: string; ids: string[]; until: number } | null>(null);
+  private deleteTimer: ReturnType<typeof setTimeout> | null = null;
 
   selected = $derived(this.profiles.find((p) => p.id === this.selectedId) ?? null);
 
@@ -146,11 +218,25 @@ class AppState {
   }
 
   newProfile(system = false) {
+    this.creatingWith = null;
     this.creatingSystem = system;
     this.creatingTemplate = null;
     this.creating = true;
     this.prefsOpen = false;
     this.home = false;
+  }
+
+  /** How long backup `id` has left while it copies ("about 6 minutes left"), or `null`. */
+  timeLeftOf(id: string, short = false): string | null {
+    const pr = this.jobs[id]?.progress;
+    return pr?.phase === "transferring" && pr.eta_secs != null ? timeLeft(pr.eta_secs, short) : null;
+  }
+
+  /** Set up a new backup that takes `folder`, with the usual settings to start from. */
+  newBackupWith(folder: string) {
+    this.newProfile();
+    this.creatingWith = folder;
+    this.creatingTemplate = "home";
   }
 
   /** A profile, or one of its destinations (`home+usb`) as a profile of its own: its id,
@@ -371,7 +457,55 @@ class AppState {
   }
 
   private applyTheme() {
-    document.documentElement.dataset.theme = this.resolvedTheme;
+    const root = document.documentElement;
+    root.dataset.theme = this.resolvedTheme;
+    root.dataset.layout = this.layout;
+    // The desktop's accent over Flux's blue (inline, so it wins over the theme's tokens).
+    const tokens = this.accent === "desktop" && this.desktopAccent ? accentTokens(this.desktopAccent, this.resolvedTheme) : null;
+    const vars = { "--c-primary": tokens?.primary, "--c-on-primary": tokens?.onPrimary, "--c-accent": tokens?.accent, "--c-chart": tokens?.chart };
+    for (const [k, v] of Object.entries(vars)) {
+      if (v) root.style.setProperty(k, v);
+      else root.style.removeProperty(k);
+    }
+  }
+
+  toggleSidebar() {
+    this.sidebarFolded = !this.sidebarFolded;
+    try {
+      localStorage.setItem("flux.sidebar", this.sidebarFolded ? "folded" : "open");
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  setTextSize(t: TextSize) {
+    this.textSize = t;
+    void api.setTextSize(TEXT_SCALE[t]).catch(() => {});
+    try {
+      localStorage.setItem("flux.textSize", t);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  setAccent(a: AccentChoice) {
+    this.accent = a;
+    this.applyTheme();
+    try {
+      localStorage.setItem("flux.accent", a);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  setLayout(l: Layout) {
+    this.layout = l;
+    this.applyTheme();
+    try {
+      localStorage.setItem("flux.layout", l);
+    } catch {
+      /* storage unavailable */
+    }
   }
 
   setTheme(t: Theme) {
@@ -382,6 +516,43 @@ class AppState {
     } catch {
       /* storage unavailable */
     }
+  }
+
+  /** Is snapshot `snap` of backup `profile` about to be deleted (so shown as gone)? */
+  isGoing(profile: string, snap: string): boolean {
+    return this.deleting?.profile === profile && this.deleting.ids.includes(snap);
+  }
+
+  /** Delete these snapshots after [`UNDO_MS`], unless undone. */
+  deleteSoon(profile: string, ids: string[]) {
+    if (!ids.length) return;
+    if (this.deleting) void this.finishDelete();
+    this.deleting = { profile, ids, until: Date.now() + UNDO_MS };
+    this.deleteTimer = setTimeout(() => void this.finishDelete(), UNDO_MS);
+  }
+
+  undoDelete() {
+    if (!this.deleting) return;
+    if (this.deleteTimer) clearTimeout(this.deleteTimer);
+    this.deleting = null;
+    this.revision++; // the list shows them again
+  }
+
+  private async finishDelete() {
+    const d = this.deleting;
+    if (!d) return;
+    if (this.deleteTimer) clearTimeout(this.deleteTimer);
+    this.deleting = null;
+    try {
+      const r = await api.deleteSnapshots(d.profile, d.ids);
+      const n = r.deleted.length;
+      const what = n === 1 ? "Snapshot deleted" : `${n} snapshots deleted`;
+      const kept = r.pinned.length ? `; ${r.pinned.length} pinned kept` : "";
+      this.toast("ok", r.freed == null ? `${what}${kept}.` : `${what}; ${bytes(r.freed)} freed${kept}.`);
+    } catch (e) {
+      this.toast("bad", (e as Error).message);
+    }
+    this.revision++;
   }
 
   toast(kind: "ok" | "bad" | "info", text: string) {
@@ -433,6 +604,19 @@ class AppState {
 
   async start() {
     this.applyTheme();
+    if (this.textSize !== "default") void api.setTextSize(TEXT_SCALE[this.textSize]).catch(() => {});
+    // The desktop's accent colour, now and whenever it's changed.
+    void api.desktopAccent().then(
+      (c) => {
+        this.desktopAccent = c;
+        this.applyTheme();
+      },
+      () => {},
+    );
+    void listen<Rgb | null>("flux://accent", (c) => {
+      this.desktopAccent = c;
+      this.applyTheme();
+    });
     prefersDark?.addEventListener("change", (e) => {
       this.systemDark = e.matches;
       this.applyTheme();
@@ -461,6 +645,39 @@ class AppState {
     }
     await this.refresh();
     await this.loadPause();
+    // From a file manager (*Previous versions…*): at start, and while running.
+    await listen("flux://open", () => void this.takeOpenRequest());
+    await this.takeOpenRequest();
+  }
+
+  /** Show what a file manager asked for, if it asked. */
+  async takeOpenRequest() {
+    let r: { kind: "versions" | "deleted" | "exclude" | "include" | "backup"; path: string } | null;
+    try {
+      r = await api.takeOpenRequest();
+    } catch {
+      return;
+    }
+    if (!r) return;
+    // A notification's *Open*: that backup's Overview.
+    if (r.kind === "backup") {
+      if (this.profiles.some((p) => p.id === r.path)) this.open(r.path);
+      return;
+    }
+    // *Leave out of backups*, *Back up this folder*: a dialog over whatever is showing.
+    if (r.kind === "exclude" || r.kind === "include") {
+      this.folderRequest = { want: r.kind, path: r.path };
+      return;
+    }
+    const kind = r.kind;
+    const id = await api.backupForPath(r.path).catch(() => null);
+    if (!id) {
+      this.toast("bad", `None of your backups takes ${r.path}.`);
+      return;
+    }
+    this.pathRequest = { kind, path: r.path, id };
+    this.snapshotsOf = null;
+    this.open(id, "snapshots");
   }
 }
 

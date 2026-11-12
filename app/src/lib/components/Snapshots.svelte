@@ -1,14 +1,17 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { ramp } from "../ramp";
   import { api } from "../api";
   import { app } from "../state.svelte";
   import { ago, bytes, count, dateTime, dayLabel, monthLabel, time } from "../format";
-  import { ApiError, type SnapshotMeta } from "../types";
+  import { ApiError, type Browsing, type SnapshotMeta } from "../types";
   import CompareDialog from "./CompareDialog.svelte";
   import ExportSnapshotDialog from "./ExportSnapshotDialog.svelte";
   import SnapshotCalendar, { dayKey } from "./SnapshotCalendar.svelte";
   import FileBrowser from "./FileBrowser.svelte";
   import FindResults from "./FindResults.svelte";
+  import RestoreDialog from "./RestoreDialog.svelte";
+  import VersionsDialog from "./VersionsDialog.svelte";
   import Icon from "./Icon.svelte";
   import Callout from "./Callout.svelte";
   import MenuButton from "./MenuButton.svelte";
@@ -25,7 +28,8 @@
     api.snapshots(current).then(
       (s) => {
         if (current !== id) return;
-        snaps = s;
+        // Ones about to be deleted (Undo still possible) are shown as gone.
+        snaps = s.filter((x) => !app.isGoing(current, x.id));
         error = null;
         if (app.showSnapshot && s.some((x) => x.id === app.showSnapshot)) {
           selectedId = app.showSnapshot;
@@ -67,6 +71,36 @@
     queryDraft = "";
     show = null;
   });
+  // A file manager's request (*Previous versions…*, *Restore deleted files here…*).
+  let versionsPath = $state<string | null>(null);
+  let restoreReq = $state<{ snapshot: SnapshotMeta; paths: string[] } | null>(null);
+  let openAt = $state<string | null>(null);
+  let onlyDeleted = $state(false);
+  $effect(() => {
+    void id;
+    versionsPath = null;
+    restoreReq = null;
+    openAt = null;
+    onlyDeleted = false;
+  });
+  $effect(() => {
+    const r = app.pathRequest;
+    if (!r || r.id !== id || !snaps?.length) return;
+    untrack(() => {
+      app.pathRequest = null;
+      stopPicking();
+      query = null;
+      show = null;
+      if (r.kind === "versions") versionsPath = r.path;
+      else {
+        // The newest snapshot, in that folder, showing only what's gone since.
+        selectedId = snaps!.at(-1)!.id;
+        openAt = r.path;
+        onlyDeleted = true;
+      }
+    });
+  });
+
   function showIn(snapshot: string, path: string) {
     selectedId = snapshot;
     show = path;
@@ -161,17 +195,105 @@
     }
   }
 
-  async function remove(s: SnapshotMeta) {
+  // Several snapshots at once: Ctrl-click (or ⌘) adds one, Shift-click a range, or
+  // *Select several* in a snapshot's menu. While picking, a plain click adds or removes.
+  let picking = $state(false);
+  let picked = $state<string[]>([]);
+  let anchor: string | null = null;
+  let confirmingMany = $state(false);
+  function stopPicking() {
+    picking = false;
+    picked = [];
+    anchor = null;
+    confirmingMany = false;
+  }
+  function startPicking(first: string | null) {
+    picking = true;
+    picked = first ? [first] : [];
+    anchor = first;
+    confirmingMany = false;
+  }
+  function clickRow(e: MouseEvent, s: SnapshotMeta) {
+    if (e.shiftKey && (picking || selectedId)) {
+      const from = anchor ?? selectedId;
+      if (!picking) startPicking(selectedId);
+      const a = newestFirst.findIndex((x) => x.id === from);
+      const b = newestFirst.findIndex((x) => x.id === s.id);
+      if (a < 0 || b < 0) return;
+      const range = newestFirst.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.id);
+      picked = [...new Set([...picked, ...range])];
+      confirmingMany = false;
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || picking) {
+      if (!picking) startPicking(selectedId && selectedId !== s.id ? selectedId : null);
+      picked = picked.includes(s.id) ? picked.filter((x) => x !== s.id) : [...picked, s.id];
+      anchor = s.id;
+      confirmingMany = false;
+      return;
+    }
+    selectedId = s.id;
+    query = null;
+    show = null;
+  }
+  /** Gone from the list at once; deleted a few seconds later unless undone. */
+  function goSoon(ids: string[]) {
+    app.deleteSoon(id, ids);
+    if (!snaps) return;
+    snaps = snaps.filter((s) => !ids.includes(s.id));
+    if (selectedId && ids.includes(selectedId)) selectedId = snaps.at(-1)?.id ?? null;
+  }
+  function removeMany() {
+    const ids = pickedDeletable.map((s) => s.id);
+    if (!ids.length) return;
+    stopPicking();
+    goSoon(ids);
+  }
+  $effect(() => {
+    void id;
+    stopPicking();
+  });
+
+  // *Browse in Files*: the snapshot mounted read-only and opened in the file manager.
+  let browsing = $state<Browsing | null>(null);
+  let opening = $state<string | null>(null);
+  $effect(() => {
+    void id;
+    api.browsing().then(
+      (b) => (browsing = b),
+      () => (browsing = null),
+    );
+  });
+  async function openInFiles(s: SnapshotMeta) {
+    opening = s.id;
     try {
-      const freed = await api.deleteSnapshot(id, s.id);
-      confirmingDelete = false;
-      app.toast("ok", freed == null ? "Snapshot deleted." : `Snapshot deleted; ${bytes(freed)} freed.`);
-      load();
+      browsing = await api.browseInFiles(id, s.id);
+      app.toast("ok", "Opened in Files, read-only. Close it here when you're done; Flux also closes it when it quits.");
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "password_required") onLocked(() => void openInFiles(s));
+      else app.toast("bad", (e as Error).message);
+    } finally {
+      opening = null;
+    }
+  }
+  async function closeInFiles() {
+    try {
+      await api.stopBrowsing();
+      browsing = null;
     } catch (e) {
       app.toast("bad", (e as Error).message);
     }
   }
+  const browsed = $derived(browsing && browsing.profile === id ? snaps?.find((x) => x.id === browsing!.snapshot) ?? null : null);
+
+  function remove(s: SnapshotMeta) {
+    confirmingDelete = false;
+    goSoon([s.id]);
+  }
   const newestFirst = $derived(snaps ? [...snaps].reverse().filter((s) => (!tagFilter || hasTag(s, tagFilter)) && (!dayFilter || dayKey(s.started) === dayFilter)) : []);
+  const pickedSnaps = $derived(newestFirst.filter((s) => picked.includes(s.id)));
+  const pickedPinned = $derived(pickedSnaps.filter((s) => s.pinned));
+  const pickedDeletable = $derived(pickedSnaps.filter((s) => !s.pinned));
   /** Vault and Borg count what they stored; Mirror and rsync what they copied. */
   const stored = $derived.by(() => {
     const e = app.profiles.find((p) => p.id === id)?.engine;
@@ -187,6 +309,11 @@
 
   // Arrow keys move through the list (newest at the top).
   function onKey(e: KeyboardEvent) {
+    if (picking && e.key === "Escape") {
+      stopPicking();
+      e.preventDefault();
+      return;
+    }
     if (!snaps?.length || !selectedId) return;
     const i = newestFirst.findIndex((s) => s.id === selectedId);
     if (e.key === "ArrowDown" && i < newestFirst.length - 1) selectedId = newestFirst[i + 1]!.id;
@@ -212,6 +339,7 @@
       ...(selectedId !== s.id ? [{ label: "Browse files", icon: "folder" as const, onselect: select }] : []),
       ...(prevOf(s) ? [{ label: "What changed since the one before", icon: "history" as const, onselect: () => compareWithPrev(s) }] : []),
       { label: "Compare with files now", icon: "refresh", onselect: () => compareWithNow(s) },
+      ...(id.startsWith("system:") ? [] : [{ label: "Browse in Files", icon: "external" as const, hint: "Open it read-only in the file manager", onselect: () => void openInFiles(s) }]),
       { label: "Export…", icon: "download", hint: "Save it as a .tar.zst or .zip archive", onselect: () => (exporting = s) },
       "separator",
       { label: s.name ? "Rename…" : "Name…", icon: "tag", onselect: () => (select(), (nameDraft = s.name ?? ""), (renaming = true)) },
@@ -219,6 +347,7 @@
       { label: s.pinned ? "Unpin" : "Pin (keep forever)", icon: "pin", onselect: () => void togglePin(s) },
       "separator",
       { label: "Delete…", icon: "trash", danger: true, disabled: s.pinned, hint: s.pinned ? "Pinned snapshots can't be deleted; unpin it first" : "", onselect: () => (select(), (confirmingDelete = true)) },
+      { label: "Select several…", icon: "check", hint: "To delete several at once; Ctrl-click or Shift-click also does it", onselect: () => startPicking(s.id) },
     ];
   }
 </script>
@@ -290,20 +419,27 @@
           {#if i === 0 || month(s.started) !== month(newestFirst[i - 1]!.started)}
             <div class="px-2.5 pt-3 pb-1 text-[12px] font-semibold text-fg-muted first:pt-1" role="presentation">{month(s.started)}</div>
           {/if}
+          {@const isPicked = picking && picked.includes(s.id)}
+          {@const lit = picking ? isPicked : s.id === selectedId}
           <button
             role="option"
-            aria-selected={s.id === selectedId}
+            aria-selected={lit}
             tabindex="-1"
             title="{dateTime(s.started)} · {bytes(stored ? s.stats.stored_bytes : s.stats.copied_bytes)} {stored ? 'stored' : 'copied'}{s.tags?.length ? `\n${s.tags.map((t) => `#${t}`).join(' ')}` : ''}{s.note ? `\n${s.note}` : ''}"
             class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13.5px] transition-colors
-              {s.id === selectedId ? 'bg-selected text-on-selected' : 'text-fg-2 hover:bg-surface-3 hover:text-fg'}"
-            onclick={() => ((selectedId = s.id), (query = null), (show = null))}
+              {lit ? 'bg-selected text-on-selected' : 'text-fg-2 hover:bg-surface-3 hover:text-fg'}"
+            onclick={(e) => clickRow(e, s)}
             use:contextMenu={{ items: () => snapshotMenu(s), label: `Snapshot ${dateTime(s.started)}` }}
           >
+            {#if picking}
+              <span class="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-[4px] border {isPicked ? 'border-transparent bg-[var(--c-primary)] text-[var(--c-on-primary)]' : 'border-[var(--c-track)]'}" aria-hidden="true">
+                {#if isPicked}<Icon name="check" size={10} />{/if}
+              </span>
+            {/if}
             <span class="flex h-3 w-3.5 shrink-0 items-end justify-center" aria-hidden="true">
               <span class="block w-[5px] rounded-[2px] {s.status !== 'complete' ? 'bg-warning' : 'bg-success'}" style:height="{mark(s)}px"></span>
             </span>
-            <span class="min-w-0 flex-1 truncate {s.id === selectedId ? 'font-semibold text-fg' : ''}">{s.name ?? dayLabel(s.started)}</span>
+            <span class="min-w-0 flex-1 truncate {lit ? 'font-semibold text-fg' : ''}">{s.name ?? dayLabel(s.started)}</span>
             {#if s.note || s.tags?.length}<Icon name="edit" size={12} class="shrink-0 text-fg-muted" label="Has a note or tags" />{/if}
             {#if s.pinned}<Icon name="pin" size={13} label="Pinned" />{/if}
             {#if s.status !== "complete"}<Icon name="alert" size={13} class="text-warning" label="Finished with problems" />{/if}
@@ -314,7 +450,34 @@
     </div>
 
     <div class="flex min-w-0 flex-1 flex-col gap-3">
-      {#if query}
+      {#if picking}
+        {@const n = pickedDeletable.length}
+        <div class="card flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5">
+          <div class="min-w-[15rem] flex-1">
+            <div class="title">{picked.length ? `${picked.length} snapshot${picked.length === 1 ? "" : "s"} selected` : "Select snapshots"}</div>
+            <div class="mt-0.5 text-[12.5px] text-fg-muted">
+              {#if pickedSnaps.length > 1}
+                From {dateTime(pickedSnaps.at(-1)!.started)} to {dateTime(pickedSnaps[0]!.started)}.
+              {/if}
+              {#if pickedPinned.length}
+                {pickedPinned.length} pinned {pickedPinned.length === 1 ? "stays" : "stay"}: unpin {pickedPinned.length === 1 ? "it" : "them"} first to delete {pickedPinned.length === 1 ? "it" : "them"}.
+              {/if}
+              Click snapshots to add or remove them; Shift-click picks a range. Esc stops.
+            </div>
+          </div>
+          {#if confirmingMany}
+            <span class="text-sm text-fg-2">Delete {n} for good?</span>
+            <button class="btn btn-danger" onclick={removeMany}>Delete</button>
+            <button class="btn btn-ghost" onclick={() => (confirmingMany = false)}>Keep</button>
+          {:else}
+            <button class="btn btn-danger" disabled={!n} onclick={() => (confirmingMany = true)}>Delete {n || ""}…</button>
+            <button class="btn btn-ghost" onclick={stopPicking}>Cancel</button>
+          {/if}
+        </div>
+        <p class="px-1 text-[12.5px] text-fg-muted">
+          The space only these snapshots use is freed; files other snapshots still have stay.
+        </p>
+      {:else if query}
         <FindResults profile={id} {query} snaps={snaps} onshow={showIn} onclose={() => (query = null)} {onLocked} />
       {:else if selected}
         {@const sel = selected}
@@ -375,14 +538,32 @@
             <MenuButton items={() => snapshotMenu(sel)} label="More actions for this snapshot" />
           {/if}
         </div>
-        {#key `${selected.id}\n${show}`}
-          <FileBrowser profile={id} snapshot={selected} {show} {onLocked} />
+        {#if browsed || opening}
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-surface-3 px-3.5 py-2 text-[13px] text-fg-2" role="status">
+            <Icon name="external" size={14} class="shrink-0 text-fg-muted" />
+            {#if opening}
+              <span class="flex-1">Opening the snapshot in Files…</span>
+            {:else if browsed}
+              <span class="min-w-0 flex-1">The snapshot of {dateTime(browsed.started)} is open in Files, read-only.</span>
+              <button class="btn btn-ghost h-7 px-2.5 text-[12.5px]" onclick={closeInFiles}>Close</button>
+            {/if}
+          </div>
+        {/if}
+        {#key `${selected.id}\n${show}\n${openAt}\n${onlyDeleted}`}
+          <FileBrowser profile={id} snapshot={selected} {show} {openAt} {onlyDeleted} {onLocked} />
         {/key}
       {/if}
     </div>
   </div>
 {/if}
 
+{#if versionsPath}
+  {@const vp = versionsPath}
+  <VersionsDialog profile={id} path={vp} onclose={() => (versionsPath = null)} onrestore={(s) => ((restoreReq = { snapshot: s, paths: [vp] }), (versionsPath = null))} />
+{/if}
+{#if restoreReq}
+  <RestoreDialog profile={id} snapshot={restoreReq.snapshot} paths={restoreReq.paths} missing={false} onclose={() => (restoreReq = null)} />
+{/if}
 {#if exporting}
   <ExportSnapshotDialog profile={id} snapshot={exporting} paths={[]} onclose={() => (exporting = null)} />
 {/if}

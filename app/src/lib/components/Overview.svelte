@@ -18,12 +18,17 @@
   import Readiness from "./Readiness.svelte";
   import SettingsGlance from "./SettingsGlance.svelte";
   import StorageCard from "./StorageCard.svelte";
+  import JobPanel from "./JobPanel.svelte";
+  import CompareDialog from "./CompareDialog.svelte";
+  import { changeMarks, changeWords, snapshotBefore } from "../changes";
   import { nextRun, protection, type Tone } from "../protection";
 
   let { id, onLocked }: { id: string; onLocked: (retry: () => void) => void } = $props();
   // A Vault from before 1.0: offered the newest format.
   let vaultFormat = $state<{ format: number; newest: number } | null>(null);
   let confirmingUpgrade = $state(false);
+  /** A recent backup compared with the one before it (what it changed). */
+  let comparing = $state<{ old: string; newer: string; when: string } | null>(null);
   let upgrading = $state(false);
   $effect(() => {
     const want = id;
@@ -45,6 +50,7 @@
       upgrading = false;
     }
   }
+  const compact = $derived(app.layout === "compact");
   let testing = $state(false);
   let showingAffected = $state(false);
   /** Guided recovery: everything, from the snapshot kept from before unusual changes. */
@@ -95,6 +101,8 @@
     }
   }
   let data = $state<Overview | null>(null);
+  /** Compact puts the space on one row of the list (with its details under it). */
+  const spaceRow = $derived(compact && !!data?.space?.size);
   let error = $state<string | null>(null);
   let locked = $state(false);
   /** The engine, also while locked (the summary in the sidebar list knows it). */
@@ -276,13 +284,72 @@
   {@const manual = data.profile.schedule.startsWith("manual")}
   {@const pausedNext = !manual && app.pause != null && (!app.pause.until || (data.next_run != null && new Date(data.next_run) < new Date(app.pause.until)))}
   {@const tone = prot?.tone ?? "ok"}
-  <div class="flex flex-col gap-7">
+  <!-- Compact: the settings and the places beside the rest, once there's room for both. -->
+  {#snippet side()}
+    <SettingsGlance {id} sentry={data!.sentry} column={compact} />
+    {#if data!.profile.destinations?.length}
+      {@const prof = data!.profile}
+      {@const last = data!.recent_runs.find((r) => r.status !== "skipped" && r.status !== "dry_run")}
+      {@const places = 1 + (prof.destinations?.length ?? 0)}
+      {@const failedPlaces = (last?.status === "failed" ? 1 : 0) + (prof.destinations ?? []).filter((d) => last?.destinations?.find((x) => x.name === d.name)?.status === "failed").length}
+      <!-- Compact: one line until opened (where and how are in the glance above). -->
+      <svelte:element this={compact ? "details" : "section"} class="group/kept {compact ? 'mt-auto' : ''}">
+        {#if compact}
+          <summary class="flex cursor-pointer list-none items-center gap-2 rounded-md px-0.5 py-1 text-[13px] font-semibold text-fg-2 select-none hover:text-fg [&::-webkit-details-marker]:hidden">
+            <Icon name="chevronRight" size={14} class="transition-transform group-open/kept:rotate-90" />
+            Where it's kept
+            <span class="font-normal text-fg-muted">{places} {places === 1 ? "place" : "places"}</span>
+            {#if failedPlaces}<span class="font-normal text-danger">· {failedPlaces} failed last time</span>{/if}
+          </summary>
+        {:else}
+          <h2 class="group-title">Where it's kept</h2>
+        {/if}
+        <ul class="rows-flat {compact ? 'mt-2' : ''}">
+          {#snippet place(name: string, target: string, remote: boolean, offsite: boolean | undefined, engine: string, status: RunRecord["status"] | null, err: string | null | undefined, browse: string, copy = false)}
+            {@const said = status ? (status === "failed" ? "Failed last time" : runStatusLabel[status]) : null}
+            {@const saidClass = status === "failed" ? "cursor-help text-danger underline decoration-dotted underline-offset-4" : "text-fg-2"}
+            <li class="row min-h-12 gap-3 py-2 text-sm">
+              <Icon name={remote ? "server" : "drive"} size={17} class="shrink-0 text-fg-2" />
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-2">
+                  <span class="truncate font-medium">{name}</span>
+                  <span class="tag text-[11.5px]">{engine}</span>
+                  {#if copy}<span class="tag text-[11.5px]">Copy</span>{/if}
+                  {#if offsite}<span class="tag text-[11.5px]">Offsite</span>{/if}
+                </span>
+                <span class="block truncate font-mono text-[12px] text-fg-muted" title={target}>{target}</span>
+                {#if compact && said}<span class="block text-[12.5px] {saidClass}" title={err ?? ""}>{said}</span>{/if}
+              </span>
+              {#if !compact && said}
+                <span class="shrink-0 text-[13px] {saidClass}" title={err ?? ""}>{said}</span>
+              {/if}
+              <button class="btn btn-ghost h-7 shrink-0 px-2.5 text-[13px]" onclick={() => ((app.snapshotsOf = browse === data?.profile.id ? null : browse), (app.tab = "snapshots"))}>Browse</button>
+            </li>
+          {/snippet}
+          {@render place(prof.target.split("/").filter(Boolean).pop() ?? prof.target, prof.target, prof.remote, prof.offsite, storageWords[prof.engine], last?.status ?? null, last?.error, prof.id)}
+          {#each prof.destinations ?? [] as d (d.id)}
+            {@const r = last?.destinations?.find((x) => x.name === d.name)}
+            {@render place(d.label, d.target, d.remote, d.offsite, storageWords[d.engine], r?.status ?? null, r?.error, d.id, d.replica)}
+          {/each}
+        </ul>
+      </svelte:element>
+    {/if}
+  {/snippet}
+  <div class={compact ? "@container" : ""}>
+  <div class={compact ? "grid items-stretch gap-7 @min-[760px]:grid-cols-[minmax(0,1fr)_18.5rem] @min-[760px]:gap-x-6" : ""}>
+  <div class="flex min-w-0 flex-col {compact ? 'gap-4' : 'gap-7'}">
     <!-- The answer, in one sentence. -->
-    <section class="flex items-start gap-4" aria-live="polite">
-      <span class="glyph {glyph[tone].cls} size-12"><Icon name={glyph[tone].icon} size={24} /></span>
+    <!-- Compact: the sentence, a running backup's progress and the last 30 days are one
+         card, under a heading level with the side column's, so the two columns start
+         together. -->
+    <section>
+    {#if compact}<h2 class="mb-2 flex h-7 items-center px-0.5 text-[13px] font-semibold text-fg-2">Status</h2>{/if}
+    <div class={compact ? "card px-5 pt-3.5 pb-2.5" : ""}>
+    <div class="flex items-start {compact ? 'gap-3.5' : 'gap-4'}" aria-live="polite">
+      <span class="glyph {glyph[tone].cls} {compact ? 'size-10' : 'size-12'}"><Icon name={glyph[tone].icon} size={compact ? 20 : 24} /></span>
       <div class="min-w-0 pt-0.5">
-        <h2 class="text-[22px] leading-tight font-semibold tracking-[-0.01em] text-balance">{sentence[tone](data.profile.name)}</h2>
-        <p class="num mt-1.5 text-[14px] text-fg-2">
+        <h2 class="{compact ? 'text-[18px]' : 'text-[22px]'} leading-tight font-semibold tracking-[-0.01em] text-balance">{sentence[tone](data.profile.name)}</h2>
+        <p class="num {compact ? 'mt-1 text-[12.5px] text-pretty' : 'mt-1.5 text-[14px]'} text-fg-2">
           Last backup <span class="text-fg">{data.latest ? ago(data.latest.finished) : "never"}</span>
           {#if !summary?.running}
           <span class="text-fg-muted">·</span>
@@ -293,13 +360,23 @@
           <span class="text-fg">{count(data.snapshot_count)}</span> {data.snapshot_count === 1 ? "snapshot" : "snapshots"}{#if data.oldest}<span class="text-fg-muted">{" "}since {shortDate(data.oldest)}</span>{/if}
         </p>
         {#if prot?.detail && tone !== "ok" && !data.unusual}
-          <p class="mt-2 max-w-[68ch] text-[14px] {tone === 'bad' ? 'text-danger' : tone === 'warn' ? 'text-warning' : 'text-fg-2'}">{prot.detail}</p>
+          <p class="mt-2 max-w-[68ch] {compact ? 'text-[13px]' : 'text-[14px]'} {tone === 'bad' ? 'text-danger' : tone === 'warn' ? 'text-warning' : 'text-fg-2'}">{prot.detail}</p>
         {/if}
         {#if last && last.status === "failed" && !status?.health.length}
           {@const hint = failureHint(last)}
           {#if hint}<p class="mt-1 max-w-[68ch] text-[14px] text-fg">{hint}</p>{/if}
         {/if}
       </div>
+    </div>
+    {#if compact && app.jobs[id]}
+      <div class="mt-3 border-t border-[var(--c-sep)] pt-2.5"><JobPanel job={app.jobs[id]!} inline /></div>
+    {/if}
+    {#if compact && status}
+      <div class="mt-3 border-t border-[var(--c-sep)] pt-2.5" title="Last 30 days: one bar a day, taller bars copied more">
+        <HistoryStrip days={status.days} fill low />
+      </div>
+    {/if}
+    </div>
     </section>
 
     {#if data.unusual}
@@ -352,7 +429,7 @@
       </div>
     {/if}
 
-    {#if status}
+    {#if status && !compact}
       <section>
         <div class="flex items-baseline justify-between gap-4 px-0.5 pb-2">
           <h2 class="text-[13px] font-semibold text-fg-2">Last 30 days</h2>
@@ -384,45 +461,10 @@
 
     <SizeLimitNotice {id} onlyTiny />
 
-    <SettingsGlance {id} sentry={data.sentry} />
-
-    {#if data.profile.destinations?.length}
-      {@const prof = data.profile}
-      {@const last = data.recent_runs.find((r) => r.status !== "skipped" && r.status !== "dry_run")}
-      <section>
-        <h2 class="group-title">Where it's kept</h2>
-        <ul class="rows-flat">
-          {#snippet place(name: string, target: string, remote: boolean, offsite: boolean | undefined, engine: string, status: RunRecord["status"] | null, err: string | null | undefined, browse: string, copy = false)}
-            <li class="row min-h-12 gap-3 py-2 text-sm">
-              <Icon name={remote ? "server" : "drive"} size={17} class="shrink-0 text-fg-2" />
-              <span class="min-w-0 flex-1">
-                <span class="flex items-center gap-2">
-                  <span class="font-medium">{name}</span>
-                  <span class="tag text-[11.5px]">{engine}</span>
-                  {#if copy}<span class="tag text-[11.5px]">Copy</span>{/if}
-                  {#if offsite}<span class="tag text-[11.5px]">Offsite</span>{/if}
-                </span>
-                <span class="block truncate font-mono text-[12px] text-fg-muted" title={target}>{target}</span>
-              </span>
-              {#if status}
-                <span class="shrink-0 text-[13px] {status === 'failed' ? 'cursor-help text-danger underline decoration-dotted underline-offset-4' : 'text-fg-2'}" title={err ?? ""}>
-                  {status === "failed" ? "Failed last time" : runStatusLabel[status]}
-                </span>
-              {/if}
-              <button class="btn btn-ghost h-7 shrink-0 px-2.5 text-[13px]" onclick={() => ((app.snapshotsOf = browse === data?.profile.id ? null : browse), (app.tab = "snapshots"))}>Browse</button>
-            </li>
-          {/snippet}
-          {@render place(prof.target.split("/").filter(Boolean).pop() ?? prof.target, prof.target, prof.remote, prof.offsite, storageWords[prof.engine], last?.status ?? null, last?.error, prof.id)}
-          {#each prof.destinations ?? [] as d (d.id)}
-            {@const r = last?.destinations?.find((x) => x.name === d.name)}
-            {@render place(d.label, d.target, d.remote, d.offsite, storageWords[d.engine], r?.status ?? null, r?.error, d.id, d.replica)}
-          {/each}
-        </ul>
-      </section>
-    {/if}
+    {#if !compact}{@render side()}{/if}
 
     <section>
-      <div class="flex items-center justify-between gap-3 px-0.5 pb-2">
+      <div class="flex items-center justify-between gap-3 px-0.5 {compact ? 'pb-1' : 'pb-2'}">
         <h2 class="text-[13px] font-semibold text-fg-2">Recent backups</h2>
         <div class="flex gap-1">
           {#if data.latest}<button class="btn btn-ghost h-7 px-2.5 text-[13px]" onclick={() => (app.tab = "snapshots")}>Browse files</button>{/if}
@@ -430,12 +472,35 @@
         </div>
       </div>
       <ul class="rows-flat">
-        {#each data.recent_runs.slice(0, 3) as r (r.run_id + r.started)}
-          <li class="row min-h-11 py-2 text-sm" title={r.error ?? `${dateTime(r.started)} · ${r.trigger}`}>
+        {#each data.recent_runs.slice(0, 3) as r, i (r.run_id + r.started)}
+          <li class="row {compact ? 'min-h-[34px] py-1 text-[13px]' : 'min-h-11 py-2 text-sm'}" title={r.error ?? `${dateTime(r.started)} · ${r.trigger}`}>
             <span class="size-2 shrink-0 rounded-full {dot[r.status]}" aria-hidden="true"></span>
             <span class="shrink-0 font-medium">{runStatusLabel[r.status]}</span>
             <!-- An error takes the middle; otherwise the size sits by the time, on the right. -->
-            <span class="num min-w-0 flex-1 truncate text-danger">{r.error ?? ""}</span>
+            {#if r.error || !r.stats || !r.snapshot}
+              <span class="num min-w-0 flex-1 truncate text-danger">{r.error ?? ""}</span>
+            {:else}
+              <!-- What it changed; a click compares it with the snapshot before. -->
+              {@const words = changeWords(r.stats)}
+              {@const before = snapshotBefore(data.recent_runs, i)}
+              <span class="min-w-0 flex-1">
+                {#if words === "No changes"}
+                  <span class="num text-fg-muted">{words}</span>
+                {:else}
+                  <!-- Compact says it as a diff does (+new ~changed −deleted); the words in
+                       its title and for screen readers. -->
+                  <button
+                    class="num max-w-full truncate rounded px-1 -mx-1 text-left text-fg-2 hover:bg-surface-3 hover:text-fg"
+                    title="{words}. {before ? 'Compare with the backup before' : 'See this snapshot'}."
+                    aria-label="{words}: {before ? 'compare with the backup before' : 'see this snapshot'}"
+                    onclick={() => {
+                      if (before) comparing = { old: before, newer: r.snapshot!, when: r.started };
+                      else (app.showSnapshot = r.snapshot), (app.tab = "snapshots");
+                    }}>{compact ? changeMarks(r.stats) : words}</button
+                  >
+                {/if}
+              </span>
+            {/if}
             {#if !r.error && r.stats}
               <span class="num shrink-0 text-fg-2">{bytes(storedBytes ? r.stats.stored_bytes : r.stats.copied_bytes)} {storedBytes ? "stored" : "copied"}</span>
             {/if}
@@ -449,18 +514,18 @@
 
     <!-- Can it be restored: the last restore test, and (rsync, Borg) the guide to do it
          without Flux. Part of the page, not raised: only the answer at the top is. -->
-    {#if data.restore_test || isCompat(data.profile.engine)}
+    {#if data.restore_test || isCompat(data.profile.engine) || spaceRow}
     <div class="rows-flat">
     {#if data.restore_test}
       {@const rt = data.restore_test}
       {@const last = rt.last}
-      <div class="row gap-3">
-        <span class="glyph {last?.result === 'failed' ? 'glyph-bad' : last?.result === 'warning' ? 'glyph-warn' : last ? 'glyph-ok' : ''} size-8"><Icon name={last?.result === "failed" ? "alert" : "shieldCheck"} size={16} /></span>
+      <div class="row gap-3" title={compact && last?.guarantee && last.result !== "failed" ? guaranteeWords(last.guarantee) : undefined}>
+        <span class="glyph {last?.result === 'failed' ? 'glyph-bad' : last?.result === 'warning' ? 'glyph-warn' : last ? 'glyph-ok' : ''} {compact ? '' : 'size-8'}"><Icon name={last?.result === "failed" ? "alert" : "shieldCheck"} size={compact ? 13 : 16} /></span>
         <span class="min-w-0 flex-1">
           <span class="block font-medium">
             {#if !last}No restore test yet{:else if last.result === "failed"}The last restore test failed{:else if last.result === "warning"}Restore test passed, with notes{:else}Restore test passed{/if}
           </span>
-          <span class="block text-[13px] text-fg-2">
+          <span class="block text-[13px] text-fg-2 {compact ? 'truncate text-[12.5px]' : ''}">
             {#if last}
               {ago(last.started)} · {count(last.tested)} files read back and checked{#if last.result !== "passed"} · {last.error ?? `${last.problems_total} ${last.problems_total === 1 ? "problem" : "problems"}`}{/if}
             {:else}
@@ -468,22 +533,22 @@
             {/if}
             {#if rt.every !== "off"} · {rt.every === "backup" ? "after every backup" : `every ${rt.every}`}{/if}
           </span>
-          {#if last?.guarantee && last.result !== "failed"}
+          {#if last?.guarantee && last.result !== "failed" && !compact}
             <span class="block text-[13px] text-fg-muted">{guaranteeWords(last.guarantee)}</span>
           {/if}
         </span>
-        <button class="btn shrink-0" disabled={testing} onclick={() => void testNow()}>
-          {#if testing}<Icon name="refresh" size={14} class="motion-safe:animate-spin" /> Testing…{:else}Test a restore now{/if}
+        <button class="btn shrink-0 {compact ? 'h-7 px-2.5 text-[13px]' : ''}" disabled={testing} onclick={() => void testNow()}>
+          {#if testing}<Icon name="refresh" size={14} class="motion-safe:animate-spin" /> Testing…{:else}{compact ? "Test now" : "Test a restore now"}{/if}
         </button>
       </div>
     {/if}
 
     {#if isCompat(data.profile.engine)}
       <button class="row row-link" onclick={() => (app.dialog = { kind: "recovery", id })}>
-        <span class="glyph glyph-ok size-8"><Icon name="lifebuoy" size={16} /></span>
+        <span class="glyph glyph-ok {compact ? '' : 'size-8'}"><Icon name="lifebuoy" size={compact ? 13 : 16} /></span>
         <span class="min-w-0 flex-1">
           <span class="block font-medium">Usable without Flux</span>
-          <span class="block text-[13px] text-fg-2">
+          <span class="block text-[13px] text-fg-2 {compact ? 'truncate text-[12.5px]' : ''}">
             {data.profile.engine === "borg"
               ? "A standard Borg repository. The recovery guide next to it says how to restore with borg alone."
               : "Plain folders written by rsync. The recovery guide next to them says how to restore with rsync or a file manager."}
@@ -493,16 +558,46 @@
         <Icon name="chevronRight" size={16} class="shrink-0 text-fg-muted" />
       </button>
     {/if}
+
+    {#if spaceRow && data.space && data.space.size}
+      <!-- Compact: space on one line (free, a meter, how full); the forecast and what the
+           snapshots take open under it. -->
+      {@const sp = data.space}
+      {@const spSize = data.space.size}
+      {@const full = Math.min(100, Math.max(0, Math.round(((spSize - sp.free) / spSize) * 100)))}
+      {@const drive = data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target}
+      <details class="group/space shadow-[inset_0_1px_0_var(--c-sep)]" open={sp.days_left != null && sp.days_left < 60}>
+        <summary class="row row-link cursor-pointer list-none gap-3 px-1.5 [&::-webkit-details-marker]:hidden">
+          <span class="glyph"><Icon name={data.profile.remote ? "server" : "drive"} size={13} /></span>
+          <span class="min-w-0 flex-1">
+            <span class="block font-medium">Space on {drive}</span>
+            <span class="num block truncate text-[12.5px] {sp.days_left != null && sp.days_left < 30 ? 'text-warning' : 'text-fg-2'}">{bytes(sp.free)} free of {bytes(spSize)}</span>
+          </span>
+          <span class="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-track" role="img" aria-label="{full}% full">
+            <span class="block h-full rounded-full {full >= 90 ? 'bg-warning' : 'bg-primary'}" style:width="{full}%"></span>
+          </span>
+          <span class="num w-16 shrink-0 text-right text-[13px] text-fg-2">{full}% full</span>
+          <Icon name="chevronRight" size={15} class="shrink-0 text-fg-muted transition-transform group-open/space:rotate-90" />
+        </summary>
+        <div class="px-1.5 pt-1 pb-4">
+          <SpaceCard space={sp} target={drive} flat health={data.drive_health}>
+            <StorageCard {id} embedded />
+          </SpaceCard>
+        </div>
+      </details>
+    {/if}
     </div>
     {/if}
 
     <!-- Space: how full the drive is, and what the snapshots take of it. -->
-    {#if data.space && data.space.size}
-      <SpaceCard space={data.space} target={data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target}>
+    {#if compact && data.space && data.space.size}
+      <!-- In the list above. -->
+    {:else if data.space && data.space.size}
+      <SpaceCard space={data.space} target={data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target} health={data.drive_health}>
         <StorageCard {id} embedded />
       </SpaceCard>
     {:else}
-      <StorageCard {id} />
+      <StorageCard {id} folded={compact} />
     {/if}
 
     {#if vaultFormat && vaultFormat.format < vaultFormat.newest}
@@ -512,8 +607,9 @@
       </Callout>
     {/if}
 
-    <!-- Less often needed: folded, one line each until opened. -->
-    <div class="flex flex-col gap-3">
+    <!-- Less often needed: folded, one line each until opened. In Compact they sit at the
+         column's foot, level with the side column's last line. -->
+    <div class="flex flex-col gap-3 {compact ? 'mt-auto' : ''}">
       <Readiness {id} onlocked={onLocked} />
       <details class="group" open={busy !== null || pruneConfirm != null || result != null}>
         <summary class="flex cursor-pointer list-none items-center gap-2 rounded-md px-0.5 py-1 text-[13px] font-semibold text-fg-2 select-none hover:text-fg [&::-webkit-details-marker]:hidden">
@@ -564,8 +660,16 @@
       {/if}
     </div>
   </div>
+  {#if compact}
+    <aside class="flex min-w-0 flex-col gap-7" aria-label="About this backup">{@render side()}</aside>
+  {/if}
+  </div>
+  </div>
 {/if}
 
+{#if comparing}
+  <CompareDialog profile={id} old={comparing.old} newer={comparing.newer} title="What the backup of {dateTime(comparing.when)} changed" onclose={() => (comparing = null)} />
+{/if}
 {#if confirmingUpgrade}
   <ConfirmDialog title="Upgrade the Vault?" icon="vault" confirm={upgrading ? "Upgrading…" : "Upgrade"} busy={upgrading} onconfirm={() => void upgradeVault()} onclose={() => (confirmingUpgrade = false)}>
     <p>New snapshots then keep the holes of sparse files, so disk images and similar files take only the space of their data. The snapshots already there stay as they are.</p>

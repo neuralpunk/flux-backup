@@ -14,12 +14,14 @@ pub mod archive;
 pub mod calendar;
 pub mod cron;
 pub mod desktop;
+pub mod drive_health;
 pub mod index;
 pub mod jobs;
 pub mod maintenance;
 pub mod password;
 pub mod prefs;
 pub mod recover;
+pub mod release;
 pub mod repo;
 pub mod restore_test;
 pub mod runlog;
@@ -162,10 +164,12 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
             // Said again once a day for as long as it lasts: backups that silently
             // stopped would be worse than what stopped them.
             if job.profile.options.notify && hold_reminder_due(job.paths, job.id, started) {
-                desktop::notify(
+                desktop::notify_with(
                     &format!("Backups of “{}” are on hold", job.profile.name),
                     "Flux Sentry found unusual changes in the last backup, and no backup is made until you've looked. Open Flux Backup to see them.",
                     desktop::Urgency::Critical,
+                    job.id.as_str(),
+                    &[desktop::Action::Open],
                 );
             }
         }
@@ -314,6 +318,16 @@ pub fn run_backup(job: &BackupJob<'_>, progress: &Progress, report: Reporter<'_>
                     message: format!("webhook {url}: {e}"),
                 });
             }
+        }
+        // Before a drive is released: it has to be there to be asked.
+        if !job.dry_run && !matches!(record.status, RunStatus::Cancelled | RunStatus::Skipped) {
+            check_drive_health(job, &tee);
+        }
+        if job.profile.schedule.release_drive
+            && !job.dry_run
+            && !matches!(record.status, RunStatus::Cancelled | RunStatus::Skipped)
+        {
+            release_drives(job, &tee);
         }
         drop(turn);
         let wants = shared
@@ -740,13 +754,15 @@ fn raise_alarm(
     let Some((repo, prev)) = kept else {
         // No snapshot yet to keep.
         if job.profile.options.notify {
-            desktop::notify(
+            desktop::notify_with(
                 &format!("Unusual changes in “{}”", job.profile.name),
                 &format!(
                     "{}. The backup wasn't made, and backups are on hold. If you didn't make these changes, check your files.",
                     r.signals.join("; ")
                 ),
                 desktop::Urgency::Critical,
+                job.id.as_str(),
+                &[desktop::Action::Open],
             );
         }
         return (false, false);
@@ -794,7 +810,7 @@ fn raise_alarm(
         });
     }
     if job.profile.options.notify {
-        desktop::notify(
+        desktop::notify_with(
             &format!("Unusual changes in “{}”", job.profile.name),
             &format!(
                 "{}. {} The snapshot from {day}, before them, {}. If you didn't make these changes, don't delete anything and check your files.",
@@ -811,6 +827,8 @@ fn raise_alarm(
                 }
             ),
             desktop::Urgency::Critical,
+            job.id.as_str(),
+            &[desktop::Action::Open],
         );
     }
     (pinned, by_flux)
@@ -1380,10 +1398,12 @@ fn restore_test_after(job: &BackupJob<'_>, progress: &Progress, report: Reporter
             message: text.clone(),
         });
         if job.profile.options.notify {
-            desktop::notify(
+            desktop::notify_with(
                 &format!("Restore test of “{}” failed", job.profile.name),
                 &text,
                 desktop::Urgency::Critical,
+                job.id.as_str(),
+                &[desktop::Action::Open],
             );
         }
     } else {
@@ -1415,6 +1435,87 @@ fn power_off_soon(job: &BackupJob<'_>, report: &dyn Fn(Event)) -> bool {
                 message: format!("couldn't shut down: {e}"),
             });
             false
+        }
+    }
+}
+
+/// "Safe to unplug": unmount (and power off) the drives this backup wrote to, and say so
+/// in a notification. Drives that can't be released stay mounted, with the reason.
+/// Ask the backup drives how they are; say what's newly wrong, in the log and once in a
+/// notification (failing or not, it's a warning: never held for quiet hours).
+fn check_drive_health(job: &BackupJob<'_>, report: &dyn Fn(Event)) {
+    let now = Timestamp::now();
+    for (_, said) in drive_health::check_places(job.paths, job.id.as_str(), job.profile, now) {
+        report(Event::Warning {
+            path: String::new(),
+            message: format!("{} {}", said.text, said.hint),
+        });
+        if job.profile.options.notify {
+            desktop::notify_with(
+                &said.text,
+                &said.hint,
+                if said.danger {
+                    desktop::Urgency::Critical
+                } else {
+                    desktop::Urgency::Normal
+                },
+                job.id.as_str(),
+                &[desktop::Action::Open],
+            );
+        }
+    }
+}
+
+fn release_drives(job: &BackupJob<'_>, report: &dyn Fn(Event)) {
+    let targets = std::iter::once(&job.profile.target)
+        .chain(job.profile.destinations.iter().map(|d| &d.target))
+        .filter_map(|t| match t {
+            Target::Local { path, .. } => Some(path.as_path()),
+            _ => None,
+        });
+    for (place, how) in release::release_all(targets) {
+        let name = place.file_name().map_or_else(
+            || place.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        match how {
+            Ok(r) => {
+                let how = match r {
+                    release::Released::PoweredOff => "unmounted and powered off",
+                    release::Released::Unmounted => "unmounted",
+                };
+                report(Event::Info {
+                    message: format!("{name} is {how}: safe to unplug"),
+                });
+                if !job.profile.options.notify {
+                    continue;
+                }
+                desktop::notify(
+                    "Safe to unplug",
+                    &format!(
+                        "The backup of \u{201c}{}\u{201d} finished, and {name} is {how}.",
+                        job.profile.name
+                    ),
+                    desktop::Urgency::Normal,
+                );
+            }
+            Err(e) => {
+                report(Event::Warning {
+                    path: String::new(),
+                    message: format!("couldn't release the drive: {e}"),
+                });
+                if !job.profile.options.notify {
+                    continue;
+                }
+                desktop::notify(
+                    "The drive is still in use",
+                    &format!(
+                        "The backup of \u{201c}{}\u{201d} finished, but its drive couldn't be released: {e}. Eject it from the file manager before unplugging it.",
+                        job.profile.name
+                    ),
+                    desktop::Urgency::Normal,
+                );
+            }
         }
     }
 }
@@ -1673,24 +1774,31 @@ fn finish_run(
     let status = status_of(outcome);
     if p.options.notify && !job.dry_run {
         match (outcome, status) {
-            (Err(e), RunStatus::Failed) => desktop::notify(
+            (Err(e), RunStatus::Failed) => desktop::notify_with(
                 &format!("Backup of “{}” failed", p.name),
                 &e.to_string(),
                 desktop::Urgency::Critical,
+                job.id.as_str(),
+                &[desktop::Action::Retry, desktop::Action::Open],
             ),
             (Ok(BackupOutcome::Created { snapshot, .. }), RunStatus::CompletedWithErrors) => {
-                desktop::notify(
+                desktop::notify_with(
                     &format!("Backup of “{}” finished with problems", p.name),
                     &format!(
                         "{} items could not be backed up. Run `flux info {} {}` for details.",
                         snapshot.errors_total, job.id, snapshot.id
                     ),
                     desktop::Urgency::Normal,
+                    job.id.as_str(),
+                    &[desktop::Action::Retry, desktop::Action::Open],
                 )
             }
             (Ok(BackupOutcome::Created { snapshot, .. }), RunStatus::Completed)
-                if job.trigger == Trigger::Scheduled
-                    && prefs::Settings::load(job.paths).notify_success =>
+                if job.trigger == Trigger::Scheduled && {
+                    // Only informs: not in quiet hours.
+                    let s = prefs::Settings::load(job.paths);
+                    s.notify_success && !s.quiet_now()
+                } =>
             {
                 desktop::notify(
                     &format!("Backed up “{}”", p.name),
@@ -2131,10 +2239,12 @@ fn run_inner(
                     message: format!("the backup to {} failed: {e}", d.label()),
                 });
                 if p.options.notify && !job.dry_run {
-                    desktop::notify(
+                    desktop::notify_with(
                         &format!("Backup of “{}” to {} failed", p.name, d.label()),
                         &e.to_string(),
                         desktop::Urgency::Critical,
+                        job.id.as_str(),
+                        &[desktop::Action::Retry, desktop::Action::Open],
                     );
                 }
             }

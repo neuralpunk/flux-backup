@@ -215,6 +215,58 @@ pub fn slot_input(password: &str, unlock: Option<&UnlockSecret>) -> Zeroizing<St
     }
 }
 
+/// The label of a recovery code's key slot.
+pub const RECOVERY_LABEL: &str = "recovery code";
+
+/// Crockford's base32: no I, L, O or U, so nothing reads as something else.
+const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Symbols in a recovery code (5 bits each: 150 bits), in groups of five.
+const CODE_SYMBOLS: usize = 30;
+
+/// A new recovery code: `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`, 150 random bits.
+pub fn new_recovery_code() -> Result<Zeroizing<String>, CryptoError> {
+    let bytes = Zeroizing::new(random::<19>()?);
+    let mut out = Zeroizing::new(String::with_capacity(CODE_SYMBOLS + 5));
+    for i in 0..CODE_SYMBOLS {
+        if i > 0 && i % 5 == 0 {
+            out.push('-');
+        }
+        let bit = i * 5;
+        let (byte, shift) = (bit / 8, bit % 8);
+        let two = (u16::from(bytes[byte]) << 8) | u16::from(*bytes.get(byte + 1).unwrap_or(&0));
+        let v = (two >> (11 - shift)) & 0x1f;
+        out.push(CROCKFORD[v as usize] as char);
+    }
+    Ok(out)
+}
+
+/// A recovery code as typed (any case, spaces or dashes anywhere, O for 0, I or L for 1),
+/// in its canonical form; `None` if it isn't one.
+pub fn normalize_recovery_code(typed: &str) -> Option<Zeroizing<String>> {
+    let mut symbols = Zeroizing::new(String::with_capacity(CODE_SYMBOLS));
+    for c in typed.chars() {
+        let c = match c.to_ascii_uppercase() {
+            ' ' | '-' | '\t' => continue,
+            'O' => '0',
+            'I' | 'L' => '1',
+            c if CROCKFORD.contains(&(c as u8)) && c.is_ascii() => c,
+            _ => return None,
+        };
+        symbols.push(c);
+    }
+    if symbols.len() != CODE_SYMBOLS {
+        return None;
+    }
+    let mut out = Zeroizing::new(String::with_capacity(CODE_SYMBOLS + 5));
+    for (i, c) in symbols.chars().enumerate() {
+        if i > 0 && i % 5 == 0 {
+            out.push('-');
+        }
+        out.push(c);
+    }
+    Some(out)
+}
+
 /// `keys/<id>`: the master key wrapped with a password.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeySlot {

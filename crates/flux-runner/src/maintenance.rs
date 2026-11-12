@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use flux_core::progress::{Event, Progress, Reporter};
 use flux_core::{ByteSize, Engine, Paths, Profile, ProfileId};
 
-use crate::desktop::{self, Urgency};
+use crate::desktop::{self, Action, Urgency};
 use crate::password::Ask;
 use crate::repo::AnyRepo;
 
@@ -109,13 +109,15 @@ pub fn after_backup(
                         for fixed in &c.repaired {
                             info(format!("monthly check: repaired: {fixed}"));
                         }
-                        desktop::notify(
+                        desktop::notify_with(
                             &format!("Damage in the backups of “{}” was repaired", p.name),
                             &format!(
                                 "{} damaged files were rebuilt from their repair data. The drive may be failing: see Flux Backup › Activity.",
                                 c.repaired.len()
                             ),
                             Urgency::Normal,
+                            id.as_str(),
+                            &[Action::Open],
                         );
                     }
                     match checked {
@@ -135,13 +137,15 @@ pub fn after_backup(
                                 });
                             }
                             done.verified = Some(now);
-                            desktop::notify(
+                            desktop::notify_with(
                                 &format!("Checking the backups of “{}” found problems", p.name),
                                 &format!(
                                     "{} problems. Open Flux Backup › Activity for details.",
                                     c.errors.len()
                                 ),
                                 Urgency::Critical,
+                                id.as_str(),
+                                &[Action::Open],
                             );
                         }
                         Err(e) => {
@@ -149,10 +153,12 @@ pub fn after_backup(
                                 path: String::new(),
                                 message: format!("monthly check failed: {e}"),
                             });
-                            desktop::notify(
+                            desktop::notify_with(
                                 &format!("Couldn't check the backups of “{}”", p.name),
                                 &e.to_string(),
                                 Urgency::Normal,
+                                id.as_str(),
+                                &[Action::Open],
                             );
                         }
                     }

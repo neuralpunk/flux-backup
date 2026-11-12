@@ -52,6 +52,13 @@
 <header data-tauri-drag-region class="relative flex h-12 shrink-0 items-center gap-2.5 pl-5 text-[13.5px] font-semibold text-fg">
   <Logo class="size-6" />
   <span data-tauri-drag-region>Flux Backup</span>
+  <button
+    class="btn-icon ml-1 size-7 text-fg-2"
+    aria-label={app.sidebarFolded ? "Open the sidebar" : "Fold the sidebar"}
+    aria-pressed={!app.sidebarFolded}
+    title="{app.sidebarFolded ? 'Open the sidebar' : 'Fold the sidebar'} (F9)"
+    onclick={() => app.toggleSidebar()}><Icon name="sidebar" size={16} /></button
+  >
   {#if !inTauri}
     <span data-tauri-drag-region class="tag ml-3 text-[11.5px] font-normal">Demo: sample data · Vault password “demo”</span>
   {/if}

@@ -7,6 +7,7 @@
   import { api, inTauri, pickFile, pickFolder } from "../api";
   import StorageChoice from "./StorageChoice.svelte";
   import Modal from "./Modal.svelte";
+  import SectionNav from "./SectionNav.svelte";
   import { app } from "../state.svelte";
   import { bytes, count, dateTime, dayLabel, time } from "../format";
   import { sizeLabel } from "../size";
@@ -27,6 +28,7 @@
   import InfoDetails from "./InfoDetails.svelte";
   import StorageMeter from "./StorageMeter.svelte";
   import BackInTimeOffer from "./BackInTimeOffer.svelte";
+  import RecoveryCodeDialog from "./RecoveryCodeDialog.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
 
   let {
@@ -87,6 +89,11 @@
     (creating ? (template ? api.newFromTemplate(template, sys) : api.newProfile(sys)) : api.getProfile(id!)).then(
       (e) => {
         normalize(e.profile);
+        // *Back up this folder* from the file manager: the new backup takes that folder.
+        if (creating && app.creatingWith) {
+          e.profile.sources.paths = [app.creatingWith];
+          app.creatingWith = null;
+        }
         draft = e.profile;
         initial = JSON.stringify(e.profile);
         issues = e.issues;
@@ -246,6 +253,17 @@
   }
 
   let scroller: HTMLElement | undefined = $state();
+  /** Compact's Settings page lists its sections at the side. */
+  const sideNav = $derived(app.layout === "compact" && !creating && !dialogOnly);
+  const settingsSections = [
+    { id: "sec-general", label: "Name" },
+    { id: "sec-sources", label: "What to back up" },
+    { id: "sec-destination", label: "Where to keep it" },
+    { id: "sec-copies", label: "Other copies" },
+    { id: "sec-schedule", label: "When" },
+    { id: "sec-retention", label: "What to keep" },
+    { id: "sec-more", label: "More" },
+  ];
   function sectionOf(field: string): string {
     if (field.startsWith("target")) return "destination";
     if (field.startsWith("sources")) return "sources";
@@ -311,7 +329,7 @@
     // Root has no desktop keyring: system Vaults and Borg repositories get their password
     // once, then keep it in a root-only key file (see PasswordDialog).
     const source: PasswordSource = { from: sys ? "prompt" : "keyring" };
-    if (engine === "vault" && !draft.vault) draft.vault = { compression_level: 3, encryption: true, password_source: source };
+    if (engine === "vault" && !draft.vault) draft.vault = { compression_level: 3, encryption: true, password_source: source, hide_sizes: true };
     if (engine === "borg" && !draft.borg) draft.borg = { encryption: "repokey-blake2", compression: "zstd,3", password_source: source, remote_path: null, extra_args: [] };
     // Settings of other engines would only produce "ignored" warnings.
     if (engine !== "vault") draft.vault = null;
@@ -340,6 +358,27 @@
 
   // How much that is, for a new backup: counted again shortly after the folders or
   // exclusions change (a newer count stops the older one in the backend).
+  // How much each folder and each excluded folder holds, beside it in the lists. Asked
+  // for (once per path) a moment after the lists change; kept while the editor is open.
+  let folderSizes = $state<Record<string, { size: number | null; partial: boolean } | undefined>>({});
+  let sizeTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (!draft) return;
+    const want = [...draft.sources.paths, ...draft.sources.exclude].filter((p) => !(p in folderSizes));
+    if (!want.length) return;
+    clearTimeout(sizeTimer);
+    sizeTimer = setTimeout(() => {
+      for (const p of want) folderSizes[p] = undefined;
+      api.folderSizes(want).then(
+        (r) => {
+          for (const f of r) folderSizes[f.path] = { size: f.size, partial: f.partial };
+        },
+        () => {},
+      );
+    }, 500);
+    return () => clearTimeout(sizeTimer);
+  });
+
   let estimate = $state<Estimate | null>(null);
   let estimating = $state(false);
   let estimateError = $state<string | null>(null);
@@ -710,6 +749,9 @@
   /** Set once the backup is created: the closing screen. */
   let done = $state<string | null>(null);
   let encReady = $state(false);
+  // The closing screen's offer of a recovery code (an encrypted Vault set up just now).
+  let makingCode = $state(false);
+  let codeMade = $state(false);
 
   function stepOf(field: string): Step {
     if (field.startsWith("sources")) return "what";
@@ -756,6 +798,13 @@
     const s = listSummary(draft.sources.paths, "Nothing yet");
     return estimate && !estimateError ? `${s} · about ${bytes(estimate.bytes)}` : s;
   });
+  /** A drive whose format plain folders can't use well (no hard links), said on its row
+   * while this backup would make plain folders there; `null` otherwise. */
+  function formatNote(fs: string): string | null {
+    if (draft?.engine !== "mirror" && draft?.engine !== "rsync") return null;
+    const name = fs === "vfat" || fs === "msdos" ? "FAT32" : fs === "exfat" ? "exFAT" : null;
+    return name && `${name}: plain-folder backups would copy everything every time here. A Vault suits it.`;
+  }
   const whereSummary = $derived.by(() => {
     if (!draft) return "";
     const t = draft.target;
@@ -933,7 +982,7 @@
   <!-- The questions, as pieces: the Settings page and the wizard lay them out, and a
        dialog on its own (from the Overview) shows one of them. -->
           {#snippet nameGroup()}
-            <section id="sec-general">
+            <section id="sec-general" tabindex="-1" class="scroll-mt-2 outline-none">
               <div class="rows">
                 <label class="row gap-3">
                   <span class="w-20 shrink-0 font-medium">Name</span>
@@ -966,7 +1015,7 @@
 
           {#snippet whatBody()}
             {#if draft}
-            <ListEditor bind:items={draft.sources.paths} placeholder="/home/you" icon="folder" label="Folders to back up" pick={() => pickFolder("Add a folder to back up")} after={sourcesAfter} />
+            <ListEditor bind:items={draft.sources.paths} placeholder="/home/you" icon="folder" label="Folders to back up" pick={() => pickFolder("Add a folder to back up")} after={sourcesAfter} sizes={folderSizes} />
             {#each at("sources.paths") as i (i.message)}<p class="mt-1.5 px-0.5 text-[12.5px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
             {@const vols = (draft.sources.volumes ?? []).filter((v) => draft!.sources.paths.includes(v.path))}
             {#if vols.length}
@@ -1060,6 +1109,8 @@
                       {:else}
                         <span class="num block truncate text-[12.5px] text-fg-muted">{bytes(d.free)} free · <span class="font-mono">{d.mount_point}</span></span>
                       {/if}
+                      <!-- Once chosen, the warning under the list says it in full. -->
+                      {#if !chosen && formatNote(d.fs_type)}<span class="mt-1 block text-[12.5px] text-warning">{formatNote(d.fs_type)}</span>{/if}
                     </span>
                     {#if chosen}<Icon name="check" size={18} class="shrink-0 text-fg" />{/if}
                   </button>
@@ -1193,6 +1244,13 @@
                   hint="Back up as soon as the drive is connected."
                   disabled={!sys && app.scheduler === "cron" && !draft.schedule.on_connect}
                   reason="Needs systemd timers; scheduled backups run with cron (Preferences › Advanced)."
+                />
+                <Toggle
+                  row
+                  icon="power"
+                  bind:checked={() => draft!.schedule.release_drive ?? false, (on) => (draft!.schedule.release_drive = on)}
+                  label="Unmount the drive when done"
+                  hint="So it's safe to unplug: when a backup ends, Flux unmounts the drive and powers it off, and a notification says so."
                 />
               {/if}
               {@render pageRow("schedule", "calendar", scheduleSummary)}
@@ -1379,7 +1437,7 @@
           {#if page === "exclusions"}
             <section class="flex flex-col gap-4">
               <Field label="" hint="*.iso or node_modules/ match anywhere; /path or ~/path one place; !pattern keeps something back in." issues={at("sources.exclude")}>
-                <ListEditor bind:items={draft.sources.exclude} placeholder="~/Videos/  or  *.iso" label="Left out" icon="filter" />
+                <ListEditor bind:items={draft.sources.exclude} placeholder="~/Videos/  or  *.iso" label="Left out" icon="filter" sizes={folderSizes} />
               </Field>
               {#if suggestions.length}
                 {@const exclude = draft.sources.exclude}
@@ -1404,12 +1462,20 @@
             </section>
             <div class="rows">
               <Toggle row bind:checked={draft.sources.exclude_caches} label="Skip cache folders" hint="Folders marked with a CACHEDIR.TAG (browser and app caches)." />
+              <Toggle
+                row
+                bind:checked={() => draft!.sources.exclude_gitignored ?? false, (on) => (draft!.sources.exclude_gitignored = on)}
+                label="Skip what .gitignore files ignore"
+                hint="In git projects: build output and downloaded dependencies, but also files git leaves out on purpose, like .env. Your own exclusion rules come first: !pattern keeps something."
+                disabled={draft.engine === "rsync" || draft.engine === "borg"}
+                reason="rsync and Borg don't read .gitignore files."
+              />
               <Toggle row bind:checked={draft.sources.one_file_system} label="Stay on one disk" hint="Don't follow into other drives mounted inside the folders you back up." />
               <Row title="Skip files larger than" subtitle="Very large files (disk images, videos) can be left out.">
                 <SizeLimit bind:value={draft.sources.exclude_larger_than} />
               </Row>
             </div>
-            {#each [...at("sources.exclude_larger_than"), ...at("sources.exclude_caches")] as i (i.message)}<p class="text-[13px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
+            {#each [...at("sources.exclude_larger_than"), ...at("sources.exclude_caches"), ...at("sources.exclude_gitignored")] as i (i.message)}<p class="text-[13px] {i.severity === 'error' ? 'text-danger' : 'text-warning'}">{i.message}</p>{/each}
             <section>
               <h2 class="group-title">Skip folders that contain a file named</h2>
               <Field label="" hint="e.g. .nobackup: put an empty file with this name in any folder to leave it out.">
@@ -1432,7 +1498,7 @@
             {#if draft.engine === "vault" && draft.vault}
               {@const vault = draft.vault}
               <div class="rows">
-                <Toggle row bind:checked={vault.encryption} label="Encrypt" hint="Without it, the Vault is compressed and deduplicated but readable by anyone with the drive." disabled={!creating && !engineChanged} reason="Fixed when the Vault was created." />
+                <Toggle row bind:checked={() => vault.encryption, (on) => { vault.encryption = on; vault.hide_sizes = on; }} label="Encrypt" hint="Without it, the Vault is compressed and deduplicated but readable by anyone with the drive." disabled={!creating && !engineChanged} reason="Fixed when the Vault was created." />
                 {#if vault.encryption}
                   <Row title="Password comes from" subtitle={sys ? "System backups run with nobody logged in: unlock once and Flux keeps the password in a root-only key file." : "Scheduled backups need a source that works without you."}>
                     <select class="input w-auto min-w-56" value={vault.password_source.from} onchange={(e) => setPasswordSource(e.currentTarget.value)} aria-label="Password comes from">
@@ -1905,8 +1971,13 @@
 
   <div class={dialogOnly ? "contents" : "flex h-full min-h-0 flex-col"}>
     {#if !dialogOnly}
-    <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-10 pb-12">
-      <div class="mx-auto flex max-w-[680px] flex-col gap-7 pt-2">
+    <div bind:this={scroller} class="@container min-h-0 flex-1 overflow-y-auto px-10 pb-12">
+      <!-- Compact: the sections listed at the side, in a wide enough window. -->
+      <div class={sideNav ? "mx-auto grid max-w-[680px] gap-8 @min-[800px]:max-w-[880px] @min-[800px]:grid-cols-[10.5rem_minmax(0,1fr)]" : "contents"}>
+      {#if sideNav}
+        <div class="hidden pt-2 @min-[800px]:block"><SectionNav {scroller} sections={settingsSections} label="Settings sections" /></div>
+      {/if}
+      <div class="mx-auto flex w-full max-w-[680px] flex-col gap-7 pt-2">
           <!-- ===================== The questions (shared by Settings and the wizard) ===================== -->
           {#each general.filter((i) => i.field === "") as i (i.message)}
             <Callout tone="bad">{i.message}</Callout>
@@ -1916,11 +1987,11 @@
           {#if !creating}
             <!-- ===================== Settings: every question on one page ===================== -->
             {@render nameGroup()}
-            <section id="sec-sources">
+            <section id="sec-sources" tabindex="-1" class="scroll-mt-2 outline-none">
               <h2 class="group-title">What to back up</h2>
               {@render whatBody()}
             </section>
-            <section id="sec-destination">
+            <section id="sec-destination" tabindex="-1" class="scroll-mt-2 outline-none">
               <div class="flex items-end justify-between gap-3 pb-2">
                 <h2 class="group-title pb-0">Where to keep it</h2>
                 {#if creating || changingWhere || draft.target.kind === "ssh"}{@render whereKind()}{/if}
@@ -1928,22 +1999,22 @@
               {@render whereList()}
               {@render protectRows()}
             </section>
-            <section id="sec-copies">
+            <section id="sec-copies" tabindex="-1" class="scroll-mt-2 outline-none">
               <h2 class="group-title">Also keep copies elsewhere</h2>
               {@render copiesList()}
             </section>
-            <section id="sec-schedule">
+            <section id="sec-schedule" tabindex="-1" class="scroll-mt-2 outline-none">
               <h2 class="group-title">When</h2>
               {@render whenBody()}
             </section>
             <!-- Keep -->
-            <section id="sec-retention">
+            <section id="sec-retention" tabindex="-1" class="scroll-mt-2 outline-none">
               <h2 class="group-title">What to keep</h2>
               {@render keepRows()}
             </section>
 
             <!-- More -->
-            <section>
+            <section id="sec-more" tabindex="-1" class="scroll-mt-2 outline-none">
               <h2 class="group-title">More</h2>
               {@render moreRows()}
             </section>
@@ -1985,6 +2056,13 @@
                     <Icon name="lock" size={17} class="shrink-0 text-fg-2" />
                     <span class="min-w-0 flex-1">{encReady ? `Encrypted and ready: the ${pwWord} is ${sourceWords[pwSource?.from ?? "keyring"]}.` : `Encrypted. The first backup sets it up and asks for the ${pwWord}.`}</span>
                   </div>
+                  {#if encReady && draft.engine === "vault" && !sys}
+                    <div class="row">
+                      <Icon name="lifebuoy" size={17} class="shrink-0 text-fg-2" />
+                      <span class="min-w-0 flex-1">{codeMade ? "There's a recovery code, kept somewhere safe." : "A recovery code opens the backups if the password is ever lost."}</span>
+                      {#if !codeMade}<button class="btn" onclick={() => (makingCode = true)}>Make one…</button>{/if}
+                    </div>
+                  {/if}
                 {/if}
               </div>
               {#if away}
@@ -2078,6 +2156,7 @@
               </section>
             {/key}
           {/if}
+      </div>
       </div>
     </div>
     {/if}
@@ -2201,4 +2280,8 @@
     }}
     onclose={() => (addingDest = false)}
   />
+{/if}
+
+{#if makingCode && done && draft}
+  <RecoveryCodeDialog id={done} name={draft.name} onclose={() => (makingCode = false)} ondone={() => (codeMade = true)} />
 {/if}

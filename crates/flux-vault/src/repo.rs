@@ -424,6 +424,11 @@ impl VaultRepo {
                 tracing::warn!("ignoring unreadable key slot {sid}");
                 continue;
             };
+            // A recovery code opens its slot however it was typed (case, spaces, dashes).
+            let typed = (slot.label == crate::crypto::RECOVERY_LABEL)
+                .then(|| crate::crypto::normalize_recovery_code(password))
+                .flatten();
+            let password = typed.as_deref().map_or(password, |s| s.as_str());
             let input = match (slot.unlock_file, unlock) {
                 (false, _) => slot_input(password, None),
                 (true, Some(u)) => slot_input(password, Some(u)),
@@ -869,6 +874,29 @@ impl VaultRepo {
         self.write_slot(password, label, self.kdf, self.unlock.as_ref())
     }
 
+    /// [`VaultRepo::add_key`], needing the unlock file `unlock` (or none) whatever opened
+    /// this repository: after opening with the recovery code (which needs no file), the
+    /// new password still needs the file the old one did.
+    pub fn add_key_with(
+        &self,
+        password: &str,
+        label: &str,
+        unlock: Option<&UnlockSecret>,
+    ) -> Result<String, VaultError> {
+        if password.is_empty() {
+            return Err(VaultError::EmptyPassword);
+        }
+        self.write_slot(password, label, self.kdf, unlock)
+    }
+
+    /// Was this repository opened with its recovery code (not a password)?
+    pub fn opened_by_recovery_code(&self) -> Result<bool, VaultError> {
+        Ok(self
+            .keys()?
+            .iter()
+            .any(|k| k.current && k.label == crate::crypto::RECOVERY_LABEL))
+    }
+
     fn write_slot(
         &self,
         password: &str,
@@ -935,6 +963,39 @@ impl VaultRepo {
             .map_err(|e| VaultError::io("keys", e))?;
         crate::protect::remove_for(self.backend.as_ref(), &format!("keys/{old}"));
         Ok(sid)
+    }
+
+    /// Make a recovery code: a long random code kept as one more key slot (labelled
+    /// [`crate::crypto::RECOVERY_LABEL`]), for when every password is lost. It opens the
+    /// Vault without the unlock file, as a LUKS recovery key does. An earlier recovery
+    /// code stops working. Returns the code, shown once: it isn't stored anywhere else.
+    pub fn set_recovery_code(&self) -> Result<zeroize::Zeroizing<String>, VaultError> {
+        let old: Vec<String> = self
+            .keys()?
+            .into_iter()
+            .filter(|k| k.label == crate::crypto::RECOVERY_LABEL)
+            .map(|k| k.id)
+            .collect();
+        let code = crate::crypto::new_recovery_code()?;
+        let sid = self.write_slot(&code, crate::crypto::RECOVERY_LABEL, self.kdf, None)?;
+        for o in old.iter().filter(|o| **o != sid) {
+            self.remove_key(o)?;
+        }
+        Ok(code)
+    }
+
+    /// Remove the recovery code, if there is one (`false`: there wasn't).
+    pub fn remove_recovery_code(&self) -> Result<bool, VaultError> {
+        let codes: Vec<String> = self
+            .keys()?
+            .into_iter()
+            .filter(|k| k.label == crate::crypto::RECOVERY_LABEL)
+            .map(|k| k.id)
+            .collect();
+        for c in &codes {
+            self.remove_key(c)?;
+        }
+        Ok(!codes.is_empty())
     }
 
     /// Remove a password. The last remaining key can't be removed.

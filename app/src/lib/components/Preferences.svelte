@@ -2,15 +2,18 @@
   // The app's own preferences: what applies to every backup (or to new ones), not to one.
   // Changes save as they're made.
   import { api } from "../api";
-  import { app, pauseUntil, type Theme } from "../state.svelte";
+  import { app, pauseUntil, type AccentChoice, type Layout, type TextSize, type Theme } from "../state.svelte";
+  import { accentTokens } from "../accent";
   import { clock, clockTime, setClock, type Clock } from "../clock.svelte";
   import type { Preferences, Scheduler } from "../types";
   import Icon from "./Icon.svelte";
   import Callout from "./Callout.svelte";
   import Toggle from "./form/Toggle.svelte";
+  import TimeInput from "./form/TimeInput.svelte";
   import ListEditor from "./form/ListEditor.svelte";
   import WebhookList from "./WebhookList.svelte";
   import InfoDetails from "./InfoDetails.svelte";
+  import SectionNav from "./SectionNav.svelte";
 
   let prefs = $state<Preferences | null>(null);
   let error = $state<string | null>(null);
@@ -39,6 +42,22 @@
       () => (tray = null),
     );
   });
+
+  async function setWeeklyNote(on: boolean) {
+    try {
+      prefs = await api.setWeeklyNote(on);
+    } catch (e) {
+      app.toast("bad", `Couldn't change that: ${(e as Error).message}`);
+    }
+  }
+
+  async function setQuietHours(q: { from: string; to: string } | null) {
+    try {
+      prefs = await api.setQuietHours(q);
+    } catch (e) {
+      app.toast("bad", `Couldn't change that: ${(e as Error).message}`);
+    }
+  }
 
   async function setCloseToTray(on: boolean) {
     try {
@@ -124,15 +143,43 @@
     { value: "light", label: "Light", icon: "sun" },
     { value: "auto", label: "Like the system", icon: "monitor" },
   ];
+  const layouts: { value: Layout; label: string }[] = [
+    { value: "compact", label: "Compact" },
+    { value: "full", label: "Full" },
+  ];
+  const sizes: { value: TextSize; label: string; px: number }[] = [
+    { value: "small", label: "Small", px: 12 },
+    { value: "default", label: "Default", px: 13.5 },
+    { value: "large", label: "Large", px: 15 },
+  ];
+  const accents: { value: AccentChoice; label: string }[] = [
+    { value: "desktop", label: "The desktop's" },
+    { value: "flux", label: "Flux blue" },
+  ];
+  /** Each choice's colour, as a swatch in its button. */
+  const swatch = $derived({
+    desktop: app.desktopAccent ? accentTokens(app.desktopAccent, app.resolvedTheme).accent : null,
+    flux: app.resolvedTheme === "dark" ? "#3170c8" : "#1c6dd0",
+  });
   const clocks: { value: Clock; label: string }[] = [
     { value: "12", label: "12-hour" },
     { value: "24", label: "24-hour" },
     { value: "auto", label: "Like the system" },
   ];
+  let scroller: HTMLElement | undefined = $state();
+  /** Compact lists the sections at the side (once the preferences are in). */
+  const sideNav = $derived(app.layout === "compact" && !!prefs);
+  const sections = [
+    { id: "pref-schedule", label: "Scheduled backups" },
+    { id: "pref-notify", label: "Notifications" },
+    { id: "pref-app", label: "App" },
+    { id: "pref-advanced", label: "Advanced" },
+  ];
 </script>
 
-<div class="min-h-0 flex-1 overflow-y-auto px-10 pt-6 pb-12">
-  <div class="mx-auto max-w-[680px]">
+<div bind:this={scroller} class="@container min-h-0 flex-1 overflow-y-auto px-10 pt-6 pb-12">
+  <!-- Compact, in a wide enough window: the title over both, the sections at the side. -->
+  <div class="mx-auto w-full max-w-[680px] {app.layout === 'compact' ? '@min-[800px]:max-w-[880px]' : ''}">
   <h1 class="page-title">Preferences</h1>
   <p class="mt-1 text-sm text-fg-2">For the app and every backup. Each backup has its own Settings too.</p>
 
@@ -141,8 +188,14 @@
   {:else if !prefs}
     <div class="mt-6 h-64 card motion-safe:animate-pulse"></div>
   {:else}
+    <div class={sideNav ? "@min-[800px]:grid @min-[800px]:grid-cols-[10.5rem_minmax(0,1fr)] @min-[800px]:gap-8" : ""}>
+    {#if sideNav}
+      <div class="mt-7 hidden @min-[800px]:block">
+        <SectionNav {scroller} {sections} label="Preferences sections" onopen={(id) => id === "pref-advanced" && (advancedOpen = true)} />
+      </div>
+    {/if}
     <div class="mt-7 flex flex-col gap-7">
-      <section class="flex flex-col">
+      <section id="pref-schedule" tabindex="-1" class="flex scroll-mt-2 flex-col outline-none">
         <h2 class="group-title">Scheduled backups</h2>
         <div class="card flex flex-col gap-3 px-5 py-4">
           {#if app.pause}
@@ -168,7 +221,7 @@
         </div>
       </section>
 
-      <section class="flex flex-col">
+      <section id="pref-notify" tabindex="-1" class="flex scroll-mt-2 flex-col outline-none">
         <h2 class="group-title">Notifications</h2>
         <div class="rows">
           <Toggle
@@ -178,6 +231,30 @@
             label="Also when a scheduled backup succeeds"
             hint="Failures and skipped files are always notified."
           />
+          <Toggle
+            row
+            checked={prefs.weekly_note ?? true}
+            onchange={(on) => void setWeeklyNote(on)}
+            label="A weekly note when all is well"
+            hint="Once a week, when every backup is protected: how recent the copies are and the last restore test. Nothing is sent when something needs you."
+          />
+          <Toggle
+            row
+            checked={!!prefs.quiet_hours}
+            onchange={(on) => void setQuietHours(on ? { from: "22:00", to: "08:00" } : null)}
+            label="Quiet hours"
+            hint="Successful backups and the weekly note aren't notified in these hours (the note comes after them). Failures and warnings always are."
+          />
+          {#if prefs.quiet_hours}
+            {@const q = prefs.quiet_hours}
+            <div class="row flex-wrap gap-x-3 gap-y-2 text-sm text-fg-2">
+              <span>From</span>
+              <TimeInput compact label="Quiet from" value={q.from} onchange={(v) => void setQuietHours({ from: v, to: q.to })} />
+              <span>to</span>
+              <TimeInput compact label="Quiet until" value={q.to} onchange={(v) => void setQuietHours({ from: q.from, to: v })} />
+              {#if q.from > q.to}<span class="text-[12.5px] text-fg-muted">the next morning</span>{/if}
+            </div>
+          {/if}
         </div>
         <h3 class="mt-5 px-0.5 text-[13px] font-semibold text-fg-2">Webhooks</h3>
         <p class="mb-2 px-0.5 text-[12.5px] text-fg-muted">Tell your phone, a chat or a monitoring service how backups go.</p>
@@ -193,7 +270,7 @@
         />
       </section>
 
-      <section class="flex flex-col">
+      <section id="pref-app" tabindex="-1" class="flex scroll-mt-2 flex-col outline-none">
         <h2 class="group-title">App</h2>
         <div class="rows">
           <div class="row gap-3">
@@ -203,6 +280,55 @@
                 <button role="radio" aria-checked={app.theme === t.value} onclick={() => app.setTheme(t.value)}>
                   <Icon name={t.icon} size={14} /> {t.label}
                 </button>
+              {/each}
+            </div>
+          </div>
+          <div class="row gap-3">
+            <span class="min-w-0 flex-1">
+              <span class="block font-medium">Text size</span>
+              <span class="block text-[12.5px] text-fg-muted">Everything in the window, larger or smaller.</span>
+            </span>
+            <div class="segmented" role="radiogroup" aria-label="Text size">
+              {#each sizes as z (z.value)}
+                <button role="radio" aria-checked={app.textSize === z.value} onclick={() => app.setTextSize(z.value)}>
+                  <span class="font-semibold" style="font-size: {z.px}px" aria-hidden="true">A</span>
+                  {z.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+          <div class="row gap-3">
+            <span class="min-w-0 flex-1">
+              <span class="block font-medium">Accent colour</span>
+              <span class="block text-[12.5px] text-fg-muted">
+                {app.accent === "flux"
+                  ? "Flux's own blue for the main button, focus and progress."
+                  : app.desktopAccent
+                    ? "Follows the accent colour chosen in the desktop's settings."
+                    : "The desktop doesn't say which accent colour it uses, so Flux's blue is used."}
+              </span>
+            </span>
+            <div class="segmented" role="radiogroup" aria-label="Accent colour">
+              {#each accents as a (a.value)}
+                <button role="radio" aria-checked={app.accent === a.value} onclick={() => app.setAccent(a.value)}>
+                  {#if swatch[a.value]}<span class="size-2.5 rounded-full" style="background: {swatch[a.value]}" aria-hidden="true"></span>{/if}
+                  {a.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+          <div class="row gap-3">
+            <span class="min-w-0 flex-1">
+              <span class="block font-medium">Layout</span>
+              <span class="block text-[12.5px] text-fg-muted">
+                {app.layout === "compact"
+                  ? "More on the screen: backups in columns, a backup's settings beside its overview."
+                  : "More room: each backup's status on its own lines, settings below the overview."}
+              </span>
+            </span>
+            <div class="segmented" role="radiogroup" aria-label="Layout">
+              {#each layouts as l (l.value)}
+                <button role="radio" aria-checked={app.layout === l.value} onclick={() => app.setLayout(l.value)}>{l.label}</button>
               {/each}
             </div>
           </div>
@@ -238,7 +364,7 @@
         </div>
       </section>
 
-      <details class="group/adv flex flex-col" open={advancedOpen}>
+      <details id="pref-advanced" tabindex="-1" class="group/adv flex scroll-mt-2 flex-col outline-none" bind:open={advancedOpen}>
         <summary class="flex cursor-pointer list-none items-center gap-1.5 px-0.5 pb-2 select-none [&::-webkit-details-marker]:hidden">
           <Icon name="chevronRight" size={14} class="text-fg-muted transition-transform group-open/adv:rotate-90" />
           <span class="text-[13px] font-semibold text-fg-2">Advanced</span>
@@ -336,6 +462,7 @@
           </div>
         </div>
       </details>
+    </div>
     </div>
   {/if}
 

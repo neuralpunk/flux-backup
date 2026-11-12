@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Leave out of backups…
+Comment=Stop your Flux backups copying this, after asking which
+Exec=flux-backup --leave-out %F
+Icon-Name=flux-backup
+Selection=s
+Extensions=any;
+Dependencies=flux-backup;

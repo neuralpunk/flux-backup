@@ -22,6 +22,8 @@ pub struct Backend {
     pub user: Arc<Service>,
     helper: Mutex<Option<Arc<HelperClient>>>,
     app: AppHandle,
+    /// A file manager's request waiting for the page (see [`take_open_request`]).
+    pub open_request: Mutex<Option<crate::session::Request>>,
 }
 
 /// Send a notice to the window as the events the frontend listens for.
@@ -29,10 +31,11 @@ fn emit(app: &AppHandle, notice: Notice) {
     let _ = match notice {
         Notice::Job { profile, message } => {
             match &message {
-                Message::Hello { .. } | Message::Progress { .. } => {
-                    crate::tray::set_running(app, &profile, true)
+                Message::Hello { .. } => crate::tray::set_running(app, &profile, true, None),
+                Message::Progress { progress, .. } => {
+                    crate::tray::set_running(app, &profile, true, Some(progress))
                 }
-                Message::Finished { .. } => crate::tray::set_running(app, &profile, false),
+                Message::Finished { .. } => crate::tray::set_running(app, &profile, false, None),
                 Message::Event { .. } => {}
             }
             app.emit(
@@ -124,6 +127,7 @@ impl Backend {
             user,
             helper: Mutex::new(None),
             app,
+            open_request: Mutex::new(None),
         }
     }
 
@@ -259,12 +263,16 @@ commands! {
         => Call::Unlock { id, password, create: create.unwrap_or(false) };
     save_key_file(id: String) => Call::SaveKeyFile { id };
     set_password(id: String, password: String) => Call::SetPassword { id, password };
+    replace_password(id: String, password: String, remove: Vec<String>)
+        => Call::ReplacePassword { id, password, remove };
     backup_now(id: String, shutdown: Option<bool>) => Call::BackupNow { id, shutdown: shutdown.unwrap_or(false) };
     shutdown_after(id: String, on: bool) => Call::ShutdownAfter { id, on };
     cancel_shutdown() => Call::CancelShutdown;
     diff_file(id: String, path: String, old: String, new: Option<String>) => Call::DiffFile { id, path, old, new };
     set_diff_tool(tool: Option<String>) => Call::SetDiffTool { tool };
     set_close_to_tray(on: bool) => Call::SetCloseToTray { on };
+    set_weekly_note(on: bool) => Call::SetWeeklyNote { on };
+    set_quiet_hours(from: Option<String>, to: Option<String>) => Call::SetQuietHours { from, to };
     cancel(id: String) => Call::Cancel { id };
     restore(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
         => Call::Restore { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
@@ -273,12 +281,20 @@ commands! {
     delete_profile(id: String) => Call::DeleteProfile { id };
     retention_preview(id: String, retention: Value) => Call::RetentionPreview { id, retention };
     exclude_suggestions(sources: Vec<String>) => Call::ExcludeSuggestions { sources };
+    folder_sizes(paths: Vec<String>) => Call::FolderSizes { paths };
     drives() => Call::Drives;
     backintime_profiles() => Call::BackInTime;
     update_snapshot(id: String, snapshot: String, name: Option<String>, set_name: bool, pinned: Option<bool>,
         note: Option<String>, set_note: Option<bool>, tags: Option<Vec<String>>)
         => Call::UpdateSnapshot { id, snapshot, name, set_name, pinned, note, set_note: set_note.unwrap_or(false), tags };
     delete_snapshot(id: String, snapshot: String) => Call::DeleteSnapshot { id, snapshot };
+    backup_for_path(path: String) => Call::BackupForPath { path };
+    folder_plan(path: String, want: flux_service::folders::Want) => Call::FolderPlan { path, want };
+    apply_folder_change(path: String, want: flux_service::folders::Want, ids: Vec<String>)
+        => Call::ApplyFolderChange { path, want, ids };
+    browsing() => Call::Browsing;
+    stop_browsing() => Call::StopBrowsing;
+    delete_snapshots(id: String, snapshots: Vec<String>) => Call::DeleteSnapshots { id, snapshots };
     compare(id: String, old: String, new: Option<String>) => Call::Compare { id, old, new };
     runs(id: String, limit: usize) => Call::Runs { id, limit };
     run_events(id: String, run_id: String) => Call::RunEvents { id, run_id };
@@ -298,6 +314,7 @@ commands! {
     restore_preview(id: String, snapshot: String, paths: Vec<String>, to: Option<String>, overwrite: bool, exact: Option<bool>)
         => Call::RestorePreview { id, snapshot, paths, to, overwrite, exact: exact.unwrap_or(false) };
     vault_security(id: String) => Call::VaultSecurity { id };
+    recovery_code(id: String, remove: Option<bool>) => Call::RecoveryCode { id, remove: remove.unwrap_or(false) };
     strengthen_key(id: String, hashing: flux_core::profile::PasswordHashing) => Call::StrengthenKey { id, hashing };
     set_unlock_file(id: String, path: Option<String>, create: Option<bool>)
         => Call::SetUnlockFile { id, path, create: create.unwrap_or(false) };
@@ -364,6 +381,17 @@ pub async fn open_diff_tool(state: St<'_>, left: String, right: String) -> Resul
     .await
 }
 
+/// A look at a file in a snapshot: a picture, its first lines, or neither.
+#[tauri::command]
+pub async fn preview_file(
+    state: St<'_>,
+    id: String,
+    snapshot: String,
+    path: String,
+) -> Result<Value> {
+    route(state, Call::PreviewFile { id, snapshot, path }, false).await
+}
+
 /// Copy a file out of a snapshot (read-only, in a private temporary folder) and open it
 /// in its usual program. The program is started by the app, as the user.
 #[tauri::command]
@@ -385,6 +413,36 @@ pub async fn open_snapshot_file(
             .spawn()
             .map_err(|e| ApiError::new("error", format!("couldn't open {local}: {e}")))?;
         Ok(local)
+    })
+    .await
+}
+
+/// What a file manager asked for (*Previous versions…*, *Restore deleted files here…*,
+/// *Leave out of backups*, *Back up this folder*), once: the page takes it when it starts and when told `flux://open`.
+#[tauri::command]
+pub fn take_open_request(state: St<'_>) -> Value {
+    match state.open_request.lock().expect("open request").take() {
+        Some((kind, path)) => json!({ "kind": kind, "path": path }),
+        None => Value::Null,
+    }
+}
+
+/// *Browse in Files*: mount a snapshot read-only and open it in the file manager, which
+/// the app starts as the user. Returns what's open.
+#[tauri::command]
+pub async fn browse_in_files(state: St<'_>, id: String, snapshot: String) -> Result<Value> {
+    let b = state.inner().clone();
+    blocking(move || {
+        let v = b.route(Call::BrowseInFiles { id, snapshot }, false)?;
+        let open = v["open"].as_str().unwrap_or_default().to_owned();
+        std::process::Command::new("xdg-open")
+            .arg(&open)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| ApiError::new("error", format!("couldn't open {open}: {e}")))?;
+        Ok(v)
     })
     .await
 }
@@ -688,4 +746,31 @@ pub fn calendar_preview(expr: String) -> std::result::Result<Vec<String>, String
 #[tauri::command]
 pub fn tray_available() -> bool {
     crate::tray::installed() && crate::session::tray_host()
+}
+
+/// The desktop's accent colour (red, green, blue, 0–1), if it has one.
+#[tauri::command]
+pub fn desktop_accent() -> Option<[f64; 3]> {
+    crate::session::accent()
+}
+
+/// The window's smallest size at 100% (as in tauri.conf.json).
+const MIN_SIZE: (f64, f64) = (900.0, 600.0);
+
+/// Text size: the whole interface scaled (`scale`, 0.75–1.5), the window's smallest size
+/// with it so the layout has the room it had.
+#[tauri::command]
+pub fn set_text_size(window: tauri::WebviewWindow, scale: f64) -> std::result::Result<(), String> {
+    let s = if scale.is_finite() {
+        scale.clamp(0.75, 1.5)
+    } else {
+        1.0
+    };
+    window.set_zoom(s).map_err(|e| e.to_string())?;
+    window
+        .set_min_size(Some(tauri::LogicalSize::new(
+            MIN_SIZE.0 * s,
+            MIN_SIZE.1 * s,
+        )))
+        .map_err(|e| e.to_string())
 }

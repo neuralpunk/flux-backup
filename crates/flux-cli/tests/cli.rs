@@ -5,6 +5,8 @@ use std::process::{Command, Output};
 
 fn flux(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_flux"))
+        // A scheduled run never waits for a click on its notification.
+        .env("FLUX_NOTIFY_WAIT", "0")
         .args(args)
         .env("FLUX_HOME", home)
         // Never touch the real ~/.config/borg and ~/.cache/borg.
@@ -345,6 +347,8 @@ fn schedule_with_cron() {
     std::fs::write(&table, mine).unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("BORG_BASE_DIR", h.join("borg-base"))
@@ -471,6 +475,8 @@ fn backup_then_shut_down() {
     );
     let run = |shutdown: &std::path::Path, args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("BORG_BASE_DIR", h.join("borg-base"))
@@ -542,6 +548,8 @@ fn schedule_install_sync_remove() {
     );
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             // Never touch the real ~/.config/borg and ~/.cache/borg.
@@ -662,6 +670,8 @@ fn status_watch_cancel_without_jobs() {
 
 fn flux_pw(home: &Path, pw: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_flux"))
+        // A scheduled run never waits for a click on its notification.
+        .env("FLUX_NOTIFY_WAIT", "0")
         .args(args)
         .env("FLUX_HOME", home)
         // Never touch the real ~/.config/borg and ~/.cache/borg.
@@ -900,6 +910,8 @@ fn ssh_mirror_stores_what_it_lists() {
     }
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("FLUX_SSH", &fake)
@@ -985,6 +997,8 @@ fn ssh_targets_end_to_end() {
     }
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             // Never touch the real ~/.config/borg and ~/.cache/borg.
@@ -1535,6 +1549,8 @@ fn borg_restores_only_what_came_out_whole() {
     );
     let run = |borg: Option<&Path>, args: &[&str]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_flux"));
+        // A scheduled run never waits for a click on its notification.
+        c.env("FLUX_NOTIFY_WAIT", "0");
         c.args(args)
             .env("FLUX_HOME", h)
             .env("BORG_BASE_DIR", h.join("borg-base"))
@@ -1620,6 +1636,8 @@ fn borg_compatibility_mode() {
     let fake = flux_transport::testing::fake_ssh(h);
     let run = |pw: &str, args: &[&str]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_flux"));
+        // A scheduled run never waits for a click on its notification.
+        c.env("FLUX_NOTIFY_WAIT", "0");
         c.args(args)
             .env("FLUX_HOME", h)
             .env("BORG_BASE_DIR", h.join("borg-base"))
@@ -1877,6 +1895,8 @@ fn system_scope() {
     );
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .arg("--system")
             .args(args)
             .env("FLUX_HOME", h)
@@ -1993,6 +2013,8 @@ fn mount_shows_snapshots_read_only() {
         let mnt = h.join(format!("mnt-{id}"));
         std::fs::create_dir_all(&mnt).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(["mount", id, mnt.to_str().unwrap()])
             .env("FLUX_HOME", h)
             // Never touch the real ~/.config/borg and ~/.cache/borg.
@@ -2091,6 +2113,8 @@ fn encryption_is_set_up_before_the_first_backup() {
     let h = home.path();
     let run = |pw: Option<&str>, args: &[&str]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_flux"));
+        // A scheduled run never waits for a click on its notification.
+        c.env("FLUX_NOTIFY_WAIT", "0");
         c.args(args)
             .env("FLUX_HOME", h)
             .env("BORG_BASE_DIR", h.join("borg-base"))
@@ -2421,6 +2445,8 @@ fn source_drives_are_recognised_when_missing() {
     };
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("FLUX_FAKE_MOUNTS", &mounts)
@@ -2901,6 +2927,8 @@ fn replicated_destinations() {
     ));
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("FLUX_SECRET_TOOL", &fake)
@@ -3098,6 +3126,8 @@ fn wifi_rules_for_scheduled_backups() {
     };
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_flux"))
+            // A scheduled run never waits for a click on its notification.
+            .env("FLUX_NOTIFY_WAIT", "0")
             .args(args)
             .env("FLUX_HOME", h)
             .env("FLUX_NMCLI", &nmcli)
@@ -3310,6 +3340,8 @@ fn recover_backups_on_a_new_computer() {
     let fake_tool = t.path().join("tool-build");
     std::fs::write(&fake_tool, "#!/bin/sh\n").unwrap();
     let o = Command::new(env!("CARGO_BIN_EXE_flux"))
+        // A scheduled run never waits for a click on its notification.
+        .env("FLUX_NOTIFY_WAIT", "0")
         .args(["backup", "home"])
         .env("FLUX_HOME", &old)
         .env("FLUX_PASSWORD", pw)
@@ -3727,6 +3759,8 @@ fn backups_from_every_release_are_read() {
             std::fs::write(profiles.join(format!("{engine}.toml")), text).unwrap();
             let run = |args: &[&str]| {
                 Command::new(env!("CARGO_BIN_EXE_flux"))
+                    // A scheduled run never waits for a click on its notification.
+                    .env("FLUX_NOTIFY_WAIT", "0")
                     .args(args)
                     .env("FLUX_HOME", &home)
                     .env("FLUX_PASSWORD", "fixture")

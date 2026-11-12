@@ -5,8 +5,9 @@
 #
 #   PREFIX=/usr DESTDIR=/tmp/pkg packaging/install.sh
 #
-# Installs: flux, flux-backup (if built), flux-helper and flux-vault-recover in libexec, the polkit policy, man
-# pages, shell completions, the .desktop file, AppStream metadata and icons.
+# Installs: flux, flux-backup (if built, with its file manager entries), flux-helper and
+# flux-vault-recover in libexec, the polkit policy, man pages, shell completions, the
+# .desktop file, AppStream metadata and icons.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -42,6 +43,13 @@ if [ -x "$target/release/flux-backup" ]; then
     install -Dm644 "$target/flux-backup.desktop" "$d/share/applications/flux-backup.desktop"
     install -Dm644 "$root/packaging/linux/io.github.neuralpunk.FluxBackup.metainfo.xml" \
         "$d/share/metainfo/io.github.neuralpunk.FluxBackup.metainfo.xml"
+    # Right-click entries in Nautilus (with nautilus-python), Nemo and Dolphin.
+    fm=$root/packaging/linux/filemanagers
+    install -Dm644 "$fm/flux-backup-nautilus.py" "$d/share/nautilus-python/extensions/flux-backup.py"
+    for a in versions deleted leave-out back-up; do
+        install -Dm644 "$fm/flux-backup-$a.nemo_action" "$d/share/nemo/actions/flux-backup-$a.nemo_action"
+        install -Dm644 "$fm/flux-backup-$a.desktop" "$d/share/kio/servicemenus/flux-backup-$a.desktop"
+    done
     icons=$root/app/src-tauri/icons
     extra=$root/packaging/linux/icons
     hicolor=$d/share/icons/hicolor

@@ -30,6 +30,7 @@ pub fn scan_local(data: &Path, xattrs: XattrPolicy) -> io::Result<Vec<Entry>> {
         exclude_caches: false,
         exclude_if_present: Vec::new(),
         one_file_system: false,
+        exclude_gitignored: false,
         volumes: Vec::new(),
     };
     let filter = Filter::new(&empty, None).map_err(io::Error::other)?;

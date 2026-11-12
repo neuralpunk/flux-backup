@@ -58,6 +58,15 @@
     filter: "M3 5h18l-7 8v6l-4 2v-8L3 5Z",
     terminal: "M4 5h16v14H4zM8 10l3 2-3 2M13 15h3",
     gauge: "M12 21a9 9 0 1 1 9-9M12 12l4-4",
+    // What a backup backs up, for the folded sidebar.
+    image: "M4 5h16v14H4zM4 16l4.5-4.5 4 4 2.5-2.5L20 18M15.5 9h.01",
+    music: "M9 18V6l10-2v12M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
+    mail: "M3 6h18v12H3zM3.5 6.5 12 13l8.5-6.5",
+    code: "M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 6l-3 12",
+    film: "M4 4h16v16H4zM8 4v16M16 4v16M4 9h4M4 15h4M16 9h4M16 15h4",
+    document: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5ZM14 3v5h5M9 13h6M9 17h4",
+    // The sidebar, folded or open (the title bar's button).
+    sidebar: "M4 5h16v14H4zM9.5 5v14",
   } as const;
 
   export type IconName = keyof typeof paths;

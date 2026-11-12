@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Back up this folder…
+Comment=Add this folder to a Flux backup, or set up a new one
+Exec=flux-backup --back-up %F
+Icon-Name=flux-backup
+Selection=s
+Extensions=dir;
+Dependencies=flux-backup;

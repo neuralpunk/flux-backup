@@ -1,5 +1,7 @@
 import { hourCycle } from "./clock.svelte";
 
+export { timeLeft } from "./timeleft";
+
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
 
 export function bytes(n: number | null | undefined): string {

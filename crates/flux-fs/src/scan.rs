@@ -197,7 +197,9 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
                     continue;
                 }
             };
-            if cfg.filter.is_excluded(src, meta.is_dir()) {
+            // The `.gitignore` rules of the folder the source is in, when they're read.
+            let git = src.parent().and_then(|d| cfg.filter.git_scope_of_dir(d));
+            if cfg.filter.excluded_in(git.as_deref(), src, meta.is_dir()) {
                 continue;
             }
             let Some(entry) = make_entry(&ctx, src, &meta) else {
@@ -208,7 +210,7 @@ pub fn scan(cfg: &ScanConfig<'_>) -> ScanResult {
             if is_dir && ctx.visit(&meta) {
                 let ctx = &ctx;
                 let root_dev = meta.dev();
-                scope.spawn(move |s| walk_dir(s, ctx, src.clone(), src, root_dev));
+                scope.spawn(move |s| walk_dir(s, ctx, src.clone(), src, root_dev, git));
             }
         }
     });
@@ -237,6 +239,7 @@ fn walk_dir<'s>(
     dir: PathBuf,
     root: &'s Path,
     root_dev: u64,
+    git_above: Option<std::sync::Arc<flux_core::filter::GitScope>>,
 ) {
     let rd = match fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -259,6 +262,13 @@ fn walk_dir<'s>(
             return;
         }
     }
+    let git = if cfg.filter.reads_gitignore() {
+        let has = |n: &str| children.iter().any(|c| c.file_name() == n);
+        cfg.filter
+            .git_enter(&dir, has(".git"), has(".gitignore"), git_above)
+    } else {
+        None
+    };
 
     let mut local = Vec::with_capacity(children.len());
     for ent in children {
@@ -281,7 +291,7 @@ fn walk_dir<'s>(
             }
         };
         let is_dir = meta.is_dir();
-        if cfg.filter.is_excluded(&path, is_dir) {
+        if cfg.filter.excluded_in(git.as_deref(), &path, is_dir) {
             continue;
         }
         if meta.is_file() && cfg.filter.is_too_large(meta.len()) {
@@ -295,7 +305,8 @@ fn walk_dir<'s>(
         // reached through a followed link is walked only if not walked before (no loops).
         let same_fs = !cfg.one_file_system || meta.dev() == root_dev;
         if is_dir && same_fs && (ctx.visit(&meta) || !followed) {
-            scope.spawn(move |s| walk_dir(s, ctx, path, root, root_dev));
+            let git = git.clone();
+            scope.spawn(move |s| walk_dir(s, ctx, path, root, root_dev, git));
         }
     }
     // One update per directory, not per entry (many threads, one counter).
@@ -528,6 +539,72 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gitignored_files_are_left_out_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("proj");
+        for d in [".git/objects", "target/debug", "src", "sub"] {
+            fs::create_dir_all(repo.join(d)).unwrap();
+        }
+        fs::write(repo.join(".gitignore"), "target/\n*.log\n.env\n").unwrap();
+        for f in [
+            "src/main.rs",
+            ".env",
+            "run.log",
+            "target/debug/app",
+            "sub/x.log",
+            "sub/y.txt",
+            ".git/HEAD",
+        ] {
+            fs::write(repo.join(f), "x").unwrap();
+        }
+        let names = |sources: Vec<std::path::PathBuf>, on: bool| {
+            let mut profile = flux_core::Profile::new(
+                "t",
+                flux_core::profile::Target::Local {
+                    path: dir.path().join("tgt"),
+                    fs_uuid: None,
+                },
+                sources,
+            );
+            profile.sources.exclude_gitignored = on;
+            let r = scan_profile(
+                &profile,
+                &[],
+                &Progress::new(),
+                &flux_core::progress::silent,
+            )
+            .unwrap();
+            r.entries
+                .iter()
+                .filter_map(|e| {
+                    let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&e.path));
+                    let p = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        std::path::Path::new("/").join(p)
+                    };
+                    p.strip_prefix(&repo).ok().map(|p| p.display().to_string())
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = names(vec![repo.clone()], false);
+        assert!(all.contains(&"target/debug/app".to_string()), "{all:?}");
+        let some = names(vec![repo.clone()], true);
+        for kept in [".git/HEAD", ".gitignore", "src/main.rs", "sub/y.txt"] {
+            assert!(some.contains(&kept.to_string()), "{kept} missing: {some:?}");
+        }
+        for gone in [".env", "run.log", "target", "target/debug/app", "sub/x.log"] {
+            assert!(!some.contains(&gone.to_string()), "{gone} kept: {some:?}");
+        }
+        // A source inside the working tree still gets its parents' rules.
+        let sub = names(vec![repo.join("sub")], true);
+        assert!(
+            sub.contains(&"sub/y.txt".to_string()) && !sub.contains(&"sub/x.log".to_string()),
+            "{sub:?}"
+        );
+    }
 
     #[test]
     fn counting_only_matches_a_full_scan() {

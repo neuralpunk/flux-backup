@@ -2,7 +2,7 @@
 //! leaves the app here (unless Preferences say to quit); scheduled backups never need it
 //! running either way.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +12,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backend::Backend;
+use flux_core::progress::{Phase, ProgressSnapshot, time_left_words};
 use flux_service::views::{backup_now_impl, profiles_impl};
 
 const TRAY_ID: &str = "flux";
@@ -27,37 +28,74 @@ pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
-/// Profiles with a backup running, as seen in job notices.
-static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Profiles with a backup running, as seen in job notices, each with how far it is
+/// ("21% · about 6 minutes left") once that's known.
+static RUNNING: Mutex<BTreeMap<String, Option<String>>> = Mutex::new(BTreeMap::new());
+/// The tooltip last set, so it's set again only when the words change.
+static TOOLTIP: Mutex<String> = Mutex::new(String::new());
 
-/// Track a profile's backup starting or ending, and show it in the tray icon.
-pub fn set_running(app: &AppHandle, profile: &str, running: bool) {
-    let (was, busy) = {
+/// How far a backup is, in words: "21% · about 6 minutes left" while copying.
+fn how_far(p: &ProgressSnapshot) -> Option<String> {
+    if p.phase != Phase::Transferring || p.bytes_total == 0 {
+        return None;
+    }
+    let pct = (p.bytes_done as f64 / p.bytes_total as f64 * 100.0).min(100.0) as u64;
+    Some(match p.eta_secs {
+        Some(eta) => format!("{pct}% · {}", time_left_words(eta)),
+        None => format!("{pct}%"),
+    })
+}
+
+/// The tray's tooltip for what's running.
+fn tooltip(running: &BTreeMap<String, Option<String>>) -> String {
+    match running.len() {
+        0 => "Flux Backup".into(),
+        1 => match running.values().next().cloned().flatten() {
+            Some(far) => format!("Flux Backup: backing up · {far}"),
+            None => "Flux Backup: backing up".into(),
+        },
+        n => format!("Flux Backup: {n} backups running"),
+    }
+}
+
+/// Track a profile's backup starting, going on (`progress`) or ending, and show it in the
+/// tray icon and its tooltip.
+pub fn set_running(
+    app: &AppHandle,
+    profile: &str,
+    running: bool,
+    progress: Option<&ProgressSnapshot>,
+) {
+    let (was, busy, tip) = {
         let mut r = RUNNING.lock().expect("running set");
         let was = !r.is_empty();
         if running {
-            r.insert(profile.to_owned());
+            let far = progress.and_then(how_far);
+            let entry = r.entry(profile.to_owned()).or_default();
+            if far.is_some() || progress.is_some_and(|p| p.phase != Phase::Transferring) {
+                *entry = far;
+            }
         } else {
             r.remove(profile);
         }
-        (was, !r.is_empty())
+        (was, !r.is_empty(), tooltip(&r))
     };
-    // Only when it changes: this is called with every progress message of a running
-    // backup (five a second), and setting the icon writes a new image file and has the
-    // panel load it again each time.
-    if was == busy {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
+    };
+    // The icon only when it changes: this is called with every progress message of a
+    // running backup (five a second), and setting the icon writes a new image file and has
+    // the panel load it again each time.
+    if was != busy
+        && let Ok(icon) = Image::from_bytes(if busy { ACTIVE } else { IDLE })
+    {
+        let _ = tray.set_icon(Some(icon));
     }
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let icon = Image::from_bytes(if busy { ACTIVE } else { IDLE });
-        if let Ok(icon) = icon {
-            let _ = tray.set_icon(Some(icon));
-        }
-        let _ = tray.set_tooltip(Some(if busy {
-            "Flux Backup: backing up"
-        } else {
-            "Flux Backup"
-        }));
+    // The words change every few seconds at most (rounded to the percent and minute).
+    let mut last = TOOLTIP.lock().expect("tooltip");
+    if *last != tip {
+        let _ = tray.set_tooltip(Some(&tip));
+        *last = tip;
     }
 }
 
@@ -161,4 +199,42 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     .build(app)?;
     INSTALLED.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(phase: Phase, done: u64, total: u64, eta: Option<f64>) -> ProgressSnapshot {
+        ProgressSnapshot {
+            phase,
+            scanned: 0,
+            entries_total: 0,
+            entries_done: 0,
+            bytes_total: total,
+            bytes_done: done,
+            warnings: 0,
+            elapsed_secs: 0.0,
+            bytes_per_sec: 0.0,
+            eta_secs: eta,
+        }
+    }
+
+    #[test]
+    fn the_tooltip_says_how_far_and_how_long() {
+        let far = how_far(&snap(Phase::Transferring, 21, 100, Some(359.0)));
+        assert_eq!(far.as_deref(), Some("21% · about 6 minutes left"));
+        assert_eq!(how_far(&snap(Phase::Scanning, 0, 0, None)), None);
+        let mut r = BTreeMap::new();
+        assert_eq!(tooltip(&r), "Flux Backup");
+        r.insert("home".to_owned(), None);
+        assert_eq!(tooltip(&r), "Flux Backup: backing up");
+        r.insert("home".to_owned(), far);
+        assert_eq!(
+            tooltip(&r),
+            "Flux Backup: backing up · 21% · about 6 minutes left"
+        );
+        r.insert("docs".to_owned(), None);
+        assert_eq!(tooltip(&r), "Flux Backup: 2 backups running");
+    }
 }

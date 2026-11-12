@@ -44,17 +44,24 @@ metadata confidential and tamper-evident**:
   is useless to someone who learned it. Other passwords of the same Vault keep working
   without the file unless they're removed or given it; the app and `flux key unlock-file`
   say which.
-- Blob ids are keyed BLAKE3 MACs, and chunk boundaries come from a secretly seeded
-  chunker. Ids and boundaries therefore don't reveal whether the Vault contains a known
-  file.
+- Blob ids are keyed BLAKE3 MACs, so an id doesn't reveal whether the Vault contains a
+  known file. Chunk boundaries come from a seeded chunker (FastCDC, its gear table XORed
+  with a secret 64-bit seed), which keeps them from matching a known file's chunks
+  directly. That is weaker than it sounds: published 2025 work recovers the secret
+  parameters of keyed content-defined chunkers from known or chosen files ([ePrint
+  2025/558](https://eprint.iacr.org/2025/558), [arXiv 2504.02095](https://arxiv.org/abs/2504.02095)).
+  Whether that reaches Flux through its encrypted pack headers hasn't been assessed yet,
+  so don't rely on boundaries to hide that a known file is there. *Hide file sizes* (on
+  by default for Vaults set up from 1.2) takes away the exact pack sizes such an attack
+  would read.
 - Readers verify every blob's id after decryption, so modified, swapped or truncated data
   is detected (`flux check --read-data` verifies everything; restores and mounts verify
   what they read).
 
 What it does **not** hide: the number and approximate sizes of packs and snapshots, when
 backups happened, and roughly how much changed each time. A pack's exact size can tell the
-size of a single small file a backup stored; *hide file sizes* pads every pack to a Padmé
-length (at most about 12% bigger), so only a coarse size is left. The number of blobs in a
+size of a single small file a backup stored; *hide file sizes* (on by default for Vaults
+set up from 1.2) pads every pack to a Padmé length (at most about 12% bigger), so only a coarse size is left. The number of blobs in a
 pack (its header's length) stays visible. It can't stop someone with write
 access from deleting or corrupting the backups; it only detects that. Keep a second backup
 somewhere else if that matters.

@@ -536,6 +536,11 @@ pub struct Sources {
     /// Do not cross filesystem boundaries below each source path.
     #[serde(default)]
     pub one_file_system: bool,
+    /// Inside a git working tree (a folder with `.git`), also leave out what its
+    /// `.gitignore` files ignore: build output, dependencies, and also files git leaves
+    /// out on purpose, like `.env`. Mirror and Vault only; rsync and Borg don't read them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_gitignored: bool,
     /// Sources on a drive of their own (an external disk at `/mnt/photos`), recognised by
     /// filesystem UUID, and what to do when that drive isn't there. Recorded when such a
     /// source is added. A missing drive is never read as "everything was deleted".
@@ -794,6 +799,11 @@ pub struct Schedule {
     /// Also back up when the target drive (`target.fs_uuid`) is connected.
     #[serde(default)]
     pub on_connect: bool,
+    /// When a backup ends, unmount its drive and power it off, so it's safe to unplug.
+    /// Only for drives the desktop mounted (under `/run/media` or `/media`); others are
+    /// left mounted, and the run says why.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub release_drive: bool,
 }
 
 impl Default for Schedule {
@@ -806,6 +816,7 @@ impl Default for Schedule {
             skip_on_battery: false,
             skip_on_metered: false,
             on_connect: false,
+            release_drive: false,
         }
     }
 }
@@ -958,7 +969,9 @@ pub struct VaultOptions {
     #[serde(default, skip_serializing_if = "PasswordHashing::is_standard")]
     pub hashing: PasswordHashing,
     /// Pad the files the Vault stores so their sizes say less about the files backed up.
-    /// Costs a little space; applies to what's written from then on.
+    /// Costs a little space; applies to what's written from then on. On in new Vault
+    /// profiles from 1.2 ([`VaultOptions::default`]); a profile file that doesn't say
+    /// keeps it off, so existing backups don't change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_sizes: bool,
     /// Keep repair data with what's stored: this share of it (percent, 1–50), as
@@ -987,7 +1000,7 @@ impl Default for VaultOptions {
             encryption: true,
             password_source: PasswordSource::default(),
             hashing: PasswordHashing::default(),
-            hide_sizes: false,
+            hide_sizes: true,
             parity: 0,
             lock_after_minutes: None,
             unlock_file: None,
@@ -1221,6 +1234,7 @@ impl Profile {
                 exclude_caches: true,
                 exclude_if_present: Vec::new(),
                 one_file_system: false,
+                exclude_gitignored: false,
                 volumes: Vec::new(),
             },
             retention: Retention::default(),
@@ -1328,6 +1342,10 @@ impl Profile {
                 field: password_field(),
                 message: "system backups run without anyone logged in, so they can't use a keyring or ask for the password: keep it in a key file only root can read (/etc/flux-backup/keys/<id>)".into(),
             });
+        }
+        // Plain folders on a FAT32, exFAT or NTFS drive (when it's mounted).
+        if let Some(fit) = crate::target_check::filesystem_fit_of(self) {
+            issues.push(Issue::warning("target.path", fit.sentence()));
         }
         issues
     }
@@ -1508,6 +1526,18 @@ impl Profile {
                 "backing up when the drive is plugged in needs a drive Flux knows: choose it while it's connected".into(),
             ));
         }
+        if self.schedule.release_drive
+            && !matches!(&self.target, Target::Local { .. })
+            && !self
+                .destinations
+                .iter()
+                .any(|d| matches!(d.target, Target::Local { .. }))
+        {
+            v.push(Issue::warning(
+                "schedule.release_drive",
+                "unmounting the drive when done only applies to backups to a drive".into(),
+            ));
+        }
 
         if let Some(o) = &self.origin
             && [&o.host, &o.user, &o.profile]
@@ -1667,6 +1697,19 @@ impl Profile {
                 format!(
                     "every file larger than {max} is left out, which is almost every file; \
                      a limit like 1 GB or 4 GB is usual"
+                ),
+            ));
+        }
+        if self.sources.exclude_gitignored && matches!(self.engine, Engine::Rsync | Engine::Borg) {
+            v.push(Issue::warning(
+                "sources.exclude_gitignored",
+                format!(
+                    "{} doesn't read .gitignore files, so what they ignore is backed up anyway",
+                    if self.engine == Engine::Borg {
+                        "Borg"
+                    } else {
+                        "rsync"
+                    }
                 ),
             ));
         }
@@ -2023,6 +2066,42 @@ mod tests {
         assert_eq!(p.schedule.trigger, Trigger::Calendar);
         assert!(p.schedule.catch_up);
         assert!(!has_errors(&p.validate()));
+    }
+
+    #[test]
+    fn new_vaults_hide_sizes_but_existing_profiles_keep_theirs() {
+        // A Vault profile made from 1.2 pads its packs, and says so in its file.
+        assert!(VaultOptions::default().hide_sizes);
+        let mut p = Profile::new(
+            "v",
+            Target::Local {
+                path: "/mnt".into(),
+                fs_uuid: None,
+            },
+            vec![],
+        );
+        p.engine = Engine::Vault;
+        p.vault = Some(VaultOptions::default());
+        let text = p.to_toml().unwrap();
+        assert!(text.contains("hide_sizes = true"), "{text}");
+        assert!(Profile::from_toml(&text).unwrap().vault.unwrap().hide_sizes);
+
+        // A file from before 1.2 doesn't name it, and stays as it was: off.
+        let old = Profile::from_toml(
+            r#"
+            name = "x"
+            engine = "vault"
+            [target]
+            kind = "local"
+            path = "/mnt"
+            [sources]
+            paths = ["/home"]
+            [vault]
+            compression_level = 3
+            "#,
+        )
+        .unwrap();
+        assert!(!old.vault.unwrap().hide_sizes);
     }
 
     #[test]

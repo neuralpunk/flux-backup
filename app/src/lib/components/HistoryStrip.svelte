@@ -9,14 +9,17 @@
 
   /** `fill`: spread across the width as a small bar chart, with the first day and today
    * named underneath. */
-  let { days, fill = false, class: klass = "" }: { days: Day[]; fill?: boolean; class?: string } = $props();
+  /** `low`: the chart 32px tall instead of 40 (Compact's answer card); the ramp keeps its
+   * shape, scaled. */
+  let { days, fill = false, low = false, class: klass = "" }: { days: Day[]; fill?: boolean; low?: boolean; class?: string } = $props();
 
-  /** Bar height in px: 4 to 16 in a row, 8 to 40 as a chart; failures fill the height. */
-  const full = $derived(fill ? 40 : 16);
+  /** Bar height in px: 4 to 16 in a row, 8 to 40 as a chart (8 to 32 low); failures fill
+   * the height. */
+  const full = $derived(fill ? (low ? 32 : 40) : 16);
   function height(d: Day): number {
     if (d.state === "failed") return full;
     if (d.state !== "ok") return 2;
-    return Math.round(fill ? 8 + ramp(d.bytes) * 32 : 4 + ramp(d.bytes) * 12);
+    return Math.round(fill ? 8 + ramp(d.bytes) * (full - 8) : 4 + ramp(d.bytes) * 12);
   }
 
   function describe(d: Day): string {
@@ -34,7 +37,7 @@
 </script>
 
 <div class={klass}>
-  <div class="flex items-end {fill ? 'h-10 gap-1' : 'h-4'}" role="img" aria-label={summary}>
+  <div class="flex items-end {fill ? (low ? 'h-8 gap-1' : 'h-10 gap-1') : 'h-4'}" role="img" aria-label={summary}>
     {#each days as d (d.date)}
       <!-- Each day's whole column takes the hover title, so thin bars are easy to point at. -->
       <span class="flex h-full shrink-0 items-end {fill ? 'min-w-1 flex-1' : 'w-2 justify-center'}" title={describe(d)}>
