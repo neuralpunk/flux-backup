@@ -60,6 +60,12 @@ pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
     if let Some(fit) = flux_core::target_check::filesystem_fit_of(&profile) {
         r.warnings.push(fit.sentence());
     }
+    // What slows the drive down that can be fixed: TRIM, a USB 2 port.
+    if let flux_core::profile::Target::Local { path, .. } = &profile.target {
+        for n in flux_fs::disk::drive_notes(path) {
+            r.warnings.push(format!("{} {}", n.text, n.hint));
+        }
+    }
     // What the backup drives say about their own health (asked now; nothing is kept).
     let now = jiff::Timestamp::now();
     for (key, path) in flux_runner::drive_health::places(args.profile.as_str(), &profile) {

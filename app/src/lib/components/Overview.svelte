@@ -583,7 +583,7 @@
           <Icon name="chevronRight" size={15} class="shrink-0 text-fg-muted transition-transform group-open/space:rotate-90" />
         </summary>
         <div class="px-1.5 pt-1 pb-4">
-          <SpaceCard space={sp} target={drive} flat health={data.drive_health}>
+          <SpaceCard space={sp} target={drive} flat health={data.drive_health} notes={data.drive_notes ?? []}>
             <StorageCard {id} embedded />
           </SpaceCard>
         </div>
@@ -596,7 +596,7 @@
     {#if compact && data.space && data.space.size}
       <!-- In the list above. -->
     {:else if data.space && data.space.size}
-      <SpaceCard space={data.space} target={data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target} health={data.drive_health}>
+      <SpaceCard space={data.space} target={data.profile.target.split("/").filter(Boolean).at(-1) ?? data.profile.target} health={data.drive_health} notes={data.drive_notes ?? []}>
         <StorageCard {id} embedded />
       </SpaceCard>
     {:else}

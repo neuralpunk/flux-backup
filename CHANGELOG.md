@@ -51,6 +51,11 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   unused, the pieces still needed are copied into new packs; those are now written
   through the system's cache, which lets the drive interleave them with the reading.
   A prune that repacked 24 GiB on a USB SSD took 74 seconds instead of 103.
+- **Flux says when the backup drive is slower than it should be.** An SSD that TRIM
+  doesn't reach (through its USB adapter, or through LUKS encryption) can't tell which of
+  its space is free, and long backups to it slow down as it fills; a USB 3 drive on a
+  USB 2 port runs at a tenth of its speed. The drive's card on the Overview and
+  `flux check` say so, with the command that fixes it.
 
 ## [1.2.1] - 2026-11-12
 

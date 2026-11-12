@@ -200,6 +200,9 @@ pub struct Overview {
     unusual: Option<flux_runner::unusual::UnusualReport>,
     /// What the backup drive last said about its health (local drives that were seen).
     drive_health: Option<crate::extras::DriveHealthView>,
+    /// What slows the backup drive down that can be fixed (local drives that are there):
+    /// TRIM not reaching an SSD, a USB 3 drive at USB 2 speed.
+    drive_notes: Vec<DriveNoteView>,
     /// What Flux Sentry has learned of this backup (when it's watched, and has run
     /// often enough).
     sentry: Option<SentryView>,
@@ -289,6 +292,16 @@ pub fn overview_impl(state: &Service, id: String) -> Result<Overview> {
         health,
         space,
         drive_health,
+        drive_notes: match &p.target {
+            Target::Local { path, .. } => flux_fs::disk::drive_notes(path)
+                .into_iter()
+                .map(|n| DriveNoteView {
+                    text: n.text,
+                    hint: n.hint,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
         profile: summary(&state.paths, &id, &p, &running),
         snapshot_count: snaps.len(),
         oldest: snaps.first().map(|s| s.started),
@@ -1051,6 +1064,14 @@ pub fn storage_impl(state: &Service, id: String) -> Result<flux_runner::repo::St
 pub struct VaultFormat {
     pub format: u32,
     pub newest: u32,
+}
+
+/// A [`flux_fs::disk::DriveNote`], for the space card.
+#[derive(Debug, Serialize)]
+pub struct DriveNoteView {
+    pub text: String,
+    /// What to do about it.
+    pub hint: String,
 }
 
 pub fn vault_format_impl(state: &Service, id: String) -> Result<Option<VaultFormat>> {

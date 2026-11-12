@@ -294,6 +294,22 @@ last ("The drive reports no problems with its health"). Most USB sticks and many
 enclosures don't pass the report on: then Flux says it can't tell. `flux check` asks the
 drive too.
 
+**When the drive is slower than it should be.** The space card and `flux check` say so,
+with what to do, when:
+
+- **TRIM doesn't reach an SSD.** TRIM tells an SSD which of its space is free. Without it,
+  the drive treats everything ever written to it as still in use: long writes slow down as
+  it fills, more with every old backup deleted from it (a USB SSD here wrote 860 MiB/s at
+  first and 250–530 MiB/s after 170 GiB). Many USB adapters pass TRIM on once told to, and
+  Flux gives the command (`echo unmap > /sys/block/sdX/device/scsi_disk/…/provisioning_mode`
+  as root; a udev rule makes it last). On a drive encrypted with LUKS, TRIM must also pass
+  through the encryption: `discard` in `/etc/crypttab`, or `cryptsetup refresh
+  --allow-discards --persistent <name>` for LUKS2. Then `fstrim` the drive once (Linux
+  distributions run it weekly after that). TRIM through LUKS shows which areas of the
+  drive are unused, not what's in them.
+- **A USB 3 drive runs at USB 2 speed** (480 Mbit/s: about 40 MB/s at most), on a USB 2
+  port, hub or cable. Plug it into a USB 3 port with its own cable.
+
 ### An SSH server
 
 ```sh

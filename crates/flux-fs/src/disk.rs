@@ -33,6 +33,165 @@ fn rotational_in(path: &Path, sys: &Path, mountinfo: &Path) -> Option<bool> {
     queue_rotational(sys, rustix::fs::major(rdev), rustix::fs::minor(rdev))
 }
 
+/// Something about the drive a path is on that makes backups to it slower than they could
+/// be, in words, with what to do about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveNote {
+    /// `trim` or `usb_speed`.
+    pub kind: &'static str,
+    pub text: String,
+    pub hint: String,
+}
+
+/// What [`DriveNote`]s the drive under `path` calls for: an SSD that TRIM doesn't reach
+/// (through its USB adapter, or through LUKS), or a USB 3 drive running at USB 2 speed.
+/// Nothing when it can't be told (a network filesystem, no sysfs).
+pub fn drive_notes(path: &Path) -> Vec<DriveNote> {
+    notes_in(path, Path::new("/sys"), Path::new("/proc/self/mountinfo"))
+}
+
+fn notes_in(path: &Path, sys: &Path, mountinfo: &Path) -> Vec<DriveNote> {
+    mounted_block(path, sys, mountinfo).map_or_else(Vec::new, |top| notes_of(&top))
+}
+
+/// The notes for the block device at `top` (its sysfs folder) and the disks under it.
+fn notes_of(top: &Path) -> Vec<DriveNote> {
+    let mut out = Vec::new();
+    for disk in disks_under(top, 0) {
+        if let Some(n) = trim_note(top, &disk) {
+            out.push(n);
+        }
+        if let Some(n) = usb_note(&disk) {
+            out.push(n);
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// The sysfs folder of the block device `path`'s filesystem is mounted from.
+fn mounted_block(path: &Path, sys: &Path, mountinfo: &Path) -> Option<PathBuf> {
+    let path = fs::canonicalize(path).ok()?;
+    let at = |dev: u64| {
+        fs::canonicalize(sys.join(format!(
+            "dev/block/{}:{}",
+            rustix::fs::major(dev),
+            rustix::fs::minor(dev)
+        )))
+        .ok()
+    };
+    at(fs::metadata(&path).ok()?.dev()).or_else(|| {
+        // Btrfs and others report a virtual device number: the mount's source.
+        let source = mount_source(&path, &fs::read_to_string(mountinfo).ok()?)?;
+        at(fs::metadata(source).ok()?.rdev())
+    })
+}
+
+/// The disks under a block device: through device-mapper (LUKS, LVM) to what it is made
+/// of, and from a partition to its disk.
+fn disks_under(dev: &Path, depth: u8) -> Vec<PathBuf> {
+    let slaves: Vec<PathBuf> = fs::read_dir(dev.join("slaves"))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| fs::canonicalize(e.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !slaves.is_empty() && depth < 8 {
+        return slaves
+            .iter()
+            .flat_map(|s| disks_under(s, depth + 1))
+            .collect();
+    }
+    if dev.join("partition").is_file() {
+        return dev.parent().map(Path::to_path_buf).into_iter().collect();
+    }
+    vec![dev.to_path_buf()]
+}
+
+/// A number in a sysfs file of a device's queue (a partition's is its disk's).
+fn queue_value(dev: &Path, name: &str) -> Option<u64> {
+    let queue = if dev.join("queue").is_dir() {
+        dev.join("queue")
+    } else {
+        dev.join("../queue")
+    };
+    fs::read_to_string(queue.join(name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// An SSD that TRIM doesn't reach can't tell which of its space is free: long writes to
+/// it slow down as it fills, more with every backup deleted from it. (A USB SSD here wrote
+/// 860 MiB/s at first and 250–530 after 170 GiB.)
+fn trim_note(top: &Path, disk: &Path) -> Option<DriveNote> {
+    if queue_value(disk, "rotational")? != 0 {
+        return None;
+    }
+    let on_disk = queue_value(disk, "discard_max_bytes")? > 0;
+    let through = queue_value(top, "discard_max_bytes").unwrap_or(0) > 0;
+    let usb = disk.to_string_lossy().contains("/usb");
+    if !on_disk {
+        let mode = fs::read_dir(disk.join("device/scsi_disk"))
+            .ok()
+            .and_then(|mut rd| rd.next())
+            .and_then(|e| e.ok())
+            .filter(|e| e.path().join("provisioning_mode").is_file())
+            // The same file, by the short name people know: /sys/block/sda/….
+            .map(|e| {
+                Path::new("/sys/block")
+                    .join(disk.file_name().unwrap_or_default())
+                    .join("device/scsi_disk")
+                    .join(e.file_name())
+                    .join("provisioning_mode")
+            });
+        return Some(DriveNote {
+            kind: "trim",
+            text: if usb {
+                "TRIM doesn't reach this SSD through its USB adapter: the drive can't tell which of its space is free, so long backups to it slow down as it fills."
+            } else {
+                "TRIM doesn't reach this SSD: it can't tell which of its space is free, so long backups to it slow down as it fills."
+            }
+            .into(),
+            hint: match mode {
+                Some(m) if usb => format!(
+                    "Many USB adapters pass TRIM on once told to. As root: echo unmap > {} (a udev rule keeps it), then fstrim the drive. Some adapters can't.",
+                    m.display()
+                ),
+                _ => "If the drive supports TRIM another way, run fstrim on it now and then.".into(),
+            },
+        });
+    }
+    (!through).then(|| DriveNote {
+        kind: "trim",
+        text: "TRIM doesn't pass through this drive's encryption (LUKS): the SSD can't tell which of its space is free, so long backups to it slow down as it fills.".into(),
+        hint: "Add discard to the drive's line in /etc/crypttab (or open it with cryptsetup --allow-discards), then fstrim it.".into(),
+    })
+}
+
+/// A USB 3 drive linked at USB 2 speed: a USB 2 port, hub or cable on the way.
+fn usb_note(disk: &Path) -> Option<DriveNote> {
+    // The USB device: the nearest folder above the disk with a speed and a version, below
+    // the bus's root hub (`usbN`).
+    let device = disk.ancestors().find(|d| {
+        d.join("speed").is_file()
+            && d.join("version").is_file()
+            && !d
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("usb"))
+    })?;
+    let read = |f: &str| fs::read_to_string(device.join(f)).ok();
+    let speed: f64 = read("speed")?.trim().parse().ok()?;
+    let version: f64 = read("version")?.trim().parse().ok()?;
+    (version >= 3.0 && speed <= 480.0).then(|| DriveNote {
+        kind: "usb_speed",
+        text: "The backup drive is running at USB 2 speed (480 Mbit/s: about 40 MB/s at most), though it's a USB 3 drive.".into(),
+        hint: "Plug it straight into a USB 3 port (often blue, or marked SS, 5, 10 or 20), with the cable it came with.".into(),
+    })
+}
+
 /// `queue/rotational` of a block device, or of the disk a partition is on.
 fn queue_rotational(sys: &Path, major: u32, minor: u32) -> Option<bool> {
     let dev = sys.join(format!("dev/block/{major}:{minor}"));
@@ -144,6 +303,107 @@ impl Drop for GateGuard<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A fake sysfs: a USB device (`speed`, `version`) with a disk `sda` (its queue's
+    /// `rotational` and `discard_max_bytes`), partition `sda1`, and LUKS on it (`dm-1`,
+    /// discard as `dm_discard`). Returns the folder of the device a filesystem would be
+    /// mounted from (`dm-1`, or `sda1` without LUKS).
+    fn fake_sys(
+        root: &Path,
+        usb: Option<(&str, &str)>,
+        rotational: u8,
+        discard: u64,
+        dm_discard: Option<u64>,
+    ) -> PathBuf {
+        let w = |p: PathBuf, v: &str| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, v).unwrap();
+        };
+        let mut base = root.join("devices/pci0000:00/0000:35:00.3");
+        if let Some((speed, version)) = usb {
+            w(base.join("usb7/speed"), "10000\n");
+            w(base.join("usb7/version"), " 3.10\n");
+            base = base.join("usb7/7-1");
+            w(base.join("speed"), &format!("{speed}\n"));
+            w(base.join("version"), &format!(" {version}\n"));
+            base = base.join("7-1:1.0/host0/target0:0:0/0:0:0:0");
+            w(base.join("scsi_disk/0:0:0:0/provisioning_mode"), "full\n");
+        } else {
+            base = base.join("nvme/nvme0");
+        }
+        let disk = base.join("block/sda");
+        w(disk.join("queue/rotational"), &format!("{rotational}\n"));
+        w(
+            disk.join("queue/discard_max_bytes"),
+            &format!("{discard}\n"),
+        );
+        if usb.is_some() {
+            std::os::unix::fs::symlink(base.clone(), disk.join("device")).unwrap();
+        }
+        w(disk.join("sda1/partition"), "1\n");
+        let Some(d) = dm_discard else {
+            return disk.join("sda1");
+        };
+        let dm = root.join("devices/virtual/block/dm-1");
+        w(dm.join("queue/discard_max_bytes"), &format!("{d}\n"));
+        w(dm.join("queue/rotational"), "0\n");
+        fs::create_dir_all(dm.join("slaves")).unwrap();
+        std::os::unix::fs::symlink(disk.join("sda1"), dm.join("slaves/sda1")).unwrap();
+        dm
+    }
+
+    fn kinds(notes: &[DriveNote]) -> Vec<&'static str> {
+        notes.iter().map(|n| n.kind).collect()
+    }
+
+    #[test]
+    fn drive_notes_for_trim_and_usb_speed() {
+        // The owner's drive: a USB SSD at 10 Gbit/s whose adapter doesn't pass TRIM, under
+        // LUKS. One note, about the adapter, saying how to try unmap.
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), Some(("10000", "3.20")), 0, 0, Some(0));
+        let notes = notes_of(&top);
+        assert_eq!(kinds(&notes), ["trim"], "{notes:?}");
+        assert!(notes[0].text.contains("USB adapter"), "{notes:?}");
+        assert!(
+            notes[0].hint.contains("unmap > ") && notes[0].hint.contains("provisioning_mode"),
+            "{notes:?}"
+        );
+
+        // The disk takes TRIM; LUKS doesn't pass it on.
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), Some(("10000", "3.20")), 0, 4 << 30, Some(0));
+        let notes = notes_of(&top);
+        assert_eq!(kinds(&notes), ["trim"]);
+        assert!(notes[0].hint.contains("crypttab"), "{notes:?}");
+
+        // TRIM all the way through, with LUKS and without: nothing to say.
+        for dm in [Some(4 << 30), None] {
+            let t = tempfile::tempdir().unwrap();
+            let top = fake_sys(t.path(), Some(("10000", "3.20")), 0, 4 << 30, dm);
+            assert!(notes_of(&top).is_empty(), "{dm:?}");
+        }
+
+        // A hard disk: TRIM isn't a thing there.
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), Some(("5000", "3.00")), 1, 0, None);
+        assert!(notes_of(&top).is_empty());
+
+        // A USB 3 drive on a USB 2 port (or hub, or cable).
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), Some(("480", "3.10")), 1, 0, None);
+        assert_eq!(kinds(&notes_of(&top)), ["usb_speed"]);
+        // A USB 2 stick at USB 2 speed is as fast as it gets.
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), Some(("480", "2.00")), 1, 0, None);
+        assert!(notes_of(&top).is_empty());
+
+        // An internal NVMe drive with TRIM: nothing.
+        let t = tempfile::tempdir().unwrap();
+        let top = fake_sys(t.path(), None, 0, 2 << 40, None);
+        assert!(notes_of(&top).is_empty());
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 

@@ -157,6 +157,8 @@ export interface Overview {
   unusual?: UnusualReport | null;
   /** What the backup drive last said about its health (local drives seen by a backup). */
   drive_health?: DriveHealth | null;
+  /** What slows the backup drive down that can be fixed (TRIM, a USB 2 port). */
+  drive_notes?: { text: string; hint: string }[];
   /** What Flux Sentry has learned of this backup: the share of its files that usually
    * changes, the share at which it would warn, and how many backups it learned from. */
   sentry?: { usual: number; warns_at: number | null; runs: number } | null;

@@ -11,7 +11,7 @@
 
   /** `flat`: without its card, title and meter, opened from Compact's one-line space row
    * (which shows those). */
-  let { space, target, flat = false, health = null, children }: { space: Space; target: string; flat?: boolean; health?: DriveHealth | null; children?: Snippet } = $props();
+  let { space, target, flat = false, health = null, notes = [], children }: { space: Space; target: string; flat?: boolean; health?: DriveHealth | null; notes?: { text: string; hint: string }[]; children?: Snippet } = $props();
   // The chart is open when the drive is filling up soon; otherwise one click away.
   const soon = $derived(space.days_left != null && space.days_left < 60);
 
@@ -86,6 +86,10 @@
       {#if health.said}{health.said}{:else if health.reports}The drive reports no problems with its health{#if health.checked}{" "}({ago(health.checked)}){/if}.{:else}This drive doesn't report its health (most USB sticks and many enclosures don't), so Flux can't tell how it is.{/if}
     </p>
   {/if}
+  <!-- What slows the drive down that can be fixed: advice, not a problem with the backups. -->
+  {#each notes as n (n.text)}
+    <p class="mt-1 text-[12.5px] text-fg-muted">{n.text} <span class="text-fg-2">{n.hint}</span></p>
+  {/each}
 
   {#if pts.length >= 3}
   <details class="group/chart mt-2" open={soon}>

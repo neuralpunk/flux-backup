@@ -700,6 +700,7 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
         space: spaceFor(id),
         // Demo: BackupDisk reports its health; Archive (Photo library's) doesn't.
         drive_health: p.remote ? null : { reports: id !== "photos", checked: new Date(now - 2 * 3_600_000).toISOString(), said: null },
+        drive_notes: id === "photos" ? [{ text: "TRIM doesn't reach this SSD through its USB adapter: the drive can't tell which of its space is free, so long backups to it slow down as it fills.", hint: "Many USB adapters pass TRIM on once told to. As root: echo unmap > /sys/block/sdb/device/scsi_disk/1:0:0:0/provisioning_mode (a udev rule keeps it), then fstrim the drive. Some adapters can't." }] : [],
         health:
           id === "photos"
             ? [

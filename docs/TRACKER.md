@@ -4320,3 +4320,28 @@ The item phase 107 left: the sources were scanned for the look and again for the
       another drive)
 - [x] Measured: 103 → 74 s; `check --read-data` after each prune: 0 problems
 - [x] Checks: the workspace's tests (37), clippy
+
+### Phase 161 — When the backup drive is slower than it should be (2026-11-12)
+- [x] Found on the owner's drive (Phase 151): a 970 EVO Plus in a Sabrent enclosure
+      (Realtek RTL9210, `0bda:9210`) at 10 Gbit/s, under LUKS2: `discard_max_bytes` 0 on
+      the disk and on the LUKS device, `provisioning_mode` `full`. Raw writes: 860 MiB/s,
+      then 707, then 250–530 after 170 GiB
+- [x] `flux_fs::disk::drive_notes(path)`: from the mounted device (`/sys/dev/block`, or the
+      mount's source for btrfs) through device-mapper `slaves/` and partitions to the
+      disks. For an SSD (`rotational` 0): TRIM not on the disk → "doesn't reach this SSD
+      (through its USB adapter)", with the `provisioning_mode` command for that drive (by
+      its short `/sys/block/sdX/…` name); on the disk but not through LUKS → `discard`
+      in `/etc/crypttab`. A USB 3 device (`version` ≥ 3.0) linked at ≤ 480 Mbit/s → plug
+      it into a USB 3 port. A 5 Gbit/s link on a faster port says nothing: many USB 3
+      devices only do 5, whatever their `version`
+- [x] Shown in the space card on the Overview (`Overview.drive_notes`, muted, with what to
+      do: advice about the drive, not among the health warnings, which would make the
+      backup look in trouble) and by `flux check` as notes; USER_GUIDE (*An external
+      drive*), site guide, CHANGELOG
+- [x] Checked on the owner's drive: `flux check` names the adapter and gives
+      `echo unmap > /sys/block/sda/device/scsi_disk/0:0:0:0/provisioning_mode`
+- [x] Tests: `drive_notes_for_trim_and_usb_speed` (a fake sysfs: the owner's drive; TRIM on
+      the disk, not through LUKS; TRIM through, with LUKS and without; a hard disk; a
+      USB 3 drive at 480; a USB 2 stick; an NVMe drive). The workspace's tests (37),
+      clippy, svelte-check (0, 0), app tests (27), Vite build
+- [ ] The card not looked at in the demo (the mock gives the Photos backup a note)
