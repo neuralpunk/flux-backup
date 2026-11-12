@@ -8,7 +8,16 @@ All notable changes to Flux Backup. The format follows
 
 Speed: Flux doing the same work with less of the computer, so a backup runs as fast as its drive allows.
 
+### Added
+
+- **Flux says when the backup drive is slower than it should be.** An SSD that TRIM
+  doesn't reach (through its USB adapter, or through LUKS encryption) can't tell which of
+  its space is free, and long backups to it slow down as it fills; a USB 3 drive on a
+  USB 2 port runs at a tenth of its speed. The drive's card on the Overview and
+  `flux check` say so, with the command that fixes it.
+
 ### Changed
+
 
 - **Faster Vault backups.** Storing each piece of a file takes about a third of the
   processor time it did (a new compressor and several new buffers were set up for every
@@ -51,11 +60,6 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   unused, the pieces still needed are copied into new packs; those are now written
   through the system's cache, which lets the drive interleave them with the reading.
   A prune that repacked 24 GiB on a USB SSD took 74 seconds instead of 103.
-- **Flux says when the backup drive is slower than it should be.** An SSD that TRIM
-  doesn't reach (through its USB adapter, or through LUKS encryption) can't tell which of
-  its space is free, and long backups to it slow down as it fills; a USB 3 drive on a
-  USB 2 port runs at a tenth of its speed. The drive's card on the Overview and
-  `flux check` say so, with the command that fixes it.
 - **A Vault without encryption is a choice of its own.** Turning *Encrypt with a
   password* off for a Vault now keeps it a Vault, compressed and deduplicated with no
   password to keep, instead of switching to plain folders; it suits a drive that's
