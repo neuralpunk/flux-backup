@@ -1838,9 +1838,11 @@
               <h2 class="group-title">Which files</h2>
               <div class="rows" role="radiogroup" aria-label="Which files">
                 {#each [["confidence", "Enough to be sure", `As many random files as it takes for a pass to mean something: ${count(sampleBound(t.damage, t.certainty))} with these choices, however big the backup (fewer for a small one).`], ["random_files", "Some files at random", "Quick. Pick how many."], ["percent", "A share of the backup", "Random files making up this much of its size."], ["rolling", "Every file once a month", "A different part each time, so every file is tested within 30 days."], ["full", "Everything", "Restores the whole snapshot: thorough, and as slow as a full restore."]] as [v, label, text] (v)}
-                  <button role="radio" aria-checked={(t.mode ?? "random_files") === v} class="row row-link items-start gap-3 py-3 text-left" onclick={() => setTest({ mode: v as "full" })}>
+                  {@const chosen = (t.mode ?? "random_files") === v}
+                  <button role="radio" aria-checked={chosen} class="choice row row-link items-start gap-3 py-3 text-left" onclick={() => setTest({ mode: v as "full" })}>
+                    <span class="radio-dot"></span>
                     <span class="min-w-0 flex-1">
-                      <span class="block font-medium">{label}</span>
+                      <span class="block {chosen ? 'font-semibold text-fg' : 'font-medium'}">{label}</span>
                       <span class="block text-[12.5px] text-fg-muted">{text}</span>
                       {#if v === "confidence" && t.mode === v}
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1860,8 +1862,6 @@
                       <span class="flex items-center gap-2 text-sm text-fg-2"><NumberInput bind:value={() => t.files ?? 10, (n) => setTest({ files: n })} min={1} max={10000} label="Files" /> files</span>
                     {:else if v === "percent" && t.mode === v}
                       <span class="flex items-center gap-2 text-sm text-fg-2"><NumberInput bind:value={() => t.percent ?? 5, (n) => setTest({ percent: n })} min={1} max={100} label="Percent" /> %</span>
-                    {:else if (t.mode ?? "random_files") === v}
-                      <Icon name="check" size={18} class="mt-0.5" />
                     {/if}
                   </button>
                 {/each}

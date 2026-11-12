@@ -4385,3 +4385,23 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Checked in the demo, dark: the guide with Vault On (password asked) and Off (no
       password, Continue ready); an existing Vault's Settings (On, fixed). svelte-check
       (0, 0), app tests (27)
+
+### Phase 164 — What's chosen, at a glance (2026-11-12)
+- [x] Reported by the owner: in *Restore tests → Which files* nothing showed what was
+      chosen. Seen in the demo: a faint check at the row's far end, none at all when the
+      row's number box (*Some files at random*, *A share of the backup*) took its place;
+      the storage formats (the guide's Protection step, a backup's storage page) the same;
+      a segmented choice's chosen part only a little lighter than the rest
+- [x] `.choice` rows (`app.css`): a `radio-dot` first (an empty circle; the chosen one
+      filled in the accent with a dot), the chosen row tinted and outlined in the accent,
+      its title bolder; as specific as `.rows > .row + .row`, whose hairline replaced
+      the outline on every row but the first. Used by *Which files* and `StorageChoice`
+      (the far-end check removed)
+- [x] `.segmented` buttons with `aria-checked` (choices) filled in the accent; with
+      `aria-selected` (views) as before. Looked at in Preferences (theme, text size,
+      accent colour), dark and light
+- [x] UX_PRINCIPLES (the two patterns), CHANGELOG
+- [x] Checked in the demo, dark and light: *Which files* with *Enough to be sure* and with
+      *Some files at random* chosen, the guide's formats. svelte-check (0, 0), app tests
+- [ ] Other lists of choices (Flux Sentry's, the drives, a new copy's, the recover dialog,
+      password hashing…) keep their own marks; to bring them to `.choice` too

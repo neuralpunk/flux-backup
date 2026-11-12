@@ -101,7 +101,8 @@ root problem behind most complaints: **things didn't look like what they were.**
 | An on/off setting | `<Toggle row …>` (switch on the right, whole row clickable; `icon` only beside navigation rows) |
 | A confirmation | `<ConfirmDialog …>` |
 | A descriptor | `<span class="tag"><Icon …/> text</span>` (`tag-accent`, `tag-warn`) |
-| Views of one thing, or one choice of a few | `<div class="segmented" role="tablist">` (or `radiogroup`) with `aria-selected` / `aria-checked` buttons |
+| Views of one thing, or one choice of a few | `<div class="segmented" role="tablist">` (or `radiogroup`) with `aria-selected` / `aria-checked` buttons; a choice (`aria-checked`) is filled in the accent, a view stays quiet |
+| One choice of several, each explained | `<div class="rows" role="radiogroup">` of `<button role="radio" class="choice row row-link">` starting with `<span class="radio-dot"></span>`: the chosen one's circle filled, its row tinted and outlined in the accent (a check at the far end was missed) |
 | A list of paths or patterns | `<ListEditor …>` (a grouped list: one row per item, a last row to add or Browse…) |
 | Is a backup protecting you, and when it runs next | `protection()`, `nextRun()`, `lastGood()` (`lib/protection.ts`) |
 | A backup's last 30 days | `<HistoryStrip days={status.days} />` (`fill` to spread across a page) |

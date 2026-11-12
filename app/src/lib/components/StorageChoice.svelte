@@ -83,9 +83,10 @@
             role="radio"
             aria-checked={selected}
             disabled={!ok && !selected}
-            class="row row-link items-start py-3.5 disabled:cursor-not-allowed"
+            class="choice row row-link items-start py-3.5 disabled:cursor-not-allowed"
             onclick={() => onchoose(o.e)}
           >
+            <span class="radio-dot"></span>
             <Icon name={o.icon} size={17} class="mt-0.5 shrink-0 text-fg-2" />
             <span class="flex min-w-0 flex-1 flex-col gap-1">
               <span class="font-semibold">{o.title}</span>
@@ -104,9 +105,7 @@
                 {/if}
               {/if}
             </span>
-            <span class="grid size-5 shrink-0 place-items-center">
-              {#if selected}<Icon name="check" size={18} class="text-fg" />{/if}
-            </span>
+
           </button>
         {/each}
       </div>

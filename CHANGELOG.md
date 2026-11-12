@@ -18,6 +18,11 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
 
 ### Changed
 
+- **You can see what's chosen.** In a list of choices (which files a restore test reads,
+  how backups are stored) the chosen one has a filled circle and is tinted and outlined;
+  before, only a small check at the far end said so, and none at all when a number box
+  took its place. Choices in a row of buttons (how often, encryption on or off, the
+  theme) show the chosen one in the accent colour.
 
 - **Faster Vault backups.** Storing each piece of a file takes about a third of the
   processor time it did (a new compressor and several new buffers were set up for every

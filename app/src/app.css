@@ -546,6 +546,42 @@
       0 1px 2px rgb(0 0 0 / 0.22),
       0 0 0 1px rgb(0 0 0 / 0.04);
   }
+  /* A choice (radiogroup), not a view (tablist): the chosen one in the accent, so what is
+     set reads at a glance; a slightly lighter segment was easy to miss. */
+  .segmented > button[aria-checked="true"] {
+    background: var(--c-primary);
+    color: var(--c-on-primary);
+  }
+
+  /* A row in a list of choices (role="radio" with class "choice"): an empty circle, or,
+     for the chosen one, the circle filled in the accent and the row tinted and outlined.
+     (As specific as `.rows > .row + .row`, whose hairline would replace the outline.) */
+  .choice.row[aria-checked="true"],
+  .choice.row[aria-checked="true"]:hover {
+    background: color-mix(in oklab, var(--c-primary) 14%, transparent);
+    box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--c-primary) 75%, transparent);
+  }
+  .choice .radio-dot {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 1.125rem;
+    height: 1.125rem;
+    margin-top: 0.125rem;
+    border-radius: 999px;
+    box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--c-fg-muted) 75%, transparent);
+  }
+  .choice[aria-checked="true"] .radio-dot {
+    background: var(--c-primary);
+    box-shadow: none;
+  }
+  .choice[aria-checked="true"] .radio-dot::after {
+    content: "";
+    width: 0.4375rem;
+    height: 0.4375rem;
+    border-radius: 999px;
+    background: var(--c-on-primary);
+  }
 
   /* A wizard step arriving: a short slide in the direction of travel (--step-dir: 1
      forward, -1 back). Off under prefers-reduced-motion like every animation. */
