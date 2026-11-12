@@ -609,8 +609,18 @@
       if (draft.borg) draft.borg.encryption = on ? "repokey-blake2" : "none";
       return;
     }
-    setEngine(on ? "vault" : "mirror");
-    if (on && draft?.vault) draft.vault.encryption = true;
+    // A Vault stays a Vault: without encryption it's still compressed and deduplicated,
+    // with no password to keep (on a drive that's encrypted already, say). Plain folders
+    // are chosen under How backups are stored.
+    if (draft?.engine === "vault" && draft.vault) {
+      draft.vault.encryption = on;
+      draft.vault.hide_sizes = on;
+      return;
+    }
+    if (on) {
+      setEngine("vault");
+      if (draft?.vault) draft.vault.encryption = true;
+    }
   }
   const encryptText = $derived.by(() => {
     if (!draft) return "";
@@ -619,14 +629,20 @@
       return encrypted
         ? "Borg encrypts the backups with your passphrase; they're also compressed and deduplicated."
         : "Borg compresses and deduplicates the backups, without encryption.";
+    if (draft.engine === "vault" && !encrypted)
+      return "Compressed and deduplicated, with no password to keep or lose: anyone with the drive can read them. Suits a drive that's encrypted already (LUKS).";
     return encrypted ? `Nobody can read the backups without the password; they're also compressed and deduplicated.` : "Backups are plain folders you can open in any file manager.";
   });
   /** The storage format differs from the saved one (a new backup history). */
   const engineChanged = $derived(!creating && !!initial && (JSON.parse(initial) as Profile).engine !== draft?.engine);
-  /** Encryption is fixed once a Borg repository exists; rsync can't encrypt. */
-  const encryptLocked = $derived(draft?.engine === "rsync" || (!creating && draft?.engine === "borg" && !engineChanged));
+  /** Encryption is fixed once a Vault or Borg repository exists; rsync can't encrypt. */
+  const encryptLocked = $derived(draft?.engine === "rsync" || (!creating && (draft?.engine === "borg" || draft?.engine === "vault") && !engineChanged));
   const encryptReason = $derived(
-    draft?.engine === "rsync" ? "rsync can't encrypt; back up to an encrypted drive instead" : "Fixed when the Borg repository was created",
+    draft?.engine === "rsync"
+      ? "rsync can't encrypt; back up to an encrypted drive instead"
+      : draft?.engine === "vault"
+        ? "Fixed when the Vault was created"
+        : "Fixed when the Borg repository was created",
   );
 
   // ---- one-line summaries for the rows ----

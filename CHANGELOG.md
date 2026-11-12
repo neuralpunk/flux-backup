@@ -56,6 +56,10 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   its space is free, and long backups to it slow down as it fills; a USB 3 drive on a
   USB 2 port runs at a tenth of its speed. The drive's card on the Overview and
   `flux check` say so, with the command that fixes it.
+- **A Vault without encryption is a choice of its own.** Turning *Encrypt with a
+  password* off for a Vault now keeps it a Vault, compressed and deduplicated with no
+  password to keep, instead of switching to plain folders; it suits a drive that's
+  encrypted already. Plain folders are chosen under *How backups are stored*.
 
 ## [1.2.1] - 2026-11-12
 

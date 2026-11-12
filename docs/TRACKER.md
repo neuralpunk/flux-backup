@@ -4345,3 +4345,22 @@ The item phase 107 left: the sources were scanned for the look and again for the
       USB 3 drive at 480; a USB 2 stick; an NVMe drive). The workspace's tests (37),
       clippy, svelte-check (0, 0), app tests (27), Vite build
 - [ ] The card not looked at in the demo (the mock gives the Photos backup a note)
+
+### Phase 162 — A Vault without encryption, as a choice of its own (2026-11-12)
+- [x] Asked by the owner: encryption in a Vault shouldn't be forced (a LUKS drive, or not
+      caring). The engine had it all along (`[vault] encryption = false`: no key slots,
+      objects tagged 0, keyed ids from `config`; tested in flux-vault and the recovery
+      tool), but the guide's *Encrypt with a password* toggle, turned off, switched to
+      plain folders: an unencrypted Vault was only in the Vault's own settings
+- [x] `setEncrypted`: on a Vault it now turns encryption (and hiding sizes) on or off and
+      stays a Vault; on plain folders, on still makes an encrypted Vault. Plain folders
+      are chosen under *How backups are stored*. The toggle is fixed for a Vault that
+      exists, as for Borg ("Fixed when the Vault was created"). Its words for an
+      unencrypted Vault: compressed and deduplicated, no password to keep or lose,
+      readable by anyone with the drive, suits a drive encrypted already
+- [x] Measured into tmpfs (10 GiB of large files, twice each): encrypted 6.8 s (45 CPU-s),
+      unencrypted 6.2 s (40 CPU-s); to the USB SSD both run at the drive's speed
+- [x] USER_GUIDE (the guide's steps, the Mirror-or-Vault table, *A Vault without
+      encryption*), site guide, CHANGELOG
+- [x] Checks: svelte-check (0, 0), app tests (27), Vite build; no Rust changed
+- [ ] Not looked at in the demo

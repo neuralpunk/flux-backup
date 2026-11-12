@@ -86,9 +86,9 @@ exclusions), `flux profile save-template <profile> "<name>"`, `flux profile
 delete-template "<name>"`.
 
 A short guide then asks one question per step: **What** to back up (your home folder by default), **Where** to keep it (a
-connected drive, each with a meter of how full it is; a folder; or an SSH server), **Protection** (plain folders, encrypted, or
-written by rsync or Borg so the backups never depend on Flux; an encrypted one asks for
-its password right there), **When**, and **Flux Sentry**: whether it keeps watch for
+connected drive, each with a meter of how full it is; a folder; or an SSH server), **Protection** (plain folders, a Vault encrypted or
+not, or written by rsync or Borg so the backups never depend on Flux; an encrypted one
+asks for its password right there), **When**, and **Flux Sentry**: whether it keeps watch for
 unusual changes, *normally* (recommended), *closely* or not at all (see
 [Unusual changes](#what-to-keep)). **Review** shows every answer with a way back to
 change it and the name it will have; **Create backup** sets it up and offers **Back up
@@ -147,7 +147,7 @@ where they are. The menu key or Shift+F10 opens the same menu from the keyboard.
 | Unchanged files | hard links (no extra space) | stored once across *all* snapshots, files and computers |
 | Renamed or moved files | copied again | not stored again |
 | Compression | no | zstd (skipped for data that doesn't compress) |
-| Encryption | use an encrypted drive (LUKS) | built in (XAES-256-GCM, Argon2id) |
+| Encryption | use an encrypted drive (LUKS) | built in (XAES-256-GCM, Argon2id), or off |
 | SSH servers need | `rsync` | only SFTP |
 
 Pick **Mirror** when you want to reach your files in an emergency with nothing but a
@@ -1154,6 +1154,12 @@ yet). So the first backup, even a scheduled one at night, has nothing to ask. A 
 was set up before this, or whose drive wasn't connected at the time, shows the same fields
 in its Settings until its first backup. On the command line, `flux key init <profile>`
 does the same.
+
+**A Vault without encryption.** Turn *Encrypt with a password* off for a Vault and it stays
+a Vault, compressed and deduplicated, with no password to keep or lose; anyone with the
+drive can read it. It suits a drive that is encrypted already (LUKS), or backups that
+needn't be private. (Plain folders are chosen under *How backups are stored*.) Like the
+password itself, this is decided when the Vault is made.
 
 **A scheduled backup can't ask.** When the password is set to *Ask every time* and the
 backup runs on a schedule (or when its drive is plugged in), nobody is there to type it and
