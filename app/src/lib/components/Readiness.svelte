@@ -3,13 +3,14 @@
   // what Flux can see (settings kept with the backups, a restore test passed, a copy kept
   // elsewhere), and what only you can tell (the password kept somewhere else). Each line
   // that isn't ready has a button that does it.
-  import { api, pickFolder } from "../api";
+  import { api } from "../api";
   import { app } from "../state.svelte";
   import { ApiError, type Engine, type ReadinessCheck } from "../types";
   import Icon from "./Icon.svelte";
   import KeepPasswordDialog from "./KeepPasswordDialog.svelte";
   import DestinationDialog from "./DestinationDialog.svelte";
   import RecoveryCodeDialog from "./RecoveryCodeDialog.svelte";
+  import BorgKeyDialog from "./BorgKeyDialog.svelte";
 
   let { id, onlocked }: { id: string; onlocked?: (retry: () => void) => void } = $props();
 
@@ -54,20 +55,7 @@
     }
   }
 
-  async function exportKey() {
-    const dir = await pickFolder("Where to keep the Borg key (with the passphrase, not next to the backups)");
-    if (!dir) return;
-    busy = "key_exported";
-    try {
-      const path = await api.exportBorgKey(id, dir);
-      app.toast("ok", `The key is in ${path}. Keep it with the passphrase.`);
-      checks = await api.readiness(id);
-    } catch (e) {
-      app.toast("bad", (e as Error).message);
-    } finally {
-      busy = null;
-    }
-  }
+  let exportingKey = $state(false);
 
   /** Adding a place, in its dialog over this page: what it needs to know of the backup. */
   let adding = $state<{ taken: string[]; engine: Engine; remote: boolean } | null>(null);
@@ -90,7 +78,7 @@
       case "recovery_code":
         return c.ok ? null : { label: "Make one…", run: () => (makingCode = true), primary: true };
       case "key_exported":
-        return c.ok ? null : { label: busy === "key_exported" ? "Exporting…" : "Export the key…", run: () => void exportKey(), primary: true };
+        return c.ok ? null : { label: "Export the key…", run: () => (exportingKey = true), primary: true };
       case "restore_test":
         return { label: busy === "restore_test" ? "Testing…" : c.ok ? "Test again" : "Test a restore now", run: () => void testNow(), primary: !c.ok };
       case "offsite":
@@ -154,6 +142,10 @@
       if (c) void answer(c, true);
     }}
   />
+{/if}
+
+{#if exportingKey}
+  <BorgKeyDialog {id} detail={checks?.find((c) => c.key === "key_exported")?.detail} {onlocked} onclose={() => (exportingKey = false)} ondone={() => app.revision++} />
 {/if}
 
 {#if makingCode}

@@ -88,7 +88,11 @@
   <releases>
     <release version="1.2.1" date="2026-11-12">
       <description>
-        <p>Start at login no longer opens a blank "Could not connect to localhost" window: the entry always starts the installed app, and an entry pointing elsewhere is repaired.</p>
+        <p>A fix for starting at login, and a nudge to keep a Borg backup's key safe.</p>
+        <ul>
+          <li>An encrypted Borg backup whose key hasn't been exported says so on its Overview, with a button that exports the key to a folder you choose</li>
+          <li>Start at login no longer opens a blank "Could not connect to localhost" window</li>
+        </ul>
       </description>
     </release>
     <release version="1.2.0" date="2026-11-11">

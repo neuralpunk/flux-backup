@@ -16,6 +16,7 @@
   import HistoryStrip from "./HistoryStrip.svelte";
   import SizeLimitNotice from "./SizeLimitNotice.svelte";
   import Readiness from "./Readiness.svelte";
+  import BorgKeyNotice from "./BorgKeyNotice.svelte";
   import SettingsGlance from "./SettingsGlance.svelte";
   import StorageCard from "./StorageCard.svelte";
   import JobPanel from "./JobPanel.svelte";
@@ -460,6 +461,8 @@
     {/if}
 
     <SizeLimitNotice {id} onlyTiny />
+
+    <BorgKeyNotice {id} onlocked={onLocked} />
 
     {#if !compact}{@render side()}{/if}
 

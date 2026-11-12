@@ -6,7 +6,16 @@ All notable changes to Flux Backup. The format follows
 
 ## [1.2.1] - 2026-11-12
 
-A fix for starting at login.
+A fix for starting at login, and a nudge to keep a Borg backup's key safe.
+
+### Added
+
+- **Export the Borg key.** An encrypted Borg backup whose key hasn't been exported now
+  says so on its Overview: Borg keeps the key inside the repository, and if that copy is
+  damaged, the passphrase alone can't open the backups. **Export the key…** opens a
+  dialog that explains why, saves the key to a folder you choose (a new file, never over
+  one), and shows where it went; **I already have** is for a key exported by hand. The
+  recovery checklist's *The Borg key is exported* uses the same dialog.
 
 ### Fixed
 
