@@ -86,6 +86,11 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.2.1" date="2026-11-12">
+      <description>
+        <p>Start at login no longer opens a blank "Could not connect to localhost" window: the entry always starts the installed app, and an entry pointing elsewhere is repaired.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-11-11">
       <description>
         <p>Getting files back, made to start where they were lost.</p>

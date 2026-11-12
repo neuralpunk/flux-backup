@@ -4,7 +4,9 @@ All notable changes to Flux Backup. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.1] - 2026-11-12
+
+A fix for starting at login.
 
 ### Fixed
 
@@ -1317,6 +1319,7 @@ compressed, encrypted) engines; local drives and SSH servers; systemd schedules
 hooks; the `flux` command line; the desktop app; system backups through a polkit helper;
 read-only mounts of snapshots (`flux mount`); man pages and packages.
 
+[1.2.1]: https://github.com/neuralpunk/flux-backup/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/neuralpunk/flux-backup/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/neuralpunk/flux-backup/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/neuralpunk/flux-backup/compare/v0.3.0...v1.0.0
