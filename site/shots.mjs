@@ -298,7 +298,7 @@ const shots = {
     await page.click("Continue");
     await page.click("BackupDisk");
     // Not a step of its own: chosen for you on the last screen, and opened from there.
-    await page.click("Continue");
+    for (let i = 0; i < 2; i++) await page.click("Continue");
     await page.click(/^Flux Sentry/, "main button");
     await page.waitFor(`document.body.innerText.includes("Should Flux Sentry keep watch?")`);
     await full("sentry-dark");

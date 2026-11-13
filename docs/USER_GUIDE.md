@@ -85,16 +85,16 @@ built-in ones, with a button to remove them. In a terminal: `flux profile templa
 exclusions), `flux profile save-template <profile> "<name>"`, `flux profile
 delete-template "<name>"`.
 
-A short guide then asks the two things only you can answer: **What** to back up (your
-home folder by default) and **Where** to keep it (a connected drive, each with a meter of
-how full it is; a folder; or an SSH server). The rest Flux chooses, from the template, to
-suit most backups, and the last screen, **Ready**, shows it under *Chosen for you*: **How
-it's stored** (plain folders, a Vault encrypted or not, or written by rsync or Borg so the
-backups never depend on Flux; an encrypted one asks for its password right there),
-**When**, **What to keep**, and **Flux Sentry**: whether it keeps watch for unusual
-changes, *normally* (recommended), *closely* or not at all (see
-[Unusual changes](#what-to-keep)). Click any of them to change it there; one that still
-needs something (a password) says so. **Create backup** sets it up and offers **Back up
+A short guide then asks the three things only you can answer: **What** to back up (your
+home folder by default), **Where** to keep it (a connected drive, each with a meter of
+how full it is; a folder; or an SSH server), and **Protection**: how it's stored (plain
+folders, a Vault, or written by rsync or Borg so the backups never depend on Flux). A
+Vault asks there whether to **encrypt the backups, On or Off**; On asks for the password
+right away. The rest Flux chooses, from the template, to suit most backups, and the last
+screen, **Ready**, shows it under *Chosen for you*: **When**, **What to keep**, and
+**Flux Sentry**: whether it keeps watch for unusual changes, *normally* (recommended),
+*closely* or not at all (see [Unusual changes](#what-to-keep)). Click any of them to
+change it there. **Create backup** sets it up and offers **Back up
 now** for the first run. Later, a backup's **Settings** show the same questions on one
 page. Everything else is one click away and has sensible defaults: each group of settings is a
 row showing its current value (*Exclude Files/Directories › caches*, *How backups are stored ›

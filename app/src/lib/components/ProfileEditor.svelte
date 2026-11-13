@@ -191,7 +191,7 @@
   // The main page asks the three questions; every further group of settings is a row
   // that opens just that group (docs/UX_PRINCIPLES.md, rule 7). Nothing stays "expanded":
   // the editor always opens on the main page.
-  type Page = "setup-protect" | "setup-when" | "setup-sentry" | "exclusions" | "storage" | "security" | "connection" | "network" | "schedule" | "retention" | "tests" | "webhooks" | "hooks" | "options";
+  type Page = "setup-when" | "setup-sentry" | "exclusions" | "storage" | "security" | "connection" | "network" | "schedule" | "retention" | "tests" | "webhooks" | "hooks" | "options";
   /** The main page's sections, each of which can open as a dialog on its own. */
   type Section = "sources" | "destination" | "copies" | "when" | "keep" | "more";
   const sectionTitle: Record<Section, { title: string; text: string }> = {
@@ -215,7 +215,6 @@
   let page = $state<Page | null>(untrack(() => (dialogOnly && !dialogOnly.startsWith("section:") ? (dialogOnly as Page) : null)) ?? (((askedPage ?? demoPage) as Page | null) ?? null));
   const pageTitle: Record<Page, { title: string; text: string }> = {
     // The new backup guide's own: what Flux chose, opened from its last screen.
-    "setup-protect": { title: "How should they be stored?", text: "Plain folders are the simplest. Encryption keeps them private if the drive is lost. Or let a standard tool write them, so they never depend on Flux." },
     "setup-when": { title: "When should it back up?", text: "Flux backs up in the background, even with the app closed, and only copies what changed." },
     "setup-sentry": { title: "Should Flux Sentry keep watch?", text: "Flux Sentry learns how much of this backup normally changes. When a backup doesn't fit, or shows the marks of ransomware, it warns you and keeps the snapshot from before." },
     exclusions: { title: "Exclude Files/Directories", text: "Files and folders that aren't worth backing up: caches, downloads, build output." },
@@ -280,11 +279,11 @@
     if (dialogOnly) return;
     if (creating) {
       const a = areaOf(field);
-      const s: Step = a === "what" || a === "where" ? a : "review";
+      const s: Step = a === "what" || a === "where" || a === "protect" ? a : "review";
       dir = s === step ? dir : -1;
       step = s;
       // What Flux chose opens over the last screen.
-      page = pageOf(field) ?? (a === "protect" ? "setup-protect" : a === "when" ? "setup-when" : null);
+      page = pageOf(field) ?? (a === "when" ? "setup-when" : null);
       await tick();
       return;
     }
@@ -758,17 +757,19 @@
   const lines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 
   // ---- the setup wizard (new backups) ----
-  // Two questions have no answer Flux could choose: what, and where. The rest (how it's
-  // stored, when, what to keep, Flux Sentry) comes from the template with an answer that
-  // suits most backups, so it isn't asked: the last screen shows what was chosen, and each
-  // answer opens there to be changed. (Through 1.2 each was a step of its own: six, where
-  // four only ever needed Continue.)
-  type Step = "what" | "where" | "review";
+  // Three questions are the user's to answer: what, where, and how it's stored, which for
+  // a Vault includes whether it's encrypted (a password to keep, or backups anyone with
+  // the drive can read: not something to choose for someone). The rest (when, what to
+  // keep, Flux Sentry) comes from the template with an answer that suits most backups, so
+  // it isn't asked: the last screen shows what was chosen, and each answer opens there to
+  // be changed. (Through 1.2 each was a step of its own.)
+  type Step = "what" | "where" | "protect" | "review";
   /** What a problem is about: a step, or one of the answers the last screen shows. */
-  type Area = Step | "protect" | "when" | "sentry";
+  type Area = Step | "when" | "sentry";
   const steps: { id: Step; label: string; title: string; text: string }[] = [
     { id: "what", label: "What", title: "What should Flux back up?", text: "Pick the folders that matter. Everything inside them is included, except what you leave out." },
     { id: "where", label: "Where", title: "Where should the backups go?", text: "A drive you plug in, a folder, or a server on your network. Best on a different disk than the files themselves." },
+    { id: "protect", label: "Protection", title: "How should they be stored?", text: "Plain folders are the simplest. A Vault is smaller, and encrypted if you want: that keeps the backups private if the drive is lost. Or let a standard tool write them, so they never depend on Flux." },
     { id: "review", label: "Ready", title: "", text: "Flux chose the rest to suit most backups. Change anything here, or later in Settings." },
   ];
   let step = $state<Step>("what");
@@ -802,7 +803,7 @@
     if (s === "protect" && encrypted && pwSource?.from === "command" && !pwSource.command.trim()) return "type the command that prints the " + pwWord;
     if (s === "protect" && pwIssue) return pwIssue;
     if (s === "review") {
-      for (const other of ["what", "where", "protect", "when", "sentry"] as const) {
+      for (const other of ["what", "where", "protect", "when", "sentry"] as const satisfies readonly Area[]) {
         const x = stepIssue(other);
         if (x) return x;
       }
@@ -992,7 +993,7 @@
   <!-- A dialog on its own (from the Overview) saves by itself: Cancel and Save, and what
        stops saving said beside them. -->
   <!-- An answer the new backup guide chose: what it is, or what it still needs. -->
-  {#snippet chosenRow(area: "protect" | "when" | "sentry", p: Page, title: string, icon: IconName, summary: string)}
+  {#snippet chosenRow(area: "when" | "sentry", p: Page, title: string, icon: IconName, summary: string)}
     {@const issue = stepIssue(area)}
     <Row {title} {icon} subtitle={issue ? `Still needed: ${issue}` : summary} onclick={() => openPage(p)} />
   {/snippet}
@@ -1480,17 +1481,7 @@
           {#snippet pageBody()}
             {#if draft && page}
 
-          {#if page === "setup-protect"}
-            <StorageChoice engine={draft.engine} onchoose={(e) => setEngine(e)} />
-            {#if draft.engine === "vault"}
-              <!-- A Vault is a Vault either way: encryption is its own question. -->
-              <section>
-                <h3 class="group-title">Encryption</h3>
-                <div class="rows">{@render encryptionRow(false, "")}</div>
-              </section>
-            {/if}
-            {#if encrypted}{@render passwordGroup()}{/if}
-          {:else if page === "setup-when"}
+          {#if page === "setup-when"}
             <div id="sec-schedule">{@render whenBody()}</div>
             {@render howItRuns()}
           {:else if page === "setup-sentry"}
@@ -2186,6 +2177,24 @@
                     <div>{@render whereList()}</div>
                     {#if draft.target.kind === "ssh"}<div class="rows">{@render pageRow("connection", "terminal", connectionSummary)}</div>{/if}
                   </div>
+                {:else if step === "protect"}
+                  <StorageChoice
+                    engine={draft.engine}
+                    onchoose={(e) => {
+                      setEngine(e);
+                      // A Vault's own question, encrypted or not, is under the list of
+                      // formats: bring it into view, so choosing a Vault asks it.
+                      if (e === "vault") void tick().then(() => scroller?.querySelector("#sec-encryption")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+                    }}
+                  />
+                  {#if draft.engine === "vault"}
+                    <!-- A Vault is a Vault either way: encryption is its own question, asked here. -->
+                    <section id="sec-encryption">
+                      <h3 class="group-title">Encryption</h3>
+                      <div class="rows">{@render encryptionRow(false, "")}</div>
+                    </section>
+                  {/if}
+                  {#if encrypted}{@render passwordGroup()}{/if}
                 {:else}
                   {@render nameGroup()}
                   <section>
@@ -2193,13 +2202,13 @@
                     <div class="rows">
                       <Row title="What" icon="folder" subtitle={whatSummary} onclick={() => go("what")} />
                       <Row title="Where" icon={draft.target.kind === "ssh" ? "server" : "drive"} subtitle={whereSummary} onclick={() => go("where")} />
+                      <Row title="Protection" icon="lock" subtitle={protectSummary + (draft.engine === "mirror" || draft.engine === "rsync" ? " · not encrypted" : "")} onclick={() => go("protect")} />
                     </div>
                   </section>
                   <!-- Not asked: chosen by the template, shown here, each one click to change. -->
                   <section>
                     <h3 class="group-title">Chosen for you</h3>
                     <div class="rows">
-                      {@render chosenRow("protect", "setup-protect", "How it's stored", "lock", protectSummary + (draft.engine === "mirror" || draft.engine === "rsync" ? " · not encrypted" : ""))}
                       {@render chosenRow("when", "setup-when", "When", "clock", whenSummary)}
                       <Row title="What to keep" icon="history" subtitle={keepSummary} onclick={() => openPage("retention")} />
                       {@render chosenRow("sentry", "setup-sentry", "Flux Sentry", "sentry", sentrySummary)}

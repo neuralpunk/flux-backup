@@ -4552,3 +4552,20 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [ ] Not run: the real app (Tauri window) against a damaged Vault; the service path is
       covered by the engine's tests and the type checks only
 - [ ] A repair shows no progress beyond "Repairing…" (as *Verify every byte*)
+
+### Phase 170 — Protection is asked again, a Vault's encryption with it (2026-11-12)
+- [x] Said by the owner of Phase 168: a Vault must ask whether it's encrypted; that is
+      key. Phase 168 had folded *How it's stored* into Ready's *Chosen for you* (plain
+      folders unless clicked), so the question was only met by someone who went looking
+- [x] `ProfileEditor`: the steps are What, Where, Protection, Ready. Protection is the
+      step it was (the formats; for a Vault *Encrypt the backups: On | Off*; On asks for
+      the password, and Continue waits for it). Choosing a Vault brings the encryption
+      question into view (it sits under the list of formats, below the fold). Ready shows
+      Protection under *Your backup*, back to its step; *Chosen for you* keeps When, What
+      to keep and Flux Sentry. The `setup-protect` dialog is gone
+- [x] Checked in the demo, dark: Vault chosen, On (the footer: "To continue: choose a
+      password"), Off (Continue ready), Ready ("Vault · not encrypted"). `sentry-dark`
+      retaken
+- [x] USER_GUIDE, site guide, README, UX_PRINCIPLES rule 12 (encryption is never chosen
+      for the user), CHANGELOG (Phase 168's entry rewritten)
+- [x] Checks: svelte-check (0, 0), app tests, Vite build

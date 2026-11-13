@@ -87,13 +87,16 @@ root problem behind most complaints: **things didn't look like what they were.**
     ("4 of 5 backups are protected.") and say what's wrong and what to do in plain words;
     every place that says when a backup runs next uses the same words (`nextRun`).
 12. **New things are set up one question at a time, and only the questions that have no
-    default are asked.** A new backup is a wizard of What, Where and Ready, then a closing
-    screen offering the first backup. What Flux can choose well (how it's stored, when,
-    what to keep, Flux Sentry) isn't a step: Ready lists it under *Chosen for you*, each
-    answer a row that opens in a dialog there. A step says what's still missing before
-    Continue works; a chosen answer that needs something says so on its row. Settings of
-    an existing backup stay on one page. (Added 2026-11-08; four steps folded into Ready
-    2026-11-12: they only ever needed Continue.)
+    default are asked.** A new backup is a wizard of What, Where, Protection and
+    Ready, then a closing screen offering the first backup. Protection is asked: how the
+    backups are stored, and for a Vault whether they are encrypted, is the user's to
+    decide (a password to keep, or backups anyone with the drive can read), never chosen
+    for them. What Flux can choose well (when, what to keep, Flux Sentry) isn't a step:
+    Ready lists it under *Chosen for you*, each answer a row that opens in a dialog
+    there. A step says what's still missing before Continue works. Settings of an
+    existing backup stay on one page. (Added 2026-11-08; When and Flux Sentry folded into
+    Ready 2026-11-12: they only ever needed Continue. Protection was folded in too, for
+    an hour: the owner had it put back.)
 
 ## Building blocks (app/src)
 

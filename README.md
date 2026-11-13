@@ -159,9 +159,9 @@ in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
   another folder, with a preview of what would be added, kept aside or replaced.
 - **Activity:** every run with its log, warnings and hook output; a Problems filter and
   **Copy diagnostics** for bug reports.
-- **Setting up a backup:** a short guide asks what and where; the rest (how it's stored,
-  when, what to keep, Flux Sentry) is chosen for you and shown on the last screen, one
-  click to change; then an offer to run the first backup.
+- **Setting up a backup:** a short guide asks what, where and how it's stored (a Vault:
+  encrypted or not); the rest (when, what to keep, Flux Sentry) is chosen for you and
+  shown on the last screen, one click to change; then an offer to run the first backup.
   Connected USB drives are offered (and tied to their filesystem, so an unplugged drive is
   never mistaken for its empty mount point). Everything else is a row with its current
   value that opens just that group: exclusions with suggestions and real sizes, connection

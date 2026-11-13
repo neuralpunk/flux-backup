@@ -18,12 +18,12 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
 
 ### Changed
 
-- **Setting up a backup takes two questions.** The guide asked six things, one screen
-  each, and four of them (how it's stored, when, what to keep, Flux Sentry) already had
-  an answer that suits most backups and only needed *Continue*. It now asks what to back
-  up and where; its last screen, *Ready*, lists the rest under *Chosen for you*, and a
-  click on any of them changes it there. Choosing an encrypted Vault still asks for its
-  password, and the row says so until it has one.
+- **Setting up a backup takes three questions.** The guide asked six things, one screen
+  each, and three of them (when, what to keep, Flux Sentry) already had an answer that
+  suits most backups and only needed *Continue*. It now asks what to back up, where, and
+  how it's stored; choosing a Vault asks, right there, whether to encrypt it, On or Off.
+  Its last screen, *Ready*, lists the rest under *Chosen for you*, and a click on any of
+  them changes it there.
 - **You can see what's chosen.** In a list of choices (which files a restore test reads,
   how backups are stored) the chosen one has a filled circle and is tinted and outlined;
   before, only a small check at the far end said so, and none at all when a number box
