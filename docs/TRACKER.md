@@ -4613,3 +4613,17 @@ The item phase 107 left: the sources were scanned for the look and again for the
       repair, the encryption choice and the setup, and its compare link ends at `v1.3.0`;
       an AppStream 1.3.0 entry (`appstreamcli validate` passes). The version was already
       1.3.0 everywhere
+- [x] Published, by the owner's word: the public repository (`../FluxBackup-public`) got
+      this repository's commits since Phase 150 one by one (`git format-patch | git am`;
+      its tree is this one's, `app/appshots/` still left out). Pushed `main` and the
+      annotated tag `v1.3.0` over HTTPS with `gh` as the credential helper
+- [x] The Website workflow failed twice on GitHub's side, not the site's: the first deploy
+      found no `github-pages` artifact half a second after it was uploaded, and the re-run
+      then found two (the first attempt's and its own). Both deleted, the third attempt
+      deployed; the live front page shows *New in 1.3*. The Release workflow passed
+- [x] The draft release's six files downloaded and checked: `sha256sum -c SHA256SUMS` OK,
+      the CLI tarball's `flux --version` is 1.3.0, the rpm is 1.3.0-1, `flux-vault-recover`
+      is static-pie and reads Vault formats 1 to 3. Notes in 1.2.1's form (highlights,
+      fixed, upgrading with format 3's note, downloads); published as *Flux Backup 1.3.0*,
+      marked Latest
+- [ ] The packages from CI not installed and tried here
