@@ -9,13 +9,38 @@ Flux takes the proven model of [Back in Time](https://github.com/bit-team/backin
 (profiles, scheduled snapshots, include/exclude lists, smart retention, easy restore) and
 rebuilds it in Rust. The aims are more speed, more capability and a modern interface.
 
-> **Status:** 1.2. See the [changelog](CHANGELOG.md) for what's new. Read the
+> **Status:** 1.3. See the [changelog](CHANGELOG.md) for what's new. Read the
 > [user guide](docs/USER_GUIDE.md) to get started, the [threat model](docs/THREAT_MODEL.md)
 > for what Flux protects against, and [FORMATS.md](docs/FORMATS.md) for how your backups
 > are stored (frozen for 1.x). [PLAN.md](docs/PLAN.md) and [TRACKER.md](docs/TRACKER.md)
 > show how it was built.
 
-### What 1.2 adds
+### What 1.3 adds
+
+- **Faster Vault backups.** Storing each piece of a file takes about a third of the
+  processor time it did. Packs are written in the background, straight to the drive;
+  photos, video and archives are no longer compressed for nothing; large files are read
+  a block at a time. A 65 GiB first backup to a USB SSD took 9–15% less time and a third
+  less processor time.
+- **AES for new Vaults (XAES-256-GCM)**, about five times as fast as the cipher before
+  it, so encryption keeps up with the fastest drives. Vaults made before 1.3 work as
+  they did.
+- **Faster restores and pruning** of a Vault: restores read ahead and decrypt on several
+  cores.
+- **A warning when the backup drive is slower than it should be** (an SSD that TRIM
+  doesn't reach, a USB 3 drive on a USB 2 port), with the command that fixes it.
+- **Three questions to set up a backup:** what, where, and how it's stored. The rest is
+  chosen for you and shown on the last screen, one click to change.
+- **Encryption on or off, for a Vault.** Off, it is still compressed and deduplicated,
+  with no password to keep: for a drive that's encrypted already.
+- **Repair.** `flux check --repair` (**Repair…** in the app) rebuilds what a drive has
+  damaged in a Vault; what can't be rebuilt is taken off the Vault's list, and the next
+  backup stores it again from your files.
+- **Damage stays where it is.** Removing old snapshots checks a pack before moving
+  anything out of it, and a copy of a backup never replaces its good files with damaged
+  ones.
+
+### What 1.2 added
 
 - **Previous versions from the file manager.** Right-click a file or folder in Nautilus,
   Nemo or Dolphin: *Previous versions…* opens its versions; *Restore deleted files here…*
@@ -96,7 +121,7 @@ build from source, see [Building](#building).
 | Format | Plain folders, unchanged files hard-linked | Deduplicated chunk repository |
 | Browse without Flux | Yes, with any file manager | Via `flux mount`, or `flux-vault-recover` (no Flux needed) |
 | Dedup | Per unchanged file | Across files and snapshots |
-| Compression / encryption | — / use an encrypted disk | zstd / XAES-256-GCM |
+| Compression / encryption | — / use an encrypted disk | zstd / XAES-256-GCM, or none |
 | Targets | Local drives, SSH (server needs rsync) | Local drives, SSH/SFTP |
 
 Each profile picks its engine.
@@ -124,32 +149,19 @@ the other engines. See the
 
 ![Overview with a backup running](docs/screenshots/overview-dark.png)
 
-| Snapshots and file browser | Settings |
+| Snapshots and the file browser | Find in all snapshots |
 |---|---|
-| ![Snapshots](docs/screenshots/snapshots-dark.png) | ![A backup's settings](docs/screenshots/settings-dark.png) |
-| **Activity log** | **Light theme** |
-| ![Activity](docs/screenshots/activity-dark.png) | ![Light theme](docs/screenshots/overview-light.png) |
-| **Compatibility mode** | **Recovery kit** |
-| ![Choosing Vault, rsync or Borg while setting up](docs/screenshots/compat-dark.png) | ![Recovery kit](docs/screenshots/recovery-dark.png) |
-| **Find in all snapshots** | **Versions of a file** |
-| ![Search results across snapshots](docs/screenshots/search-dark.png) | ![Versions of a file](docs/screenshots/versions-dark.png) |
-| **Restore preview** | **Space forecast and drive health** |
-| ![What a restore would change](docs/screenshots/restore-dark.png) | ![Used space, when the drive is full, and the drive's health](docs/screenshots/space-dark.png) |
-| **Warnings in words** | **Preferences: pausing, quiet hours** |
-| ![All backups, with the one that needs attention explained](docs/screenshots/health-dark.png) | ![Preferences with schedules paused, the weekly note and quiet hours](docs/screenshots/preferences-dark.png) |
-| **Export to other tools** | **Size estimate** |
-| ![Export dialog](docs/screenshots/export-dark.png) | ![New backup, step one, with a size estimate](docs/screenshots/new-dark.png) |
-| ![Recovering an existing backup on a new computer](docs/screenshots/recover-dark.png) | ![Templates for a new backup](docs/screenshots/templates-dark.png) |
-| ![What's backed up, and the rule that leaves node_modules out](docs/screenshots/rules-dark.png) | ![The snapshot calendar](docs/screenshots/calendar-dark.png) |
-| ![Storage and recovery readiness](docs/screenshots/storage-dark.png) | ![Exporting a snapshot as an archive](docs/screenshots/archive-dark.png) |
-| ![A backup's settings at a glance](docs/screenshots/glance-dark.png) | ![Every backup's settings side by side](docs/screenshots/table-dark.png) |
-| ![Setting up a backup: Flux Sentry, chosen for you and one click to change](docs/screenshots/sentry-dark.png) | |
+| ![Snapshots](docs/screenshots/snapshots-dark.png) | ![Search results across snapshots](docs/screenshots/search-dark.png) |
+| **Restore preview** | **Light theme** |
+| ![What a restore would change](docs/screenshots/restore-dark.png) | ![Light theme](docs/screenshots/overview-light.png) |
+
+More of the app is on the [website](https://neuralpunk.github.io/flux-backup/).
 
 The app (Tauri 2, Svelte 5, Tailwind 4, and the GNOME-style "At home on the desktop" design
 in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
 - **Overview:** the running backup's progress, last and next backup, snapshots, its
   settings at a glance, free space, recent backups, and maintenance (check, verify every
-  byte, free up space). Warnings in
+  byte, repair a Vault, free up space). Warnings in
   words when something needs you (a drive not seen for days, repeated failures, little
   space), and a chart of used space with a forecast of when the drive is full.
 - **Snapshots:** every snapshot with an instant file browser. "What changed" compares with the
@@ -243,7 +255,7 @@ Every command accepts `--json` for scripting and `--system` for root-mode profil
 directory. Exit codes: 0 ok, 1 error, 2 usage, 3 invalid profile, 4 finished but some
 files could not be backed up or restored.
 
-### Vault: deduplicated and encrypted
+### Vault: deduplicated, encrypted if you like
 
 ```sh
 flux profile create docs --target /run/media/$USER/Backup --source ~/Documents --engine vault
@@ -261,9 +273,11 @@ flux vault upgrade docs           # move a Vault made before 1.0 to format 2 (ke
 ```
 
 All Vault profiles on a target share one repository (`<target>/flux-vault`), so identical
-files deduplicate across profiles and machines. Everything stored (contents, file names,
-metadata) is encrypted with XAES-256-GCM under a key protected by Argon2id. Chunk
-ids are keyed, so they don't reveal content. The format and threat model are documented in
+files deduplicate across profiles and machines. In an encrypted Vault everything stored
+(contents, file names, metadata) is encrypted with XAES-256-GCM under a key protected by
+Argon2id (Vaults made before 1.3 keep XChaCha20-Poly1305), and chunk ids are keyed, so
+they don't reveal content. `encryption = false` under `[vault]`, set before the Vault is
+made, leaves it unencrypted: still compressed and deduplicated, with no password. The format and threat model are documented in
 [docs/VAULT_FORMAT.md](docs/VAULT_FORMAT.md); every format Flux writes (Mirror, snapshots,
 profiles, the compatibility modes) is in [docs/FORMATS.md](docs/FORMATS.md), frozen for
 1.x.
@@ -283,13 +297,13 @@ when nothing changed):
 
 | scenario | Flux Vault | Borg 1.4 |
 |---|---:|---:|
-| initial backup | 1.73 s | 15.81 s |
-| no changes, new snapshot | 0.51 s | 8.17 s |
-| 1% of small files + 1 large file changed | 0.51 s | 8.18 s |
-| repository size | 864 MiB | 869 MiB |
+| initial backup | 0.97 s | 15.62 s |
+| no changes, new snapshot | 0.46 s | 8.05 s |
+| 1% of small files + 1 large file changed | 0.51 s | 8.21 s |
+| repository size | 882 MiB | 869 MiB |
 
-Full restore took 1.2 s and was byte-identical to the source. `check --read-data`
-verified all 860 MiB in 0.5 s.
+Full restore took 0.9 s and was byte-identical to the source. `check --read-data`
+verified all 877 MiB in 0.5 s.
 
 ### Backing up to an SSH server
 
@@ -361,8 +375,6 @@ Defaults: newest 1, everything from the last day, then 7 daily, 4 weekly, 12 mon
 5 yearly.
 
 ### System backups (root)
-
-![System profiles in the app](docs/screenshots/system-dark.png)
 
 System profiles back up what only root can read. They live in `/etc/flux-backup/`, keep
 their history in `/var/lib/flux-backup/`, and run from system timers
@@ -455,9 +467,9 @@ folder:
 
 | scenario | Flux | rsync |
 |---|---:|---:|
-| initial full backup | 0.46 s | 4.28 s |
-| no changes, new snapshot | 0.26 s | 7.67 s |
-| 1% of small files + 1 large file changed | 0.26 s | 7.73 s |
+| initial full backup | 0.46 s | 4.19 s |
+| no changes, new snapshot | 0.26 s | 6.99 s |
+| 1% of small files + 1 large file changed | 0.26 s | 7.05 s |
 | no changes (Flux default: skip, no snapshot) | 0.16 s | — |
 
 With Back in Time's default flags (`rsync -aH`, no ACLs/xattrs), rsync's 1%-change run took
@@ -492,7 +504,7 @@ because Tauri names it after `productName`, which also names the packages. A Fla
 should rename it to the app ID with `rename-desktop-file` (and the icon with `rename-icon`).
 
 `flux completions <bash|zsh|fish>` prints a completion script. Every command has a man page:
-`man flux`, `man flux-restore` and so on, installed by the packages (74 pages) and by
+`man flux`, `man flux-restore` and so on, installed by the packages (78 pages) and by
 `install.sh`. Each says what the command does and what it changes, with examples of basic
 use, its exit status and related pages; `flux <command> --help` ends with the same
 examples.

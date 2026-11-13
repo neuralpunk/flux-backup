@@ -38,6 +38,10 @@ export FLUX_SYSTEMD_UNIT_DIR="$WORK/units" FLUX_SYSTEMCTL=true FLUX_SECRET_TOOL=
 sed -i 's/^notify = true/notify = false/' "$FLUX_HOME/config/profiles/bench.toml"
 # Force a snapshot even when nothing changed, to compare like with like.
 sed -i 's/^snapshot_if_unchanged = false/snapshot_if_unchanged = true/' "$FLUX_HOME/config/profiles/bench.toml"
+# Flux Sentry off: the test data is random bytes in .txt files, so the files changed for
+# scenario 3 look encrypted to it (as ransomware's work would), and it would stop the backup.
+sentry_off() { sed -i '0,/^\[/s//unusual_changes = "off"\n\n[/' "$FLUX_HOME/config/profiles/$1.toml"; }
+sentry_off bench
 
 t() { local s=$(date +%s.%N); "$@" >/dev/null; echo "$(date +%s.%N) - $s" | bc; }
 rs() { # rsync snapshot N (link-dest to N-1)
@@ -75,6 +79,7 @@ if command -v borg >/dev/null && borg --version | grep -q '^borg 1\.'; then
   # Like Borg (which always makes an archive): a snapshot even when nothing changed.
   sed -i 's/^notify = true/notify = false/; s/^snapshot_if_unchanged = false/snapshot_if_unchanged = true/' \
     "$FLUX_HOME/config/profiles/vbench.toml"
+  sentry_off vbench
   borg init --encryption=repokey-blake2 "$BR" >/dev/null 2>&1
   bc_() { borg create --compression zstd,3 "$BR::$1" "$SRC" 2>/dev/null; }
 

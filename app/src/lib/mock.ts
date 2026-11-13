@@ -1010,7 +1010,8 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "take_open_request": {
       // Demo only: `?open=versions:/home/me/notes.md` acts as a file manager's request.
       const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("open") : null;
-      if (!q || mockOpenTaken) return null;
+      // `?open=recover` and the like open a dialog (App.svelte), and aren't such a request.
+      if (!q || !q.includes(":") || mockOpenTaken) return null;
       mockOpenTaken = true;
       const [kind, ...rest] = q.split(":");
       return { kind, path: rest.join(":") };

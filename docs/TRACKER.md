@@ -4569,3 +4569,38 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] USER_GUIDE, site guide, README, UX_PRINCIPLES rule 12 (encryption is never chosen
       for the user), CHANGELOG (Phase 168's entry rewritten)
 - [x] Checks: svelte-check (0, 0), app tests, Vite build
+
+### Phase 171 — The website and the README, as of 1.3 (2026-11-12)
+- [x] Asked by the owner: the site (front page and guide) and the README to match the
+      app as of 1.3, and fewer screenshots in the README
+- [x] Front page: 1.3 throughout; *New in 1.3* chips (1.2 moved under *And in 1.2*);
+      a Vault is "encrypted if you like"; the setup caption says three questions. Guide
+      page: 1.3 in its title, header and intro, and rebuilt from USER_GUIDE (it was
+      behind on Phases 166, 167 and 169: copies and damage, *Repair…*)
+- [x] `bench/bench.sh` no longer measured its third scenario: Flux Sentry stopped that
+      backup (the test data is random bytes in `.txt` files, so the changed ones "look
+      encrypted") and the time printed was the refusal's. The benchmark's two profiles
+      now set `unusual_changes = "off"`
+- [x] Measured again with the 1.3 build (median of three, tmpfs, 16 cores, rsync 3.5.2,
+      Borg 1.4.5). Mirror as before (0.46 / 0.26 / 0.26 s; rsync 4.19 / 6.99 / 7.05).
+      Vault: first backup 0.97 s (was 1.73), nothing changed 0.46 (0.51), 1% changed
+      0.51; Borg 15.62 / 8.05 / 8.21. Full restore 0.9 s (was 1.2), `check --read-data`
+      of 877 MiB 0.5 s. On the site (spec sheet, the race, its table) and in the README
+- [ ] The Vault is now larger than Borg's repository for this data: 882 MiB against
+      869 (it was 864). The site's *size* tile, which claimed the opposite, is replaced
+      by the Vault's first backup, and the table shows the sizes without marking a
+      winner. Not looked into: probably 1.3 storing barely compressible data as it is
+- [x] README: *What 1.3 adds*; 5 screenshots instead of 25 (the Overview, snapshots,
+      search, the restore preview, the light theme) and a link to the website; an
+      unencrypted Vault (`encryption = false`); *Repair* among the Overview's upkeep;
+      78 man pages
+- [x] Screenshots retaken with `site/shots.mjs`; those that didn't change by a pixel
+      left as they were. The demo showed a red toast ("None of your backups takes .")
+      in the recover, export and recovery-guide shots, on the website too:
+      `?open=recover` was also read as a file manager's request (`mock.ts`, demo only)
+- [x] Looked at: every image the site and the README show, against its alt text; the
+      front page rendered in headless Chrome at 1280 (spec sheet, chips, install)
+- [x] Checks: svelte-check, app tests
+- [ ] Not done: 1.3.0 is still *Unreleased* in the CHANGELOG and has no AppStream
+      release entry (both want its date); the download buttons go to the releases page,
+      where the newest is 1.2.1 until it's published
