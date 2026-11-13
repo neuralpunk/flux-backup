@@ -187,6 +187,7 @@ fn repair(repo: &VaultRepo) -> CheckReport {
         CheckOptions {
             read_data: true,
             repair: true,
+            heal: true,
         },
         &Progress::new(),
         &silent,
@@ -894,8 +895,12 @@ fn what_is_gone_from_the_files_too_stays_reported() {
     assert!(!repair(&repo).ok());
     let second = e.snap(&repo);
     let r = full(&repo);
+    // (One error a chunk: where a file is cut depends on the Vault's own seed.)
     assert!(
-        r.errors.len() == 1 && r.errors[0].contains(&first) && r.errors[0].contains("/deleted"),
+        !r.errors.is_empty()
+            && r.errors
+                .iter()
+                .all(|m| m.contains(&first) && m.contains("/deleted")),
         "{:?}",
         r.errors
     );
@@ -943,4 +948,36 @@ fn an_unreadable_index_is_rebuilt_from_the_packs() {
         packs + 2,
         "one data pack, one of trees"
     );
+}
+
+/// Rebuilding from repair data without being asked to heal (what *Verify every byte* and
+/// the monthly check do for a Vault that keeps repair data) takes nothing out of the
+/// Vault: damage past repair is reported, and the pack stays as it is.
+#[test]
+fn only_an_asked_for_repair_takes_data_out() {
+    let e = env();
+    fs::write(e.src.join("a"), noise(3 << 20, 1)).unwrap();
+    let repo = e.init(Some(PW), 5);
+    e.snap(&repo);
+    let victim = e.biggest_pack();
+    damage(&victim, |b| b.truncate(b.len() / 2));
+    let half = fs::read(&victim).unwrap();
+    let r = check_with(
+        &repo,
+        CheckOptions {
+            read_data: true,
+            repair: true,
+            heal: false,
+        },
+        &Progress::new(),
+        &silent,
+    )
+    .unwrap();
+    assert!(!r.ok() && r.repaired.is_empty(), "{r:?}");
+    assert!(
+        r.errors.iter().any(|m| m.contains("can't be repaired")),
+        "{:?}",
+        r.errors
+    );
+    assert!(fs::read(&victim).unwrap() == half && parity_of(&e, &victim).exists());
 }

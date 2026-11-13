@@ -739,7 +739,8 @@ export interface CheckSummary {
   bytes_read: number;
   errors: string[];
   warnings: string[];
-  /** Damage that was rebuilt from repair data. */
+  /** What was put right: damage rebuilt from repair data, and (a repair asked for) what
+   * couldn't be rebuilt and was taken out for the next backup to store again. */
   repaired?: string[];
   /** Of the errors, how many the repair data could rebuild. */
   repairable?: number;

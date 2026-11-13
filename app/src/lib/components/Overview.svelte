@@ -187,11 +187,15 @@
   };
 
   // ---- maintenance ----
-  let busy = $state<"check" | "verify" | "prune" | null>(null);
-  let result = $state<{ ok: boolean; text: string; details?: string[] } | null>(null);
+  let busy = $state<"check" | "verify" | "repair" | "prune" | null>(null);
+  /** `offer`: what to do about it, as a button: repair the Vault, or back up so that what
+      a repair took out is stored again. */
+  let result = $state<{ ok: boolean; text: string; details?: string[]; offer?: "repair" | "backup" } | null>(null);
   /** What a prune would remove, to be confirmed: the snapshots the rules no longer keep,
       and whether more would go, oldest first, to reach the free-space minimum. */
   let pruneConfirm = $state<{ removed: string[]; forSpace: boolean } | null>(null);
+  let confirmingRepair = $state(false);
+  const isVault = $derived(data?.profile.engine === "vault");
 
   async function check(readData: boolean) {
     busy = readData ? "verify" : "check";
@@ -201,9 +205,42 @@
       const fixed = c.repaired ?? [];
       const mended = fixed.length ? ` ${count(fixed.length)} damaged ${fixed.length === 1 ? "file was" : "files were"} rebuilt from repair data: the drive may be failing.` : "";
       const added = c.parity_added ? ` Repair data was added to ${count(c.parity_added)} stored files that had none.` : "";
+      const rebuildable = c.repairable ? ` ${count(c.repairable)} of them can be rebuilt from the repair data.` : "";
       result = c.errors.length
-        ? { ok: false, text: `${c.errors.length} problems found in ${count(c.snapshots)} snapshots.${c.repairable ? ` ${count(c.repairable)} of them can be rebuilt from the repair data: turn on Repair data in Settings › Where to keep it, then Verify every byte.` : ""}${mended}`, details: [...c.errors, ...fixed].slice(0, 50) }
+        ? {
+            ok: false,
+            text: `${c.errors.length} ${c.errors.length === 1 ? "problem" : "problems"} found in ${count(c.snapshots)} snapshots.${rebuildable}${mended}${isVault ? " Repair puts right what it can, and lets the next backup store the rest again from your files." : ""}`,
+            details: [...c.errors, ...fixed].slice(0, 50),
+            offer: isVault ? "repair" : undefined,
+          }
         : { ok: true, text: `All ${count(c.snapshots)} snapshots are intact${readData ? `; ${bytes(c.bytes_read)} read back and verified` : ""}.${mended}${added}`, details: [...fixed, ...c.warnings] };
+    } catch (e) {
+      result = { ok: false, text: (e as Error).message };
+    } finally {
+      busy = null;
+    }
+  }
+
+  /** Repair a Vault: rebuild what is damaged, take out what can't be rebuilt. What is
+      still missing afterwards is for the next backup to store again. */
+  async function repair() {
+    confirmingRepair = false;
+    busy = "repair";
+    result = null;
+    try {
+      const c = await api.check(id, true, true);
+      const fixed = c.repaired ?? [];
+      const made = `${count(fixed.length)} ${fixed.length === 1 ? "repair was" : "repairs were"} made`;
+      result = c.errors.length
+        ? {
+            ok: false,
+            text: `${fixed.length ? `${made}. ` : ""}${count(c.errors.length)} ${c.errors.length === 1 ? "file of a snapshot is" : "files of snapshots are"} missing data that couldn't be rebuilt. Back up now: what your files still have is stored again, also for older snapshots. Then verify every byte; what is still listed is gone from your files too.`,
+            details: [...fixed, ...c.errors].slice(0, 50),
+            offer: "backup",
+          }
+        : fixed.length
+          ? { ok: true, text: `${made}, and all ${count(c.snapshots)} snapshots are intact. A drive that needed repairs may be failing.`, details: fixed }
+          : { ok: true, text: `Nothing needed repair: all ${count(c.snapshots)} snapshots are intact; ${bytes(c.bytes_read)} read back and verified.`, details: c.warnings };
     } catch (e) {
       result = { ok: false, text: (e as Error).message };
     } finally {
@@ -634,6 +671,12 @@
           <span class="min-w-0 flex-1"><span class="block font-medium">Is all the stored data undamaged?</span><span class="block text-[13px] text-fg-2"><span class="text-fg">Verify every byte</span> reads everything stored back and checks it: it finds a failing drive. As long as reading the whole backup.</span></span>
           <button class="btn" onclick={() => check(true)} disabled={busy !== null}>{busy === "verify" ? "Verifying…" : "Verify every byte"}</button>
         </div>
+        {#if isVault}
+          <div class="row">
+            <span class="min-w-0 flex-1"><span class="block font-medium">Can damage be put right?</span><span class="block text-[13px] text-fg-2"><span class="text-fg">Repair</span> reads everything stored, rebuilds what a drive has damaged from the repair data, and takes out what can't be rebuilt, so the next backup stores it again from your files. Asks first.</span></span>
+            <button class="btn" onclick={() => (confirmingRepair = true)} disabled={busy !== null}>{busy === "repair" ? "Repairing…" : "Repair…"}</button>
+          </div>
+        {/if}
         <div class="row">
           <span class="min-w-0 flex-1"><span class="block font-medium">Free up space</span><span class="block text-[13px] text-fg-2">Removes the snapshots the retention rules no longer keep. Asks first.</span></span>
           <button class="btn" onclick={() => prune(true)} disabled={busy !== null}>{busy === "prune" ? "Working…" : "Free up space"}</button>
@@ -657,8 +700,15 @@
       {#if result}
         <Callout class="mt-3" tone={result.ok ? "ok" : "bad"} title={result.text}>
           {#if result.details?.length}
-            <ul class="mt-1 max-h-40 overflow-y-auto font-mono text-xs">{#each result.details as d (d)}<li class="truncate">{d}</li>{/each}</ul>
+            <ul class="mt-1 max-h-40 overflow-y-auto font-mono text-xs">{#each result.details as d (d)}<li class="truncate" title={d}>{d}</li>{/each}</ul>
           {/if}
+          {#snippet actions()}
+            {#if result?.offer === "repair"}
+              <button class="btn" onclick={() => (confirmingRepair = true)} disabled={busy !== null}>Repair…</button>
+            {:else if result?.offer === "backup"}
+              <button class="btn" onclick={() => ((result = null), void app.backupNow(id))} disabled={busy !== null}><Icon name="play" size={14} /> Back up now</button>
+            {/if}
+          {/snippet}
         </Callout>
       {/if}
     </div>
@@ -677,6 +727,14 @@
   <ConfirmDialog title="Upgrade the Vault?" icon="vault" confirm={upgrading ? "Upgrading…" : "Upgrade"} busy={upgrading} onconfirm={() => void upgradeVault()} onclose={() => (confirmingUpgrade = false)}>
     <p>New snapshots then keep the holes of sparse files, so disk images and similar files take only the space of their data. The snapshots already there stay as they are.</p>
     <p class="mt-2">Flux Backup before 1.0 can't open the Vault afterwards: if another computer uses it with an older Flux, update that one first.</p>
+  </ConfirmDialog>
+{/if}
+
+{#if confirmingRepair}
+  <ConfirmDialog title="Repair this Vault?" icon="vault" confirm="Repair" onconfirm={() => void repair()} onclose={() => (confirmingRepair = false)}>
+    <p>Flux reads everything stored, which takes as long as <em>Verify every byte</em>, and rebuilds what a drive has damaged from the repair data, if this Vault keeps any.</p>
+    <p class="mt-2">Stored data that can't be rebuilt is taken out of the Vault, keeping every piece of it that still reads. The next backup then stores it again from your files, which also puts older snapshots right where the files haven't changed.</p>
+    <p class="mt-2">Nothing that can still be read is removed, and your files aren't touched. No backup can run while it works.</p>
   </ConfirmDialog>
 {/if}
 

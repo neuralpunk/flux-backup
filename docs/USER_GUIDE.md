@@ -1299,6 +1299,7 @@ Overview they're together under *Checks and upkeep*:
 | Is every snapshot whole? | **Check** (`flux check`) | each snapshot's record and structure, not the data: quick |
 | Can files come back? | **Restore test** (`flux restore-test`) | some files, read back the way a restore does, every byte checked; nothing written |
 | Is all the stored data undamaged? | **Verify every byte** (`flux check --read-data`) | everything stored, to find a failing drive: as long as reading the whole backup |
+| Can damage be put right? (Vaults) | **Repair…** (`flux check --repair`) | everything stored; rebuilds what is damaged, and lets the next backup store again what can't be rebuilt |
 
 Vault data is authenticated, so any corruption or tampering is detected.
 
@@ -1346,6 +1347,13 @@ flux check home --repair          # take out what can't be rebuilt
 flux backup home                  # store it again from the files
 flux check home --read-data       # what is left, if anything, is gone for good
 ```
+
+In the app the same three steps are under *Checks and upkeep* on a Vault's Overview.
+**Repair…** (*Can damage be put right?*) says what it will do and asks first; a check or
+*Verify every byte* that finds problems offers it too. If something couldn't be rebuilt,
+its result lists the files concerned and offers **Back up now**; verify every byte once
+more after that backup. Only a repair you ask for takes anything out of a Vault: *Verify
+every byte* and the monthly check rebuild from repair data and otherwise only report.
 
 Removing old snapshots checks what it moves, too. When a prune copies the pieces still
 needed out of a mostly unused pack, it first makes sure the pack is undamaged; a damaged

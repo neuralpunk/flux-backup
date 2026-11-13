@@ -185,7 +185,9 @@ export const api = {
   runs: (id: string, limit = 100) => call<RunRecord[]>("runs", { id, limit }),
   runEvents: (id: string, runId: string) => call<LoggedEvent[]>("run_events", { id, runId }),
   prune: (id: string, dryRun: boolean) => call<PruneSummary>("prune", { id, dryRun }),
-  check: (id: string, readData: boolean) => call<CheckSummary>("check", { id, readData }),
+  /** `repair` (a Vault): read everything, rebuild what is damaged from its repair data,
+   * and take what can't be rebuilt out of the index so the next backup stores it again. */
+  check: (id: string, readData: boolean, repair = false) => call<CheckSummary>("check", { id, readData, repair }),
 
   /** Compatibility mode: the recovery guide and script for a profile. */
   recoveryKit: (id: string) => call<RecoveryKit>("recovery_kit", { id }),

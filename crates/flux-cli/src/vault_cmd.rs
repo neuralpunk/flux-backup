@@ -54,7 +54,7 @@ pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
             live.println(format!("warning: {path}: {message}"));
         }
     };
-    let r = repo.check_with(args.read_data, args.repair, &progress, &report);
+    let r = repo.check_with(args.read_data, args.repair, args.repair, &progress, &report);
     drop(live);
     let mut r = r?;
     r.repaired.splice(0..0, repaired_first);

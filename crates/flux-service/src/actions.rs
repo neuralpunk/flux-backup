@@ -228,24 +228,41 @@ pub fn prune_impl(state: &Service, id: String, dry_run: bool) -> Result<PruneSum
     Ok(r)
 }
 
-pub fn check_impl(state: &Service, id: String, read_data: bool) -> Result<CheckSummary> {
+pub fn check_impl(
+    state: &Service,
+    id: String,
+    read_data: bool,
+    repair: bool,
+) -> Result<CheckSummary> {
     let (pid, p) = state.load(&id)?;
-    // A backup that keeps repair data: verifying every byte also rebuilds what is damaged
-    // (first what the Vault can't be opened without).
+    // Asked to repair (a Vault): every byte is read, what is damaged is rebuilt from the
+    // repair data, and what can't be is taken out of the index for the next backup to
+    // store again. Not asked: a backup that keeps repair data still has damage rebuilt
+    // when every byte is verified (first what the Vault can't be opened without), but
+    // nothing is taken out of it.
+    let vault = p.engine == flux_core::Engine::Vault;
+    let repair = repair && vault;
+    let read_data = read_data || repair;
     let keeps = p.vault.as_ref().is_some_and(|v| v.parity > 0);
-    let first = if read_data && keeps {
+    let first = if repair || (read_data && keeps) {
         flux_runner::repo::repair_vault_basics(&state.paths, &p)
     } else {
         Vec::new()
     };
     let repo = state.open(&pid, &p)?;
+    let rebuild_only = read_data && repo.keeps_repair_data();
     let mut r = repo.check_with(
         read_data,
-        read_data && repo.keeps_repair_data(),
+        repair || rebuild_only,
+        repair,
         &Progress::new(),
         &silent,
     )?;
     r.repaired.splice(0..0, first);
+    if repair {
+        // The index changed: what the app cached of this backup is out of date.
+        state.forget_cached(&pid);
+    }
     Ok(r)
 }
 

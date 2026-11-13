@@ -4519,3 +4519,36 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Checks: svelte-check (0, 0), app tests, Vite build; no Rust changed
 - [ ] Ready is taller than a 780px window: the last two chosen rows and *More options*
       need a scroll
+
+### Phase 169 — Repairing a Vault, in the app (2026-11-12)
+- [x] Asked by the owner: repairing and healing a Vault from the app, not only
+      `flux check --repair`
+- [x] First, a correction to Phase 167: `repair` there also took unrepairable packs out,
+      so *Verify every byte* and the monthly check (which repair Vaults that keep repair
+      data) would have removed data unasked. `CheckOptions` now has `heal` beside
+      `repair`: dropping lost packs and rebuilding the index only with `heal`; without
+      it they are reported as before 167. `AnyRepo::check_with(read_data, repair, heal)`:
+      the CLI's `--repair` and the app's Repair heal; the monthly check and *Verify every
+      byte* don't. Test: `only_an_asked_for_repair_takes_data_out`
+- [x] Service: `Call::Check` has `repair` (default false, so an older app's call still
+      reads); `check_impl` repairs the Vault's basics first, heals, and drops the app's
+      cached lists of the backup. Tauri `check(id, read_data, repair)`
+- [x] Overview › *Checks and upkeep*, for Vaults: *Can damage be put right?* with
+      **Repair…**; a `ConfirmDialog` says what it reads, what it takes out and what it
+      never touches. A check that finds problems on a Vault offers **Repair…** in its
+      result; a repair that leaves files missing lists them and offers **Back up now**;
+      a clean one says how many repairs were made, or that nothing needed any.
+      ("1 problems found" reads "1 problem found")
+- [x] Demo: `?damage=1` (a Vault with a pack damaged past repair; repaired; healed by
+      the next backup). Walked in headless Chrome on *Documents → NAS*, dark: verify
+      (1 problem, Repair…), the confirmation, the repair (1 repair, 2 files missing,
+      Back up now), the backup, verify again (all intact)
+- [x] USER_GUIDE (*Checking your backups*, *Repair data*), CHANGELOG
+- [x] Checks: fmt, clippy on the workspace, all workspace tests, `cargo check` of the
+      Tauri shell, svelte-check (0, 0), app tests, Vite build
+- [x] A flaky test of Phase 167 fixed (`what_is_gone_from_the_files_too_stays_reported`
+      expected one error for a 600 KiB file; the Vault's chunking seed sometimes cuts it
+      in two): it failed about once in 25 runs; the repair suite then passed 30 of 30
+- [ ] Not run: the real app (Tauri window) against a damaged Vault; the service path is
+      covered by the engine's tests and the type checks only
+- [ ] A repair shows no progress beyond "Repairing…" (as *Verify every byte*)

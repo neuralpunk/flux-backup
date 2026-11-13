@@ -740,7 +740,7 @@ impl AnyRepo {
         progress: &Progress,
         report: Reporter<'_>,
     ) -> Result<CheckSummary, RepoError> {
-        self.check_with(read_data, false, progress, report)
+        self.check_with(read_data, false, false, progress, report)
     }
 
     /// Does this backup keep repair data (a Vault with `parity` set)?
@@ -749,11 +749,14 @@ impl AnyRepo {
     }
 
     /// [`AnyRepo::check`], and with `repair` (Vaults): what is damaged is rebuilt from its
-    /// repair data, and repair data is added where it's missing.
+    /// repair data, and repair data is added where it's missing. With `heal` too: what
+    /// can't be rebuilt is taken out of the Vault's index for the next backup to store
+    /// again (`flux check --repair`; never done unasked).
     pub fn check_with(
         &self,
         read_data: bool,
         repair: bool,
+        heal: bool,
         progress: &Progress,
         report: Reporter<'_>,
     ) -> Result<CheckSummary, RepoError> {
@@ -761,7 +764,11 @@ impl AnyRepo {
             AnyRepo::Mirror(r) => Ok(flux_mirror::check::check(r, read_data, progress)?),
             AnyRepo::MirrorRemote(r) => Ok(flux_mirror::remote::check(r, read_data, progress)?),
             AnyRepo::Vault { repo, .. } => {
-                let opts = flux_vault::check::CheckOptions { read_data, repair };
+                let opts = flux_vault::check::CheckOptions {
+                    read_data,
+                    repair,
+                    heal: repair && heal,
+                };
                 let c = flux_vault::check::check_with(repo, opts, progress, report)?;
                 Ok(CheckSummary {
                     snapshots: c.snapshots,

@@ -102,7 +102,8 @@ pub fn after_backup(
                 if verify {
                     info("monthly check: reading all stored data back".into());
                     // A backup that keeps repair data has damage rebuilt as it's found.
-                    let checked = repo.check_with(true, repo.keeps_repair_data(), progress, report);
+                    let checked =
+                        repo.check_with(true, repo.keeps_repair_data(), false, progress, report);
                     if let Ok(c) = &checked
                         && !c.repaired.is_empty()
                     {

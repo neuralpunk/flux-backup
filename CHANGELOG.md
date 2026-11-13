@@ -103,6 +103,11 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   puts older snapshots right where the files haven't changed. A check afterwards lists
   what is gone for good, by snapshot and file. It works for every Vault, with or
   without repair data, and a check that finds such damage says to run it.
+  In the app it is **Repair…**, under *Checks and upkeep* on a Vault's Overview: it says
+  what it will do and asks first, a check that finds problems offers it, and its result
+  lists the files concerned with a **Back up now** button. Only a repair you ask for
+  takes anything out of a Vault; *Verify every byte* and the monthly check rebuild from
+  repair data as before and otherwise only report.
 - **A Vault whose index can't be read is no longer stuck.** `flux check --repair`
   writes the index again from the stored files themselves, each of which lists what it
   holds.

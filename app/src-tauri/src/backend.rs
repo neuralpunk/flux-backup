@@ -299,7 +299,8 @@ commands! {
     runs(id: String, limit: usize) => Call::Runs { id, limit };
     run_events(id: String, run_id: String) => Call::RunEvents { id, run_id };
     prune(id: String, dry_run: bool) => Call::Prune { id, dry_run };
-    check(id: String, read_data: bool) => Call::Check { id, read_data };
+    check(id: String, read_data: bool, repair: Option<bool>)
+        => Call::Check { id, read_data, repair: repair.unwrap_or(false) };
     recovery_kit(id: String) => Call::RecoveryKit { id };
     export_profile(id: String, format: String) => Call::ExportProfile { id, format };
     duplicate_profile(id: String) => Call::DuplicateProfile { id };

@@ -47,11 +47,15 @@ pub struct CheckOptions {
     /// Read every stored byte and verify it.
     pub read_data: bool,
     /// Rebuild what is damaged from its repair data, write damaged repair data again,
-    /// and (if the Vault is written with repair data) add it where it's missing. An
-    /// index that can't be read is written again from the packs; packs that are missing
-    /// or can't be rebuilt leave the index, with what could still be read of them moved
-    /// to a new pack (see [`crate::heal`]).
+    /// and (if the Vault is written with repair data) add it where it's missing. Nothing
+    /// is taken out of the Vault: what can't be rebuilt is reported.
     pub repair: bool,
+    /// With `repair`, for what repair data doesn't put right: an index that can't be read
+    /// is written again from the packs, and packs that are missing or can't be rebuilt
+    /// leave the index (and the Vault), with what could still be read of them moved to a
+    /// new pack (see [`crate::heal`]). Only when asked for: it removes stored data, if
+    /// data that can't be read any more.
+    pub heal: bool,
 }
 
 impl CheckReport {
@@ -71,6 +75,7 @@ pub fn check(
         CheckOptions {
             read_data,
             repair: false,
+            heal: false,
         },
         progress,
         report,
@@ -160,7 +165,7 @@ pub fn check_with(
         Ok(i) => i,
         // An index file that doesn't open and that no repair data rebuilt: the packs
         // say what they hold.
-        Err(e @ (VaultError::Corrupt(_) | VaultError::Crypto(_))) if opts.repair => {
+        Err(e @ (VaultError::Corrupt(_) | VaultError::Crypto(_))) if opts.repair && opts.heal => {
             take_exclusive(repo, &mut lock, &mut exclusive)?;
             let rebuilt = crate::heal::rebuild_index(repo)?;
             r.repaired.push(format!(
@@ -195,11 +200,18 @@ pub fn check_with(
             report,
             &mut r,
         )?;
-        // Packs the index names that aren't there at all.
-        for (pack, blobs) in &layout.by_pack {
-            let hex = hex_id(pack);
-            if !layout.on_disk.contains_key(&hex) {
-                lost.push((hex, format!("it is missing ({} blobs)", blobs.len())));
+        if !opts.heal {
+            // Not asked to take anything out: said as found (the missing packs below).
+            for (name, why) in lost.drain(..) {
+                r.errors.push(format!("pack {name}: {why}"));
+            }
+        } else {
+            // Packs the index names that aren't there at all.
+            for (pack, blobs) in &layout.by_pack {
+                let hex = hex_id(pack);
+                if !layout.on_disk.contains_key(&hex) {
+                    lost.push((hex, format!("it is missing ({} blobs)", blobs.len())));
+                }
             }
         }
         if !lost.is_empty() {

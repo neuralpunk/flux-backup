@@ -237,6 +237,11 @@ pub enum Call {
     Check {
         id: String,
         read_data: bool,
+        /// A Vault: read everything, rebuild what is damaged from its repair data, and
+        /// take what can't be rebuilt out of the index, so the next backup stores it
+        /// again (`flux check --repair`).
+        #[serde(default)]
+        repair: bool,
     },
     RecoveryKit {
         id: String,
@@ -875,7 +880,11 @@ pub fn dispatch(service: &Service, call: Call, notify: &(dyn Fn(Notice) + Sync))
         Call::Runs { id, limit } => json(actions::runs_impl(s, id, limit)?),
         Call::RunEvents { id, run_id } => json(actions::run_events_impl(s, id, run_id)?),
         Call::Prune { id, dry_run } => json(actions::prune_impl(s, id, dry_run)?),
-        Call::Check { id, read_data } => json(actions::check_impl(s, id, read_data)?),
+        Call::Check {
+            id,
+            read_data,
+            repair,
+        } => json(actions::check_impl(s, id, read_data, repair)?),
         Call::RecoveryKit { id } => json(views::recovery_kit_impl(s, id)?),
         Call::Tools => json(views::tools_impl()),
         Call::ExportFormats => json(edit::export_formats_impl()),

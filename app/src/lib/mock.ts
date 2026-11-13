@@ -145,6 +145,9 @@ function demoUnusual() {
     before: s.at(-2)!.id,
   };
 }
+/** `?damage=1`: the Vaults have a stored file damaged past repair until they are
+ * repaired ("taken-out": repaired, and waiting for a backup to store it again). */
+let damage: "none" | "damaged" | "taken-out" = typeof location !== "undefined" && new URLSearchParams(location.search).get("damage") === "1" ? "damaged" : "none";
 /** `?unusual=1`: only Projects' unusual changes (for Flux Sentry's screenshot). */
 let unusualDismissed = !trouble && !(typeof location !== "undefined" && new URLSearchParams(location.search).get("unusual") === "1");
 
@@ -782,6 +785,8 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
       mockRecoveryCode = "3MZ8Q-HT5KW-R2NVD-9CJ4X-PB7FA-6YGE0";
       return { recovery_code: mockRecoveryCode, kept: "keyring", unlock_file: false, unlock_file_dropped: null, removed: (args.remove as string[]).length };
     case "backup_now":
+      // What a repair took out is stored again by the next backup.
+      if (damage === "taken-out") damage = "none";
       if (allProfiles().find((x) => x.id === id)?.running) throw new ApiError("busy", "A backup is already running.");
       if (id === "photos")
         throw new ApiError("not_connected", "Archive isn't connected: nothing is mounted at /run/media/me/Archive. Plug in the drive, then back up again.");
@@ -1134,9 +1139,22 @@ export async function handle(cmd: string, args: Record<string, unknown>): Promis
     case "prune":
       await delay(500);
       return { decisions: [], removed: args.dryRun ? ["2026-09-02_20-00-00"] : [], removed_for_space: [], space_floor_unmet: false, bytes_freed: args.dryRun ? null : 1_840_000_000, dry_run: args.dryRun };
-    case "check":
+    case "check": {
       await delay(args.readData ? 1500 : 600);
-      return { snapshots: snapshots[id]?.length ?? 0, checked: 112_435, bytes_read: args.readData ? 92_000_000_000 : 0, errors: [], warnings: [] };
+      // `?damage=1`: a Vault with a stored file damaged past its repair data, to show
+      // the repair and what follows it.
+      const lost = ["snapshot 4f1c09a2b7e3d815: data of /Documents/taxes/2024.ods is missing (blob 78466a87d0…)", "snapshot 4f1c09a2b7e3d815: data of /Documents/letters/lease.pdf is missing (blob 745101b242…)"];
+      const base = { snapshots: snapshots[id]?.length ?? 0, checked: 112_435, bytes_read: args.readData || args.repair ? 92_000_000_000 : 0, warnings: [] };
+      if (damage !== "none" && profiles.find((p) => p.id === id)?.engine === "vault") {
+        if (args.repair && damage === "damaged") {
+          damage = "taken-out";
+          return { ...base, errors: lost, repaired: ["pack a25a492991462a2f…: contents do not match the pack id; it can't be repaired: too much is damaged. 28 of its 30 pieces still read and were moved to a new pack; the other 2 were taken out of the index, and the next backup stores them again from the files that still have them"] };
+        }
+        if (damage === "damaged" && args.readData) return { ...base, errors: ["pack a25a492991462a2f…: contents do not match the pack id; it can't be repaired: too much is damaged to repair"] };
+        if (damage === "taken-out") return { ...base, errors: lost };
+      }
+      return { ...base, errors: [] };
+    }
     case "tools":
       return tools();
     case "preview_file": {
