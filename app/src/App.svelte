@@ -141,7 +141,7 @@
           <p class="mt-1 text-sm text-fg-2">
             {app.creatingSystem
               ? "Back up the whole computer's settings and folders only root can read. Hooks of system profiles run as root too."
-              : "A few questions, one at a time. You can change everything later."}
+              : "What to back up and where. Flux chooses the rest, and you can change any of it."}
           </p>
         </div>
         {#if app.creatingTemplate === null}

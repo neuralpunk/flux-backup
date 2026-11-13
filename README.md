@@ -143,7 +143,7 @@ the other engines. See the
 | ![What's backed up, and the rule that leaves node_modules out](docs/screenshots/rules-dark.png) | ![The snapshot calendar](docs/screenshots/calendar-dark.png) |
 | ![Storage and recovery readiness](docs/screenshots/storage-dark.png) | ![Exporting a snapshot as an archive](docs/screenshots/archive-dark.png) |
 | ![A backup's settings at a glance](docs/screenshots/glance-dark.png) | ![Every backup's settings side by side](docs/screenshots/table-dark.png) |
-| ![Setting up a backup: should Flux Sentry keep watch?](docs/screenshots/sentry-dark.png) | |
+| ![Setting up a backup: Flux Sentry, chosen for you and one click to change](docs/screenshots/sentry-dark.png) | |
 
 The app (Tauri 2, Svelte 5, Tailwind 4, and the GNOME-style "At home on the desktop" design
 in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
@@ -159,8 +159,9 @@ in [docs/DESIGN.md](docs/DESIGN.md)) does everything the CLI does:
   another folder, with a preview of what would be added, kept aside or replaced.
 - **Activity:** every run with its log, warnings and hook output; a Problems filter and
   **Copy diagnostics** for bug reports.
-- **Setting up a backup:** a short guide, one question per step (what, where, protection,
-  when), a review of every answer, and an offer to run the first backup.
+- **Setting up a backup:** a short guide asks what and where; the rest (how it's stored,
+  when, what to keep, Flux Sentry) is chosen for you and shown on the last screen, one
+  click to change; then an offer to run the first backup.
   Connected USB drives are offered (and tied to their filesystem, so an unplugged drive is
   never mistaken for its empty mount point). Everything else is a row with its current
   value that opens just that group: exclusions with suggestions and real sizes, connection

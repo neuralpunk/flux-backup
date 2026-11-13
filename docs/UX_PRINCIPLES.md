@@ -86,10 +86,14 @@ root problem behind most complaints: **things didn't look like what they were.**
 11. **Answer first.** The start page and each backup's Overview lead with one sentence
     ("4 of 5 backups are protected.") and say what's wrong and what to do in plain words;
     every place that says when a backup runs next uses the same words (`nextRun`).
-12. **New things are set up one question at a time.** A new backup is a wizard (What,
-    Where, Protection, When, Review, then a closing screen offering the first backup); each
-    step says what's still missing before Continue works, and the review links back to every
-    answer. Settings of an existing backup stay on one page. (Added 2026-11-08.)
+12. **New things are set up one question at a time, and only the questions that have no
+    default are asked.** A new backup is a wizard of What, Where and Ready, then a closing
+    screen offering the first backup. What Flux can choose well (how it's stored, when,
+    what to keep, Flux Sentry) isn't a step: Ready lists it under *Chosen for you*, each
+    answer a row that opens in a dialog there. A step says what's still missing before
+    Continue works; a chosen answer that needs something says so on its row. Settings of
+    an existing backup stay on one page. (Added 2026-11-08; four steps folded into Ready
+    2026-11-12: they only ever needed Continue.)
 
 ## Building blocks (app/src)
 

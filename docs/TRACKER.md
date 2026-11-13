@@ -4496,3 +4496,26 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [ ] Left from the review, not asked for: Mirror keeps no checksum unless change
       detection is by checksum; an SSH Mirror's snapshot isn't synced before its rename;
       `config` has no repair data until the first prune or repair; the smaller items
+
+### Phase 168 — A new backup in two questions (2026-11-12)
+- [x] Asked by the owner: streamline setting up a new backup. Walked in the demo
+      (headless Chrome): the template picker, then six steps (What, Where, Protection,
+      When, Flux Sentry, Review), then the closing screen; with a template, four of the
+      six had their answer already and took only *Continue*
+- [x] `ProfileEditor`: the steps are What, Where and Ready. Ready keeps the name and
+      *Your backup* (What, Where: back to their steps) and gains *Chosen for you*: How
+      it's stored (says "not encrypted" for plain folders), When, What to keep, Flux
+      Sentry, each a row opening the former step's content in the editor's dialog
+      (pages `setup-protect`, `setup-when`, `setup-sentry`; `chosenRow`). A chosen
+      answer that needs something (an encrypted Vault's password) says "Still needed: …"
+      on its row, and the footer's "To finish" as before (`stepIssue` over areas, not
+      only steps). A problem in one of them opens its dialog over Ready (`jumpTo`)
+- [x] The header line under *New backup* says what's asked; UX_PRINCIPLES rule 12
+- [x] Checked in the demo, dark and light: both steps, Ready, each of the three dialogs,
+      a Vault chosen without a password (the row and the footer say so, *Create backup*
+      waits), creating a backup to the closing screen. Screenshots `new-dark` and
+      `sentry-dark` retaken (`site/shots.mjs` opens Sentry from Ready)
+- [x] USER_GUIDE, site guide and front page, README, CHANGELOG
+- [x] Checks: svelte-check (0, 0), app tests, Vite build; no Rust changed
+- [ ] Ready is taller than a 780px window: the last two chosen rows and *More options*
+      need a scroll
