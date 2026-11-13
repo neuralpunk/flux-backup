@@ -4604,3 +4604,6 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [ ] Not done: 1.3.0 is still *Unreleased* in the CHANGELOG and has no AppStream
       release entry (both want its date); the download buttons go to the releases page,
       where the newest is 1.2.1 until it's published
+- [x] Asked by the owner afterwards: the front page keeps only *New in 1.3* (the 1.2,
+      1.1 and 1.0 chips are gone; the changelog link stays), and its chips are
+      rewritten in plainer English. Rendered and looked at

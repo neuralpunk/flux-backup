@@ -196,81 +196,26 @@ flux recover /run/media/$USER/Backup</code></pre>
       </div>
     </section>
 
-    <!-- New in 1.3, then 1.2, 1.1 and 1.0 -->
+    <!-- New in 1.3 -->
     <section class="section wrap" id="new" aria-labelledby="new-title">
       <h2 class="r" id="new-title">New in 1.3.</h2>
-      <p class="lead r">Speed: the same work with less of the computer, so a backup runs as fast as its drive allows. And a damaged Vault can be put right.</p>
+      <p class="lead r">This release is about speed. Flux does the same work with less of your computer, so a backup runs as fast as its drive allows. Damaged Vaults can now be repaired, too.</p>
       <div class="chips r">
-        <span>Vault backups<em>a third of the processor time</em></span>
-        <span>First Vault backup<em>0.97 s, was 1.73</em></span>
-        <span>AES encryption<em>five times as fast</em></span>
-        <span>Writes while it reads<em>straight to the drive</em></span>
-        <span>Photos, video, archives<em>not compressed for nothing</em></span>
-        <span>Large files<em>read faster</em></span>
-        <span>Faster restores<em>from a Vault</em></span>
+        <span>Faster Vault backups<em>a third of the CPU time</em></span>
+        <span>First Vault backup<em>0.97 s, down from 1.73 s</em></span>
+        <span>AES encryption<em>five times faster</em></span>
+        <span>Background writes<em>reading never waits for the drive</em></span>
+        <span>Smarter compression<em>skips photos, video and archives</em></span>
+        <span>Large files<em>read 45% faster</em></span>
+        <span>Faster restores<em>read-ahead, parallel decryption</em></span>
         <span>Faster pruning</span>
-        <span>A slow drive<em>said, with the fix</em></span>
-        <span>Three questions<em>to set up a backup</em></span>
-        <span>Encryption on or off<em>for a Vault</em></span>
-        <span>Repair<em>a damaged Vault heals from your files</em></span>
-        <span>Pruning<em>never makes damage permanent</em></span>
-        <span>Copies<em>don't follow a backup into damage</em></span>
-        <span>What's chosen<em>seen at a glance</em></span>
-      </div>
-      <h3 class="r" style="margin-top:2.5rem">And in 1.2</h3>
-      <p class="lead r">Getting a file back starts where it was lost, a lost password is no longer the end, and more fits on the screen.</p>
-      <div class="chips r">
-        <span>Previous versions<em>right-click in Files</em></span>
-        <span>Restore deleted files here</span>
-        <span>Leave out, back up<em>right-click too</em></span>
-        <span>Browse in Files<em>any snapshot</em></span>
-        <span>Recovery code<em>for a lost password</em></span>
-        <span>Compact<em>the Overview on one screen</em></span>
-        <span>Preview<em>before restoring</em></span>
-        <span>Undo<em>deleted snapshots</em></span>
-        <span>Safe to unplug</span>
-        <span>Failing drive<em>warned in time</em></span>
-        <span>Notifications<em>with buttons</em></span>
-        <span>Quiet hours</span>
-        <span>Time left<em>everywhere</em></span>
-        <span>Your accent colour</span>
-        <span>Delete several<em>at once</em></span>
-        <span>Sizes<em>next to every folder</em></span>
-        <span>.gitignore<em>skip what git skips</em></span>
-        <span>A weekly note<em>when all is well</em></span>
-        <span>Sizes hidden<em>new Vaults</em></span>
-      </div>
-      <h3 class="r" style="margin-top:2.5rem">And in 1.1</h3>
-      <p class="lead r">What was there, made clearer, safer and quicker to use, and three things that put numbers behind what a backup promises.</p>
-      <div class="chips r">
-        <span>Flux Sentry<em>learns each backup's normal</em></span>
-        <span>Repair data<em>damage undone, not just found</em></span>
-        <span>Restore tests<em>with a stated confidence</em></span>
-        <span>Restore tests<em>nothing written anywhere</em></span>
-        <span>Settings at a glance</span>
-        <span>Every backup<em>side by side</em></span>
-        <span>Checklist<em>a button for each</em></span>
-        <span>Statuses that agree</span>
-        <span>Times as you write them<em>12 or 24 h</em></span>
-        <span>Custom times<em>previewed</em></span>
-        <span>Stays in the tray</span>
-        <span>Man pages<em>with examples</em></span>
-      </div>
-      <h3 class="r" style="margin-top:2.5rem">And in 1.0</h3>
-      <p class="lead r">Version 1.0 is about the day you need your backups: on another computer, without Flux, or years from now.</p>
-      <div class="chips r">
-        <span>Recover anywhere<em>new computer, no Flux</em></span>
-        <span>Several places<em>one offsite</em></span>
-        <span>Restore tests<em>scheduled</em></span>
-        <span>Ransomware watch<em>now Flux Sentry</em></span>
-        <span>Webhooks<em>ntfy, Gotify</em></span>
-        <span>Templates</span>
-        <span>Rule tester</span>
-        <span>Archives<em>.tar.zst, .zip</em></span>
-        <span>Calendar</span>
-        <span>Stronger Vault keys</span>
-        <span>Sparse files</span>
-        <span>Formats frozen<em>1.x</em></span>
+        <span>Slow-drive warnings<em>with the command that fixes it</em></span>
+        <span>Three-step setup<em>what, where and how it's stored</em></span>
+        <span>Optional encryption<em>on or off for each Vault</em></span>
+        <span>Vault repair<em>re-stores damaged data from your files</em></span>
+        <span>Safer pruning<em>damaged data is repaired first</em></span>
+        <span>Safer copies<em>damage never spreads to a second copy</em></span>
+        <span>Clearer choices<em>the selected option is highlighted</em></span>
       </div>
       <a class="more-link r" href="https://github.com/neuralpunk/flux-backup/blob/main/CHANGELOG.md">Everything in the changelog</a>
     </section>
