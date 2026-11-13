@@ -4607,3 +4607,9 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [x] Asked by the owner afterwards: the front page keeps only *New in 1.3* (the 1.2,
       1.1 and 1.0 chips are gone; the changelog link stays), and its chips are
       rewritten in plainer English. Rendered and looked at
+
+### Phase 172 — Release 1.3.0 (2026-11-12)
+- [x] By the owner's word. CHANGELOG's 1.3.0 dated 2026-11-12, its summary widened to the
+      repair, the encryption choice and the setup, and its compare link ends at `v1.3.0`;
+      an AppStream 1.3.0 entry (`appstreamcli validate` passes). The version was already
+      1.3.0 everywhere
