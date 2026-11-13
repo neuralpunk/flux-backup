@@ -2491,6 +2491,24 @@ fn replicate_to(
                     flux_core::ByteSize(r.copied_bytes).display_approx()
                 ),
             });
+            if r.damaged_packs > 0 {
+                report(Event::Warning {
+                    path: String::new(),
+                    message: format!(
+                        "{} stored files of the Vault are damaged; the copy at {label} kept its own where it had them. Check the Vault: flux check {} --read-data",
+                        r.damaged_packs, main.id
+                    ),
+                });
+            }
+            if r.kept_packs > 0 {
+                report(Event::Warning {
+                    path: String::new(),
+                    message: format!(
+                        "{} stored files that the Vault still counts on are missing from it (they weren't removed by a prune); they were kept in the copy at {label}. Check the Vault: flux check {}",
+                        r.kept_packs, main.id
+                    ),
+                });
+            }
         }
         Engine::Mirror | Engine::Rsync => {
             let root = |id: &ProfileId,

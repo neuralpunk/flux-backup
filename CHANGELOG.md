@@ -80,6 +80,14 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   could have fixed it were deleted. A prune now checks each pack before moving anything
   out of it: a damaged one is rebuilt from its repair data first, and one that can't be
   rebuilt is left exactly as it is, and reported.
+- **A copy of a backup no longer follows it into damage.** A place that *copies the
+  first backup* removed whatever the first backup no longer had, and copied a Vault's
+  stored files without checking them. So a stored file that went missing from the Vault
+  (a damaged filesystem, a folder deleted by hand) was deleted from the copy too, and a
+  damaged one could replace the copy's good one. Now a Vault's stored files are checked
+  as they are copied, and a damaged one never replaces the copy's own. Files the Vault
+  has lost, as opposed to pruned, stay in the copy, with a warning to check the Vault.
+  A Mirror or rsync backup that has lost every snapshot no longer empties its copy.
 
 ## [1.2.1] - 2026-11-12
 

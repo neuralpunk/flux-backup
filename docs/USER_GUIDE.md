@@ -393,7 +393,11 @@ What to back up, when, and what to keep are shared by all places.
 **Copy the first backup**: your files are read once, for the first place, and the new
 snapshots are then copied over. The copy holds exactly the same snapshots, stored the same
 way, and a Vault copy opens with the same password (it is the same Vault). Snapshots
-removed from the first place are removed from the copy too. Copying is faster and puts
+removed from the first place are removed from the copy too; damage isn't copied. A
+stored file of a Vault that the drive has damaged never replaces the copy's own, and one
+that has gone missing from the Vault (not removed by a prune) is kept in the copy, with a
+warning to check the Vault. A Mirror or rsync backup that has lost all its snapshots
+leaves its copy alone. Copying is faster and puts
 less load on your disks; reading the files again for each place (the default) keeps the
 copies independent, so a fault in the first backup can't reach the second. A Vault can be
 copied anywhere (a drive or a server); plain-folder backups (Mirror, rsync) between drives

@@ -323,7 +323,19 @@ them), keys, and `config` last. The index files and snapshot records to copy are
 before the packs are, so a backup finishing on the source meanwhile is left whole for the
 next replication. Then it removes what the source no longer has: snapshot records, index
 files, packs, keys, in that order, after reading the source's `config` again: if it is
-gone or different (the drive was pulled out), nothing is removed. An interrupted replication leaves a copy
+gone or different (the drive was pulled out), nothing is removed.
+
+Damage isn't copied. A pack is read whole to be copied, and checked against its name: a
+damaged one never replaces a pack of that name in the copy (whatever its size), and where
+the copy has none it is copied with its parity file, which may rebuild it there. Packs
+(and their parity files) that the source no longer has are removed from the copy only if
+at least one index file the copy held before this replication is gone from the source:
+a prune, the only thing that removes packs, always writes a new index file and removes
+the old ones. If all of them are still there, the missing packs were lost, the index
+still names them, and the copy keeps its own. A copy with no index file yet (a first
+replication cut short) has nothing that names its packs, and follows the source.
+
+An interrupted replication leaves a copy
 that is still readable, and the next one finishes it. A place that holds a different
 Vault (another repository id) is never written to.
 

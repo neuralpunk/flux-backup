@@ -90,6 +90,17 @@ pub fn replicate(
 
     let have = snapshot_names(source)?;
     let mut there = snapshot_names(replica)?;
+    // A backup always keeps its newest snapshot, so one with none at all, whose copy has
+    // some, lost them (its folder emptied, a damaged filesystem): the copy is then all
+    // there is, and is not brought into line.
+    if have.is_empty() && !there.is_empty() {
+        return Err(MirrorError::Corrupt(format!(
+            "{} holds no snapshots, but its copy at {} holds {}; nothing was removed from the copy. (If they were deleted on purpose, delete the copy's by hand.)",
+            source.display(),
+            replica.display(),
+            there.len()
+        )));
+    }
     let mut out = ReplicaOutcome::default();
     let partial = replica.join("snapshots").join(REPLICA_PARTIAL);
     // A copy that lost its last-written files (a drive pulled out before they reached
@@ -351,6 +362,44 @@ mod tests {
         assert_eq!(
             fs::read_to_string(rep.join("snapshots/2026-11-02/data/a")).unwrap(),
             "same"
+        );
+    }
+
+    /// A backup that has lost every snapshot (its folder emptied, a damaged filesystem)
+    /// doesn't empty its copy.
+    #[test]
+    fn a_source_without_snapshots_does_not_empty_its_copy() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, rep) = (t.path().join("src"), t.path().join("rep"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join(REPO_MARKER),
+            "format = 1\nengine = \"mirror\"\nprofile = \"home\"\nhost = \"h\"\nuser = \"u\"\ncreated = \"2026-11-09T00:00:00Z\"\n",
+        )
+        .unwrap();
+        snap(&src, "2026-11-01", &[("a", "alpha")], None);
+        let p = Progress::new();
+        let none = XattrPolicy {
+            acl: false,
+            other: false,
+        };
+        let run = || {
+            replicate(
+                &src,
+                &rep,
+                "home+usb",
+                none,
+                &p,
+                &flux_core::progress::silent,
+            )
+        };
+        assert_eq!(run().unwrap().copied, ["2026-11-01"]);
+        remove_force(&src.join("snapshots/2026-11-01")).unwrap();
+        let err = run().unwrap_err().to_string();
+        assert!(err.contains("nothing was removed from the copy"), "{err}");
+        assert_eq!(
+            fs::read_to_string(rep.join("snapshots/2026-11-01/data/a")).unwrap(),
+            "alpha"
         );
     }
 

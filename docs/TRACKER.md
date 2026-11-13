@@ -4426,3 +4426,31 @@ The item phase 107 left: the sources were scanned for the look and again for the
       snapshot still deleted, the check names the pack
 - [x] VAULT_FORMAT (crash safety), USER_GUIDE (*Repair data*), CHANGELOG (1.3.0, Fixed)
 - [x] Checks: `cargo fmt`, clippy on flux-vault (clean), flux-vault tests (70 pass)
+
+### Phase 166 — A copy doesn't follow the backup into damage (2026-11-12)
+- [x] Second finding of the engine review (from reading; now under test). A Vault's
+      replication removed from the copy every pack the source no longer listed, guarded
+      only by `config` still reading: a pack lost from the source was deleted from the
+      copy as well, though the index still named it. Packs were copied unchecked (their
+      name is their hash, and the bytes are in memory), and one of another size replaced
+      the copy's. Mirror/rsync: a source with no snapshots emptied the copy
+- [x] `flux-vault/replicate.rs`: a pack is checked against its name as it is copied; a
+      damaged one never replaces a pack the copy has, and is copied (with its parity)
+      only where the copy has none. Packs and their parity gone from the source are
+      removed from the copy only if an index file the copy held is gone from the source
+      (a prune always replaces the index; `gc_locked` writes a new one whenever it
+      deletes, repacks or finds orphans); a copy with no index yet follows the source.
+      `VaultReplica`: `damaged_packs`, `kept_packs`; the runner warns for each, with
+      the `flux check` to run
+- [x] `flux-mirror/replicate.rs`: a source with no snapshots whose copy has some is an
+      error, and nothing is removed
+- [x] Tests: the copy keeps a pack the Vault lost (and still checks clean and reads
+      back), then follows a prune; a pack cut short doesn't replace the copy's, and a
+      new copy takes the damaged pack with its parity and repairs it; a Mirror source
+      without snapshots doesn't empty its copy. The existing replica tests pass unchanged
+- [x] USER_GUIDE (*Several places at once*), VAULT_FORMAT (*Copies*), CHANGELOG
+- [x] Checks: fmt, clippy (flux-vault, flux-mirror, flux-runner: clean), tests of the
+      three crates
+- [ ] Not done: a Mirror copy can't tell snapshots lost at the source from snapshots
+      pruned there (only the all-gone case is caught); the Vault isn't healed from its
+      copy (the warning says to check it; the packs can be copied back by hand)

@@ -7,6 +7,18 @@
 //! records, index, packs): an interrupted replication leaves a replica that is still
 //! readable, and the next one finishes it. The source is read under its shared lock (no
 //! prune meanwhile); the replica is written under its exclusive lock.
+//!
+//! A copy is there for when the Vault is damaged, so damage must not travel to it:
+//!
+//! * A pack is copied only as what its name says (its BLAKE3; the bytes are in hand
+//!   anyway). A damaged one never replaces a pack the copy has; where the copy has none
+//!   it is copied all the same, with its repair data, which may rebuild it there.
+//! * A pack the Vault no longer has is removed from the copy only if the Vault's index
+//!   was replaced since the copy was last brought up to date. Packs go when a prune
+//!   deletes or repacks them, and a prune always writes a new index and removes the old
+//!   files. Packs gone while every index file the copy knows is still in the Vault were
+//!   lost, not pruned (a damaged filesystem, a folder deleted by hand): the index still
+//!   counts on them, and the copy's may be the only ones left.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -23,6 +35,11 @@ pub struct VaultReplica {
     pub removed_files: u64,
     /// Snapshots the replica holds now.
     pub snapshots: u64,
+    /// Packs of the source that are damaged (their bytes aren't their name). None of
+    /// them replaced a pack the replica had.
+    pub damaged_packs: u64,
+    /// Packs missing from the source that its index still counts on: kept in the replica.
+    pub kept_packs: u64,
 }
 
 fn locked(b: &dyn Backend, exclusive: bool) -> Result<LockGuard, VaultError> {
@@ -100,10 +117,32 @@ pub fn replicate(
     let have_snapshots = names(source, "snapshots")?;
     let have_packs = names(source, "data")?;
     let there_packs = names(replica, "data")?;
+    // The copy's index files as they were when it was last brought up to date (see the
+    // removals below).
+    let there_index = names(replica, "index")?;
     for (name, size) in &have_packs {
-        if !there_packs.iter().any(|(n, s)| n == name && s == size) {
-            copy(&pack_path(name), true, &mut out)?;
+        if there_packs.iter().any(|(n, s)| n == name && s == size) {
+            continue;
         }
+        if progress.is_cancelled() {
+            return Err(VaultError::Cancelled);
+        }
+        let path = pack_path(name);
+        let data = source.read(&path).map_err(|e| VaultError::io(&path, e))?;
+        if !crate::protect::pack_is_sound(name, &data) {
+            out.damaged_packs += 1;
+            // The copy's own pack of this name is better than a damaged one, whatever
+            // its size (the source's may have been cut short).
+            if there_packs.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+        }
+        replica
+            .write_pack(&path, &data)
+            .map_err(|e| VaultError::io(&path, e))?;
+        out.copied_files += 1;
+        out.copied_bytes += data.len() as u64;
+        progress.bytes_done.fetch_add(data.len() as u64, Relaxed);
     }
     // Their repair data (a parity file is its pack's, by name: it never changes either).
     let par_data = crate::protect::path_for("data");
@@ -193,6 +232,14 @@ pub fn replicate(
         }
         Err(e) => return Err(VaultError::io("config", e)),
     }
+    // Packs are only ever removed from a Vault by a prune, which replaces its index
+    // files. If every index file the copy had is still in the Vault, no prune ran, and
+    // packs that are gone from the Vault were lost: they stay in the copy.
+    let index_now = names(source, "index")?;
+    let pruned_since = there_index.is_empty()
+        || there_index
+            .iter()
+            .any(|(n, _)| !index_now.iter().any(|(m, _)| m == n));
     let par = crate::protect::path_for;
     for dir in [
         "snapshots".to_owned(),
@@ -208,6 +255,12 @@ pub fn replicate(
         let have = names(source, dir)?;
         for (name, _) in names(replica, dir)? {
             if !have.iter().any(|(n, _)| *n == name) {
+                if !pruned_since && (dir == "data" || dir == par_data) {
+                    if dir == "data" {
+                        out.kept_packs += 1;
+                    }
+                    continue;
+                }
                 let path = if dir == "data" {
                     pack_path(&name)
                 } else if dir == par_data {

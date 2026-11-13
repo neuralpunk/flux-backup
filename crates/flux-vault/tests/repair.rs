@@ -705,3 +705,85 @@ fn a_damaged_pack_beyond_repair_is_left_as_it_is() {
         found.errors
     );
 }
+
+fn copy_to(repo: &VaultRepo, root: &Path) -> flux_vault::replicate::VaultReplica {
+    flux_vault::replicate::replicate(repo.backend(), &LocalBackend::new(root), &Progress::new())
+        .unwrap()
+}
+
+fn open_at(root: &Path) -> VaultRepo {
+    VaultRepo::open(Box::new(LocalBackend::new(root)), Some(PW)).unwrap()
+}
+
+/// A pack that goes missing from the Vault without a prune (a damaged filesystem, a
+/// folder deleted by hand) is not removed from the copy: the Vault's index still counts
+/// on it, and the copy's may be the last one there is. What a prune removes still goes.
+#[test]
+fn a_copy_keeps_the_packs_the_vault_lost() {
+    let e = env();
+    let (repo, first, second) = vault_with_a_pack_to_repack(&e, 5);
+    let copy_root = e.tmp.path().join("usb/flux-vault");
+    copy_to(&repo, &copy_root);
+    let victim = e.biggest_pack();
+    let in_copy = copy_root.join(victim.strip_prefix(&e.root).unwrap());
+    let par_in_copy = copy_root
+        .join("parity")
+        .join(victim.strip_prefix(&e.root).unwrap());
+    assert!(in_copy.is_file() && par_in_copy.is_file());
+
+    fs::remove_file(&victim).unwrap();
+    fs::remove_file(parity_of(&e, &victim)).unwrap();
+    let r = copy_to(&repo, &copy_root);
+    assert_eq!((r.kept_packs, r.removed_files), (1, 0), "{r:?}");
+    assert!(in_copy.is_file() && par_in_copy.is_file());
+    let copy = open_at(&copy_root);
+    assert!(full(&copy).ok(), "the copy still restores everything");
+    assert_eq!(e.read_all(&copy, &second).len(), 6);
+
+    // Put back, then pruned: the index is replaced, and the copy follows.
+    fs::copy(&in_copy, &victim).unwrap();
+    gc::delete(&repo, &[first.as_str()], &silent).unwrap();
+    assert!(!victim.exists(), "repacked by the prune");
+    let r = copy_to(&repo, &copy_root);
+    assert!(r.kept_packs == 0 && r.removed_files > 0, "{r:?}");
+    assert!(!in_copy.exists());
+    assert!(full(&open_at(&copy_root)).ok());
+}
+
+/// A damaged pack in the Vault never replaces the copy's own. Where the copy has none, it
+/// is copied with its repair data, and can be rebuilt there.
+#[test]
+fn a_damaged_pack_never_replaces_the_copys() {
+    let e = env();
+    fs::write(e.src.join("a"), noise(4 << 20, 1)).unwrap();
+    let repo = e.init(Some(PW), 5);
+    e.snap(&repo);
+    let copy_root = e.tmp.path().join("usb/flux-vault");
+    copy_to(&repo, &copy_root);
+    let victim = e.biggest_pack();
+    let in_copy = copy_root.join(victim.strip_prefix(&e.root).unwrap());
+    let good = fs::read(&victim).unwrap();
+
+    // Cut short: another size than the copy's, which was copied over before.
+    damage(&victim, |b| b.truncate(b.len() - 100));
+    let r = copy_to(&repo, &copy_root);
+    assert_eq!(r.damaged_packs, 1, "{r:?}");
+    assert!(
+        fs::read(&in_copy).unwrap() == good,
+        "the copy's own is kept"
+    );
+    assert!(full(&open_at(&copy_root)).ok());
+
+    // A new copy has no pack of its own: it takes the damaged one and its repair data.
+    damage(&victim, |b| {
+        *b = good.clone();
+        b[good.len() / 2] ^= 0x10;
+    });
+    let second_root = e.tmp.path().join("nas/flux-vault");
+    let r = copy_to(&repo, &second_root);
+    assert_eq!(r.damaged_packs, 1, "{r:?}");
+    let second = open_at(&second_root);
+    assert_eq!(full(&second).repairable, 1);
+    assert!(repair(&second).ok());
+    assert!(fs::read(second_root.join(victim.strip_prefix(&e.root).unwrap())).unwrap() == good);
+}
