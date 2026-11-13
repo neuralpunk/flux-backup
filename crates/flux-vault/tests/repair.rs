@@ -93,6 +93,24 @@ impl Env {
             o => panic!("expected a snapshot: {o:?}"),
         }
     }
+    /// A backup that may find nothing changed.
+    fn snap_or_unchanged(&self, repo: &VaultRepo) {
+        backup(
+            repo,
+            &BackupRequest {
+                owner: &self.owner,
+                profile: &self.profile,
+                name: None,
+                dry_run: false,
+                never: vec![self.root.clone()],
+                cache_dir: Some(self.tmp.path().join("cache")),
+                keep: Vec::new(),
+            },
+            &Progress::new(),
+            &silent,
+        )
+        .unwrap();
+    }
     /// Files under a directory of the Vault, two levels deep for `data`.
     fn files(&self, dir: &str) -> Vec<PathBuf> {
         fn walk(p: &Path, out: &mut Vec<PathBuf>) {
@@ -239,16 +257,30 @@ fn damaged_packs_are_rebuilt() {
     assert!(after.ok() && after.repaired.is_empty() && after.warnings.is_empty());
     assert!(e.read_all(&repo, &snap) == before);
 
-    // Too much: half the pack gone. Said plainly, and the pack is left as it is.
+    // Too much: half the pack gone. What still reads of it is moved to a new pack, the
+    // rest leaves the index, and the check says which files that costs.
     damage(&victim, |b| b.truncate(b.len() / 2));
     let lost = repair(&repo);
-    assert!(!lost.ok() && lost.repaired.is_empty(), "{lost:?}");
+    assert!(!lost.ok(), "{lost:?}");
     assert!(
-        lost.errors.iter().any(|m| m.contains("can't be repaired")),
+        lost.repaired.len() == 1 && lost.repaired[0].contains("taken out of the index"),
+        "{:?}",
+        lost.repaired
+    );
+    assert!(
+        lost.errors.iter().all(|m| m.contains("is missing")),
         "{:?}",
         lost.errors
     );
-    assert_eq!(fs::read(&victim).unwrap().len(), original.len() / 2);
+    assert!(!victim.exists() && !parity_of(&e, &victim).exists());
+
+    // The files are still there: the next backup stores what was lost again, and the
+    // snapshot from before the damage reads back whole too.
+    let again = e.snap(&repo);
+    let healed = full(&repo);
+    assert!(healed.ok(), "{:?}", healed.errors);
+    assert!(e.read_all(&repo, &snap) == before);
+    assert!(e.read_all(&repo, &again) == before);
 }
 
 #[test]
@@ -786,4 +818,129 @@ fn a_damaged_pack_never_replaces_the_copys() {
     assert_eq!(full(&second).repairable, 1);
     assert!(repair(&second).ok());
     assert!(fs::read(second_root.join(victim.strip_prefix(&e.root).unwrap())).unwrap() == good);
+}
+
+/// A Vault with no repair data at all heals the same way: a damaged pack and a missing
+/// one leave the index on a repair, and the next backup stores their data again. Before,
+/// every later backup found the data "already stored" and made snapshots that counted on
+/// it, for as long as the Vault lived.
+#[test]
+fn a_vault_heals_from_the_files_that_are_still_there() {
+    let e = env();
+    for i in 0..5 {
+        fs::write(e.src.join(format!("f{i}")), noise(700 << 10, i + 1)).unwrap();
+    }
+    let repo = e.init(Some(PW), 0);
+    let first = e.snap(&repo);
+    let before = e.read_all(&repo, &first);
+    let victim = e.biggest_pack();
+    let len = fs::metadata(&victim).unwrap().len() as usize;
+    damage(&victim, |b| b[len / 2] ^= 0x01);
+
+    // Found, and not healed by backing up again: the index still has every blob.
+    assert!(!full(&repo).ok());
+    for i in 0..5 {
+        fs::write(e.src.join(format!("f{i}")), noise(700 << 10, i + 1)).unwrap();
+    }
+    fs::write(e.src.join("new"), b"something changed").unwrap();
+    e.snap(&repo);
+    assert!(!full(&repo).ok(), "no backup stores what the index has");
+
+    // Repaired: one blob is gone, the others of the pack were saved.
+    let r = repair(&repo);
+    assert_eq!(r.repaired.len(), 1, "{:?}", r.repaired);
+    assert!(
+        r.repaired[0].contains("the other 1 were taken out"),
+        "{:?}",
+        r.repaired
+    );
+    assert!(
+        !r.ok() && r.errors.iter().all(|m| m.contains("is missing")),
+        "{:?}",
+        r.errors
+    );
+    assert!(!victim.exists());
+    let third = e.snap(&repo);
+    let healed = full(&repo);
+    assert!(healed.ok(), "{:?}", healed.errors);
+    assert!(e.read_all(&repo, &first) == before);
+    assert_eq!(e.read_all(&repo, &third).len(), 6);
+
+    // A pack that is gone altogether.
+    fs::remove_file(e.biggest_pack()).unwrap();
+    let r = repair(&repo);
+    assert!(
+        r.repaired.iter().any(|m| m.contains("it is missing")),
+        "{:?}",
+        r.repaired
+    );
+    assert!(!r.ok());
+    e.snap_or_unchanged(&repo);
+    assert!(full(&repo).ok());
+    assert!(e.read_all(&repo, &first) == before);
+}
+
+/// What the files no longer have stays lost, and the check goes on saying where: the
+/// snapshot that had it, by file. Snapshots made since are whole.
+#[test]
+fn what_is_gone_from_the_files_too_stays_reported() {
+    let e = env();
+    fs::write(e.src.join("kept"), noise(600 << 10, 1)).unwrap();
+    fs::write(e.src.join("deleted"), noise(600 << 10, 2)).unwrap();
+    let repo = e.init(Some(PW), 0);
+    let first = e.snap(&repo);
+    fs::remove_file(e.biggest_pack()).unwrap();
+    fs::remove_file(e.src.join("deleted")).unwrap();
+    assert!(!repair(&repo).ok());
+    let second = e.snap(&repo);
+    let r = full(&repo);
+    assert!(
+        r.errors.len() == 1 && r.errors[0].contains(&first) && r.errors[0].contains("/deleted"),
+        "{:?}",
+        r.errors
+    );
+    assert_eq!(e.read_all(&repo, &second).len(), 1);
+}
+
+/// An index file that doesn't open, in a Vault without repair data: a repair writes the
+/// index again from the packs' own lists, and everything reads as before.
+#[test]
+fn an_unreadable_index_is_rebuilt_from_the_packs() {
+    let e = env();
+    fs::write(e.src.join("a"), noise(2 << 20, 1)).unwrap();
+    let repo = e.init(Some(PW), 0);
+    let first = e.snap(&repo);
+    fs::write(e.src.join("b"), noise(2 << 20, 2)).unwrap();
+    let second = e.snap(&repo);
+    let before = (e.read_all(&repo, &first), e.read_all(&repo, &second));
+    let index_files = e.files("index");
+    assert_eq!(index_files.len(), 2);
+    damage(&index_files[0], |b| {
+        let at = b.len() / 2;
+        b[at] ^= 0x40;
+    });
+    repo.invalidate_index();
+    assert!(check(&repo, false, &Progress::new(), &silent).is_err());
+
+    let r = repair(&repo);
+    assert!(r.ok(), "{:?}", r.errors);
+    assert!(
+        r.repaired
+            .iter()
+            .any(|m| m.contains("written again from the")),
+        "{:?}",
+        r.repaired
+    );
+    assert_eq!(e.files("index").len(), 1);
+    assert!((e.read_all(&repo, &first), e.read_all(&repo, &second)) == before);
+    assert!(full(&repo).ok());
+    // And a backup after it stores nothing twice.
+    let packs = e.files("data").len();
+    fs::write(e.src.join("c"), b"small").unwrap();
+    e.snap(&repo);
+    assert_eq!(
+        e.files("data").len(),
+        packs + 2,
+        "one data pack, one of trees"
+    );
 }

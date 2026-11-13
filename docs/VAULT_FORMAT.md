@@ -312,6 +312,27 @@ file wherever they are, any one run of up to `m·G` blocks (about `p` percent of
 file), and usually much more scattered damage. What it doesn't: a file that is missing,
 or damaged beyond that. A copy in another place is for those.
 
+## Healing
+
+A backup stores a blob only if no index file names it, and takes an unchanged file's
+blobs from the snapshot before without reading the file. A blob that is named but can't
+be read (its pack is damaged past its repair data, has none, or is gone) would therefore
+never be stored again. A repairing check (`flux check --repair`) deals with what repair
+data doesn't, under the exclusive lock:
+
+* **Lost packs** (missing, or failing their check and not rebuilt): each of their blobs
+  that still decodes and has its id is copied, sealed as it is, to a new pack; the others
+  are left out. A new index file names everything that remains and supersedes every
+  other; then the old index files and the lost packs (with their parity files) are
+  removed, in a prune's order. The next backup finds those blobs unlisted, reads the
+  files that had them and stores them: under the same ids, so older snapshots whose
+  files are unchanged are whole again. A check lists what is still missing, by snapshot
+  and file.
+* **An index file that doesn't open:** a new index file is written from every pack's own
+  header (a pack whose header can't be read is left out and reported), superseding all
+  the others. It names every blob in every pack, including ones no snapshot uses; the
+  next prune drops those.
+
 ## Copies (replicas)
 
 A copy of a Vault is the same repository in another place: `config`, `keys/`, `index/`,

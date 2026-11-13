@@ -1285,7 +1285,7 @@ key…**, which does it for you. **Without the passphrase, the data can't be dec
 ```sh
 flux check home              # structure: every snapshot complete, every file accounted for
 flux check home --read-data  # also read and verify every byte (slow)
-flux check home --repair     # Vaults with repair data: and rebuild what is damaged
+flux check home --repair     # Vaults: and rebuild what is damaged, or let the next backup store it again
 ```
 
 Three checks, each answering one question, from quickest to most thorough. On a backup's
@@ -1327,6 +1327,22 @@ Verifying every byte also adds repair data to what was stored before the setting
 on (it reads everything anyway), and writes again repair data that is itself damaged.
 The storage summary on the Overview says how much there is and whether it covers
 everything.
+
+**Damage that can't be rebuilt** (too much of it, a stored file that is gone, or a Vault
+with no repair data). A backup stores only what the Vault doesn't already list, so data
+the Vault lists but can no longer read would never be stored again: every later snapshot
+would count on it. `flux check home --repair` takes it off the list, keeping every piece
+that still reads, and the next backup stores it again from your files. That also puts
+older snapshots right, wherever the file is still as it was. Check again afterwards:
+what it still reports is gone from your files too (a file changed or deleted since), and
+it says which files of which snapshots. If the Vault's index itself can't be read, the
+repair writes it again from the stored files, which each list what they hold.
+
+```sh
+flux check home --repair          # take out what can't be rebuilt
+flux backup home                  # store it again from the files
+flux check home --read-data       # what is left, if anything, is gone for good
+```
 
 Removing old snapshots checks what it moves, too. When a prune copies the pieces still
 needed out of a mostly unused pack, it first makes sure the pack is undamaged; a damaged

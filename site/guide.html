@@ -479,7 +479,7 @@ flux key remove docs &lt;key-id&gt;</code></pre></div>
           <h2>Checking your backups <a class="anchor" href="#checking-your-backups" aria-label="Link to this section">#</a></h2>
 <div class="code"><pre><code data-lang="sh">flux check home              # structure: every snapshot complete, every file accounted for
 flux check home --read-data  # also read and verify every byte (slow)
-flux check home --repair     # Vaults with repair data: and rebuild what is damaged</code></pre></div>
+flux check home --repair     # Vaults: and rebuild what is damaged, or let the next backup store it again</code></pre></div>
 <p>Three checks, each answering one question, from quickest to most thorough. On a backup's Overview they're together under <em>Checks and upkeep</em>:</p>
 <div class="table-wrap"><table>
 <thead><tr><th scope="col">Question</th><th scope="col">Check</th><th scope="col">What it reads</th></tr></thead>

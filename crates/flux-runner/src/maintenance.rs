@@ -112,7 +112,7 @@ pub fn after_backup(
                         desktop::notify_with(
                             &format!("Damage in the backups of “{}” was repaired", p.name),
                             &format!(
-                                "{} damaged files were rebuilt from their repair data. The drive may be failing: see Flux Backup › Activity.",
+                                "{} repairs were made to what the drive had damaged. The drive may be failing: see Flux Backup › Activity.",
                                 c.repaired.len()
                             ),
                             Urgency::Normal,

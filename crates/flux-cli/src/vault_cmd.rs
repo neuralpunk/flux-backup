@@ -20,8 +20,10 @@ pub struct CheckArgs {
     /// Also read every stored byte and verify it (slow; reads the whole backup).
     #[arg(long)]
     pub read_data: bool,
-    /// Vaults with repair data: read every stored byte, rebuild what is damaged from its
-    /// repair data, and add repair data to what lacks it (implies --read-data).
+    /// Vaults: read every stored byte and rebuild what is damaged from the repair data,
+    /// if the Vault keeps any (and add repair data to what lacks it). What can't be
+    /// rebuilt is taken out of the index, so the next backup stores it again from the
+    /// files that still have it (implies --read-data).
     #[arg(long)]
     pub repair: bool,
 }
@@ -135,6 +137,17 @@ pub fn run_check(ctx: &Ctx, mut args: CheckArgs) -> anyhow::Result<ExitCode> {
                 "  {} of them can be rebuilt from the repair data: flux check {} --repair",
                 group(r.repairable),
                 args.profile
+            );
+        }
+        if repo.engine() == Engine::Vault && !args.repair && r.errors.len() as u64 > r.repairable {
+            println!(
+                "  What can't be rebuilt can be stored again from your files: flux check {} --repair, then back up",
+                args.profile
+            );
+        }
+        if args.repair && !r.errors.is_empty() {
+            println!(
+                "  Back up now: what is missing is stored again from the files that still have it. What is left after that is gone from the files too."
             );
         }
         if !args.read_data && r.errors.is_empty() {

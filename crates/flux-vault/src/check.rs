@@ -1,5 +1,7 @@
 //! Verify a Vault: structure always, every stored byte on request, and (on request)
-//! repair what is damaged from its repair data ([`crate::protect`]).
+//! repair what is damaged from its repair data ([`crate::protect`]). What a repair can't
+//! rebuild it takes out of the index ([`crate::heal`]), so that the next backup stores it
+//! again from the files that still have it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -45,7 +47,10 @@ pub struct CheckOptions {
     /// Read every stored byte and verify it.
     pub read_data: bool,
     /// Rebuild what is damaged from its repair data, write damaged repair data again,
-    /// and (if the Vault is written with repair data) add it where it's missing.
+    /// and (if the Vault is written with repair data) add it where it's missing. An
+    /// index that can't be read is written again from the packs; packs that are missing
+    /// or can't be rebuilt leave the index, with what could still be read of them moved
+    /// to a new pack (see [`crate::heal`]).
     pub repair: bool,
 }
 
@@ -139,7 +144,9 @@ pub fn check_with(
     report: Reporter<'_>,
 ) -> Result<CheckReport, VaultError> {
     let read_data = opts.read_data;
-    let _lock = repo.lock(false)?;
+    // Shared, as a backup's; exclusive (a prune's) once the index has to be rewritten.
+    let mut lock = Some(repo.lock(false)?);
+    let mut exclusive = false;
     let mut r = CheckReport::default();
     progress.set_phase(Phase::Scanning);
     report(Event::Phase {
@@ -151,6 +158,22 @@ pub fn check_with(
     repo.invalidate_index();
     let index = match repo.index() {
         Ok(i) => i,
+        // An index file that doesn't open and that no repair data rebuilt: the packs
+        // say what they hold.
+        Err(e @ (VaultError::Corrupt(_) | VaultError::Crypto(_))) if opts.repair => {
+            take_exclusive(repo, &mut lock, &mut exclusive)?;
+            let rebuilt = crate::heal::rebuild_index(repo)?;
+            r.repaired.push(format!(
+                "the index couldn't be read ({e}); it was written again from the {} packs' own lists of what they hold",
+                rebuilt.packs
+            ));
+            for hex in rebuilt.unreadable {
+                r.errors.push(format!(
+                    "pack {hex}: its list of what it holds can't be read, so it isn't in the rebuilt index"
+                ));
+            }
+            repo.index()?
+        }
         // An index file that doesn't open, and can be rebuilt: say that, not only that
         // the check couldn't run.
         Err(e) if r.repairable > 0 => {
@@ -159,25 +182,64 @@ pub fn check_with(
         }
         Err(e) => return Err(e),
     };
-    let on_disk: HashMap<String, u64> = repo
-        .backend()
-        .list("data")
-        .map_err(|e| VaultError::io("data", e))?
-        .into_iter()
-        .collect();
-    let mut by_pack: HashMap<BlobId, Vec<BlobId>> = HashMap::new();
-    for (id, loc) in &index.map {
-        by_pack.entry(loc.pack).or_default().push(*id);
-    }
-    r.packs = by_pack.len() as u64;
-    r.blobs = index.map.len() as u64;
-    let indexed: HashSet<String> = by_pack.keys().map(|p| hex_id(p)).collect();
+    let mut layout = Layout::of(repo, index)?;
     // Repairing: read (and repair) the packs first, so that what follows checks the
     // Vault as repaired.
     if read_data && opts.repair {
-        read_packs(repo, opts, &on_disk, &indexed, progress, report, &mut r)?;
+        let mut lost = read_packs(
+            repo,
+            opts,
+            &layout.on_disk,
+            &layout.indexed,
+            progress,
+            report,
+            &mut r,
+        )?;
+        // Packs the index names that aren't there at all.
+        for (pack, blobs) in &layout.by_pack {
+            let hex = hex_id(pack);
+            if !layout.on_disk.contains_key(&hex) {
+                lost.push((hex, format!("it is missing ({} blobs)", blobs.len())));
+            }
+        }
+        if !lost.is_empty() {
+            match take_exclusive(repo, &mut lock, &mut exclusive) {
+                Ok(()) => {
+                    let names: HashSet<String> = lost.iter().map(|(n, _)| n.clone()).collect();
+                    let why: HashMap<&str, &str> =
+                        lost.iter().map(|(n, w)| (n.as_str(), w.as_str())).collect();
+                    for d in crate::heal::drop_lost(repo, &names)? {
+                        r.repaired.push(format!(
+                            "pack {}: {}. {} of its {} pieces still read and were moved to a new pack; the other {} were taken out of the index, and the next backup stores them again from the files that still have them",
+                            d.pack,
+                            why.get(d.pack.as_str()).copied().unwrap_or("damaged"),
+                            d.saved,
+                            d.saved + d.lost,
+                            d.lost
+                        ));
+                    }
+                    layout = Layout::of(repo, repo.index()?)?;
+                }
+                // In use by another job: said as it was found, to be tried again.
+                Err(e) => {
+                    for (name, why) in &lost {
+                        r.errors.push(format!(
+                            "pack {name}: {why}; it couldn't be taken out of the index now ({e})"
+                        ));
+                    }
+                }
+            }
+        }
         progress.set_phase(Phase::Scanning);
     }
+    let Layout {
+        index,
+        on_disk,
+        by_pack,
+        indexed,
+    } = layout;
+    r.packs = by_pack.len() as u64;
+    r.blobs = index.map.len() as u64;
     let errors = Mutex::new(Vec::new());
     // The headers a few hundred packs at a time, each batch in a handful of reads: one
     // by one this is two reads a pack, an hour and more for a big Vault on a server.
@@ -293,21 +355,85 @@ pub fn check_with(
 
     // 3. Optionally read and verify every pack (when repairing, this came first).
     if read_data && !opts.repair {
-        read_packs(repo, opts, &on_disk, &indexed, progress, report, &mut r)?;
+        for (name, why) in read_packs(repo, opts, &on_disk, &indexed, progress, report, &mut r)? {
+            r.errors.push(format!("pack {name}: {why}"));
+        }
     }
     if opts.repair {
         r.parity_added += protect::tidy(repo)?.added;
     }
     r.errors.sort();
     r.repaired.sort();
+    drop(lock);
     progress.set_phase(Phase::Done);
     Ok(r)
+}
+
+/// Give up the shared lock for the exclusive one (once): the index is about to be
+/// rewritten, which no backup may be in the middle of. If another job holds the Vault,
+/// the shared lock is taken again and the error says who.
+fn take_exclusive(
+    repo: &VaultRepo,
+    lock: &mut Option<crate::backend::LockGuard>,
+    exclusive: &mut bool,
+) -> Result<(), VaultError> {
+    if *exclusive {
+        return Ok(());
+    }
+    *lock = None;
+    match repo.lock(true) {
+        Ok(l) => {
+            *lock = Some(l);
+            *exclusive = true;
+            Ok(())
+        }
+        Err(e) => {
+            *lock = repo.lock(false).ok();
+            Err(e)
+        }
+    }
+}
+
+/// The index, and the packs on disk it is checked against.
+struct Layout {
+    index: std::sync::Arc<crate::pack::Index>,
+    /// Pack files there: name and size.
+    on_disk: HashMap<String, u64>,
+    /// The blobs the index places in each pack.
+    by_pack: HashMap<BlobId, Vec<BlobId>>,
+    /// The packs the index names.
+    indexed: HashSet<String>,
+}
+
+impl Layout {
+    fn of(repo: &VaultRepo, index: std::sync::Arc<crate::pack::Index>) -> Result<Self, VaultError> {
+        let on_disk: HashMap<String, u64> = repo
+            .backend()
+            .list("data")
+            .map_err(|e| VaultError::io("data", e))?
+            .into_iter()
+            .collect();
+        let mut by_pack: HashMap<BlobId, Vec<BlobId>> = HashMap::new();
+        for (id, loc) in &index.map {
+            by_pack.entry(loc.pack).or_default().push(*id);
+        }
+        let indexed = by_pack.keys().map(|p| hex_id(p)).collect();
+        Ok(Self {
+            index,
+            on_disk,
+            by_pack,
+            indexed,
+        })
+    }
 }
 
 /// Read every pack the index names and verify it: its bytes are its name, and every blob
 /// in it decodes. A pack that fails and has repair data is rebuilt from it (`opts.repair`)
 /// or reported as repairable; the repair data of the sound ones is checked as well, and
 /// (repairing, in a Vault written with repair data) added where it's missing.
+///
+/// Returns the packs that fail and can't be rebuilt (name, and what is wrong in words):
+/// errors for a check, and for a repair what [`crate::heal::drop_lost`] takes out.
 fn read_packs(
     repo: &VaultRepo,
     opts: CheckOptions,
@@ -316,7 +442,7 @@ fn read_packs(
     progress: &Progress,
     report: Reporter<'_>,
     r: &mut CheckReport,
-) -> Result<(), VaultError> {
+) -> Result<Vec<(String, String)>, VaultError> {
     progress.set_phase(Phase::Transferring);
     report(Event::Phase {
         phase: Phase::Transferring,
@@ -343,6 +469,8 @@ fn read_packs(
         repaired: Vec<String>,
         repairable: u64,
         added: u64,
+        /// Packs that fail and can't be rebuilt: name and what is wrong, in words.
+        lost: Vec<(String, String)>,
     }
     let found = Mutex::new(Found::default());
     packs.par_iter().for_each(|(name, size)| {
@@ -412,10 +540,11 @@ fn read_packs(
                         f.errors
                             .push(format!("pack {name}: {why} (its repair data can rebuild it)"));
                     }
-                    Fix::NoParity => f.errors.push(format!("pack {name}: {why}")),
-                    Fix::Beyond(beyond) => f
-                        .errors
-                        .push(format!("pack {name}: {why}; it can't be repaired: {beyond}")),
+                    Fix::NoParity => f.lost.push(((*name).clone(), why)),
+                    Fix::Beyond(beyond) => f.lost.push((
+                        (*name).clone(),
+                        format!("{why}; it can't be repaired: {beyond}"),
+                    )),
                 }
             }
         }
@@ -433,7 +562,7 @@ fn read_packs(
     if progress.is_cancelled() {
         return Err(VaultError::Cancelled);
     }
-    Ok(())
+    Ok(found.lost)
 }
 
 /// Holes in order, not overlapping, not empty, and inside the file.

@@ -4454,3 +4454,45 @@ The item phase 107 left: the sources were scanned for the look and again for the
 - [ ] Not done: a Mirror copy can't tell snapshots lost at the source from snapshots
       pruned there (only the all-gone case is caught); the Vault isn't healed from its
       copy (the warning says to check it; the packs can be copied back by hand)
+
+### Phase 167 — A damaged Vault heals from the files (2026-11-12)
+- [x] Third finding of the engine review. Confirmed with made-up files: a pack damaged
+      beyond repair, every source file touched and backed up again: "read 5.9 MiB,
+      stored 0 B", a new snapshot marked ok that counts on the damaged blob, and the
+      check failing as before. Why: `Seen::claim` and the reuse of a parent's content
+      ask only whether the index has a blob. And one index file that doesn't open failed
+      `Index::load`, with nothing to rebuild it from but repair data
+- [x] `flux-vault/heal.rs`. `drop_lost`: for packs that are missing or fail and can't
+      be rebuilt, every blob that still decodes to its id goes to a new pack, the others
+      leave the index; a new index supersedes all, then the old index files and the
+      lost packs (and their parity) are removed, in a prune's order. `rebuild_index`:
+      the index from every pack's header (blob ranges checked against the pack's size;
+      unreadable headers left out and reported), superseding every index file there is.
+      A lost pack is removed, not left unlisted: a later rebuild would list it again
+- [x] `check_with` with `repair`: an index that fails as `Corrupt`/`Crypto` is rebuilt;
+      after the packs are read, the ones `read_packs` now returns as lost (no parity, or
+      beyond it) and the ones missing go to `drop_lost`; the layout is read again, so
+      the structure check that follows reports what is missing by snapshot and file.
+      The shared lock is given up for the exclusive one only when the index has to be
+      rewritten; if another job holds the Vault, the packs are reported as before
+- [x] `flux check --repair` on any Vault (its help and manual say what it does); a check
+      that finds damage it can't rebuild says to run it and back up; the monthly check's
+      notification no longer says every repair came from repair data
+- [x] Tests (`tests/repair.rs`): no backup heals before the repair, the next one after
+      it does and the first snapshot reads back the same (a damaged pack, then a
+      missing one, no repair data); what the files no longer have stays reported for
+      its snapshot; an unreadable index rebuilt, everything reads, a later backup stores
+      nothing twice; `damaged_packs_are_rebuilt` now ends with the heal instead of the
+      pack left half
+- [x] End to end with the CLI on the scratch Vault: 2 problems after the repair, 0
+      after the next backup (400 KiB stored again)
+- [x] USER_GUIDE (*Checking your backups*, *Repair data*), VAULT_FORMAT (*Healing*),
+      site guide (the command's comment), manual, CHANGELOG
+- [x] Checks: fmt, clippy on the workspace (clean), all workspace tests
+- [ ] Not done: the monthly check repairs only Vaults that keep repair data, so one
+      without is healed by hand (`flux check --repair`), not automatically; the app has
+      no button for it beyond what *Verify every byte* already does for Vaults with
+      repair data; the Vault isn't healed from a copy in another place
+- [ ] Left from the review, not asked for: Mirror keeps no checksum unless change
+      detection is by checksum; an SSH Mirror's snapshot isn't synced before its rename;
+      `config` has no repair data until the first prune or repair; the smaller items

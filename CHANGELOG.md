@@ -88,6 +88,18 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   as they are copied, and a damaged one never replaces the copy's own. Files the Vault
   has lost, as opposed to pruned, stay in the copy, with a warning to check the Vault.
   A Mirror or rsync backup that has lost every snapshot no longer empties its copy.
+- **A damaged Vault can heal from your files.** A backup stores only what the Vault
+  doesn't already list. Data the Vault listed but could no longer read (a stored file
+  damaged past its repair data, or gone, or a Vault with no repair data) was therefore
+  never stored again: every later backup reported success and counted on it.
+  `flux check --repair` now takes such data off the Vault's list, keeping every piece
+  that still reads, and the next backup stores it again from your files, which also
+  puts older snapshots right where the files haven't changed. A check afterwards lists
+  what is gone for good, by snapshot and file. It works for every Vault, with or
+  without repair data, and a check that finds such damage says to run it.
+- **A Vault whose index can't be read is no longer stuck.** `flux check --repair`
+  writes the index again from the stored files themselves, each of which lists what it
+  holds.
 
 ## [1.2.1] - 2026-11-12
 

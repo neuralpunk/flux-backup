@@ -16,6 +16,7 @@ pub mod crypto;
 pub mod format;
 pub mod gc;
 pub mod gf256;
+pub mod heal;
 pub mod pack;
 pub mod parity;
 pub mod protect;
