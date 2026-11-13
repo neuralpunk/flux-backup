@@ -634,3 +634,74 @@ fn sectors_that_cannot_be_read_are_rebuilt() {
     assert!(e.read_all(&repo, &snap) == before);
     assert!(full(&repo).ok());
 }
+
+/// Two snapshots sharing one pack, the first holding files the second doesn't: deleting
+/// the first leaves that pack mostly unused, so it is repacked.
+fn vault_with_a_pack_to_repack(e: &Env, parity: u8) -> (VaultRepo, String, String) {
+    for i in 0..6 {
+        fs::write(e.src.join(format!("keep{i}")), noise(600 << 10, i + 1)).unwrap();
+        fs::write(e.src.join(format!("drop{i}")), noise(600 << 10, i + 100)).unwrap();
+    }
+    let repo = e.init(Some(PW), parity);
+    let first = e.snap(&repo);
+    for i in 0..6 {
+        fs::remove_file(e.src.join(format!("drop{i}"))).unwrap();
+    }
+    let second = e.snap(&repo);
+    (repo, first, second)
+}
+
+/// A pack that bit rot reached is repaired before a prune repacks it. Repacked as it
+/// was, its damaged blobs went into a new pack under a new name, with new repair data
+/// made from the damage, and the repair data that could have put them right was deleted.
+#[test]
+fn a_damaged_pack_is_repaired_before_it_is_repacked() {
+    let e = env();
+    let (repo, first, second) = vault_with_a_pack_to_repack(&e, 10);
+    let before = e.read_all(&repo, &second);
+    let victim = e.biggest_pack();
+    let len = fs::metadata(&victim).unwrap().len() as usize;
+    damage(&victim, |b| {
+        for at in [len / 10, len / 2, len * 85 / 100] {
+            b[at] ^= 0xff;
+        }
+    });
+    assert_eq!(full(&repo).repairable, 1);
+
+    let gc = gc::delete(&repo, &[first.as_str()], &silent).unwrap();
+    assert_eq!((gc.packs_repaired, gc.packs_damaged), (1, 0), "{gc:?}");
+    assert!(gc.packs_repacked >= 1, "{gc:?}");
+    assert!(!victim.exists(), "repacked");
+    let after = full(&repo);
+    assert!(after.ok(), "{:?}", after.errors);
+    assert!(e.read_all(&repo, &second) == before);
+}
+
+/// A damaged pack that can't be rebuilt (here: no repair data) is not repacked: it stays
+/// under its name, in the index, so a check names it and whatever can still be read from
+/// it can be. The rest of the prune goes on.
+#[test]
+fn a_damaged_pack_beyond_repair_is_left_as_it_is() {
+    let e = env();
+    let (repo, first, second) = vault_with_a_pack_to_repack(&e, 0);
+    let victim = e.biggest_pack();
+    let len = fs::metadata(&victim).unwrap().len() as usize;
+    damage(&victim, |b| b[len / 2] ^= 0xff);
+    let damaged = fs::read(&victim).unwrap();
+
+    let gc = gc::delete(&repo, &[first.as_str()], &silent).unwrap();
+    assert_eq!((gc.packs_repaired, gc.packs_damaged), (0, 1), "{gc:?}");
+    assert!(fs::read(&victim).unwrap() == damaged, "untouched");
+    assert!(
+        repo.read_record(&first).is_err(),
+        "the snapshot is deleted all the same"
+    );
+    assert_eq!(repo.read_record(&second).unwrap().meta.id, second);
+    let name = victim.file_name().unwrap().to_string_lossy().into_owned();
+    let found = full(&repo);
+    assert!(
+        found.errors.iter().any(|m| m.contains(&name)),
+        "the check names the pack that was damaged: {:?}",
+        found.errors
+    );
+}

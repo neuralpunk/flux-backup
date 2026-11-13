@@ -27,6 +27,12 @@ pub struct GcReport {
     /// Packs that no index referenced (left by interrupted backups).
     pub orphan_packs: u64,
     pub bytes_freed: u64,
+    /// Packs found damaged when they were to be repacked, and rebuilt from their repair
+    /// data first.
+    pub packs_repaired: u64,
+    /// Packs found damaged that couldn't be rebuilt: left exactly as they were (with
+    /// their repair data), not repacked.
+    pub packs_damaged: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +128,29 @@ pub fn collect(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vault
     gc_locked(repo, report)
 }
 
+/// The bytes of pack `hex`, if they are what its name says: as read, or (the pack is
+/// damaged or can't be read, and has repair data that rebuilds it) after repairing it in
+/// place; the flag says which. Otherwise why not, in words.
+fn sound_pack(repo: &VaultRepo, hex: &str, size: u64) -> Result<(Vec<u8>, bool), String> {
+    use crate::protect::{self, Fix};
+    let backend = repo.backend();
+    let path = pack_path(hex);
+    let why = match backend.read(&path) {
+        Ok(bytes) if protect::pack_is_sound(hex, &bytes) => return Ok((bytes, false)),
+        Ok(_) => "its contents do not match its name".to_owned(),
+        Err(e) => format!("it can't be read: {e}"),
+    };
+    let sound = |b: &[u8]| protect::pack_is_sound(hex, b);
+    match protect::repair(backend, &path, size, &sound, true) {
+        Ok(Fix::Repaired { .. }) => match backend.read(&path) {
+            Ok(bytes) if sound(&bytes) => Ok((bytes, true)),
+            _ => Err(format!("{why}, and the repaired pack doesn't read back")),
+        },
+        Ok(fix) => Err(format!("{why}; {}", protect::words(&fix))),
+        Err(e) => Err(format!("{why}; {e}")),
+    }
+}
+
 /// Delete data no snapshot uses. Caller holds the exclusive lock.
 pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, VaultError> {
     let mut out = GcReport::default();
@@ -194,13 +223,37 @@ pub fn gc_locked(repo: &VaultRepo, report: Reporter<'_>) -> Result<GcReport, Vau
     // `Backend::write_pack_cached`).
     let data_packer = Packer::for_repo(repo).cached();
     let tree_packer = Packer::for_repo(repo).cached();
-    for (pack, _) in &repack {
-        let hex = hex_id(pack);
+    for (pack, blobs) in repack {
+        let hex = hex_id(&pack);
         let path = pack_path(&hex);
-        let bytes = repo
-            .backend()
-            .read(&path)
-            .map_err(|e| VaultError::io(&path, e))?;
+        // Only a pack that is what its name says is taken apart. Its blobs are copied as
+        // they lie, sealed: a damaged one would go into a new pack under a new name, with
+        // new repair data made from the damage, and the pack and the repair data that
+        // could have put it right would be deleted.
+        let bytes = match sound_pack(repo, &hex, sizes.get(&hex).copied().unwrap_or(0)) {
+            Ok((bytes, repaired)) => {
+                if repaired {
+                    out.packs_repaired += 1;
+                    report(Event::Info {
+                        message: format!(
+                            "pack {hex} was damaged; rebuilt from its repair data before repacking"
+                        ),
+                    });
+                }
+                bytes
+            }
+            Err(why) => {
+                out.packs_damaged += 1;
+                report(Event::Warning {
+                    path: path.clone(),
+                    message: format!(
+                        "pack {hex} is damaged ({why}); it was left as it is, not repacked. Check the backup: flux check --read-data"
+                    ),
+                });
+                keep.push(IndexPack { pack, blobs });
+                continue;
+            }
+        };
         for e in split_pack(&repo.crypto, &hex, &bytes)? {
             if used.contains(&e.id) {
                 let sealed = &bytes[e.offset as usize..(e.offset + e.length) as usize];

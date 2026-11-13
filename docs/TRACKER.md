@@ -4405,3 +4405,24 @@ The item phase 107 left: the sources were scanned for the look and again for the
       *Some files at random* chosen, the guide's formats. svelte-check (0, 0), app tests
 - [ ] Other lists of choices (Flux Sentry's, the drives, a new copy's, the recover dialog,
       password hashing…) keep their own marks; to bring them to `.choice` too
+
+### Phase 165 — A prune never repacks a damaged pack (2026-11-12)
+- [x] From a review of the Mirror and Vault engines asked for by the owner (designed to
+      the standard of restic and Borg? can a backup be lost by design?). Confirmed with
+      made-up files in a scratch `FLUX_HOME`: a Vault with 10% repair data, three bytes
+      flipped in a pack; `flux check --read-data` said repairable; after `flux delete`
+      of an older snapshot (which repacked that pack) `flux check --repair` said "it
+      can't be repaired". Repairing first, then deleting: 0 problems
+- [x] Why: `gc_locked` copied the sealed blobs of a pack to repack without checking the
+      pack against its name; the new pack got a new name and new parity made from the
+      damaged bytes, and the old pack and its parity were removed
+- [x] `gc.rs` `sound_pack`: a pack is repacked only if its BLAKE3 is its name; else it
+      is rebuilt from its parity (`protect::repair`) and read again; else it stays as it
+      is, in the new index, with a warning naming it. A pack that can't be read at all
+      goes the same way instead of ending the prune. `GcReport`: `packs_repaired`,
+      `packs_damaged`
+- [x] Tests (`tests/repair.rs`): repaired before it is repacked (the snapshot reads back
+      the same, the check is clean); beyond repair (no parity) left byte for byte, the
+      snapshot still deleted, the check names the pack
+- [x] VAULT_FORMAT (crash safety), USER_GUIDE (*Repair data*), CHANGELOG (1.3.0, Fixed)
+- [x] Checks: `cargo fmt`, clippy on flux-vault (clean), flux-vault tests (70 pass)

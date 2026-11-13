@@ -71,6 +71,16 @@ Speed: Flux doing the same work with less of the computer, so a backup runs as f
   choosing a Vault always meant a password, and turning encryption off switched to plain
   folders. The setup no longer calls a Vault "Encrypted" whatever the choice.
 
+### Fixed
+
+- **Removing old snapshots can no longer make damage in a Vault permanent.** When a
+  prune moves the pieces still needed out of a mostly unused pack, it copied them as
+  they were on the drive. If the drive had damaged that pack, the damage went into the
+  new pack, new repair data was made from it, and the old pack and the repair data that
+  could have fixed it were deleted. A prune now checks each pack before moving anything
+  out of it: a damaged one is rebuilt from its repair data first, and one that can't be
+  rebuilt is left exactly as it is, and reported.
+
 ## [1.2.1] - 2026-11-12
 
 A fix for starting at login, and a nudge to keep a Borg backup's key safe.

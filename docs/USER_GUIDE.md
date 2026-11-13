@@ -1324,6 +1324,11 @@ on (it reads everything anyway), and writes again repair data that is itself dam
 The storage summary on the Overview says how much there is and whether it covers
 everything.
 
+Removing old snapshots checks what it moves, too. When a prune copies the pieces still
+needed out of a mostly unused pack, it first makes sure the pack is undamaged; a damaged
+one is rebuilt from its repair data, or, if it can't be, left exactly as it is (and the
+run says so) so that nothing that could still repair it is thrown away.
+
 How it works, and how much it repairs: each stored file is cut into 4 KiB blocks, and
 Reed–Solomon parity blocks are computed over groups of up to about 240 of them (the
 arithmetic of RAID 6 and PAR2). With 5%, a group gets 13 parity blocks and can lose

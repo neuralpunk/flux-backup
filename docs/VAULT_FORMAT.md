@@ -218,6 +218,11 @@ is written in its tree format (a backup writes all of its trees).
 * Prune order: delete snapshot records → write repacked packs → write the new index
   (superseding all old ones) → delete old index files → delete unused packs. After a crash,
   every snapshot still present is fully readable.
+* A pack is repacked only if its bytes are its name (its BLAKE3). Its blobs are copied
+  sealed, as they lie, so a damaged pack would otherwise pass its damage on under a new
+  name, with new repair data made from the damage. One that fails is rebuilt from its
+  repair data first; one that can't be stays as it is, in the new index, with its parity
+  file, and the prune goes on with the rest.
 
 ## Repair data
 
